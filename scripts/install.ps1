@@ -237,19 +237,22 @@ Write-Warn2 "Restart your terminal for this to apply everywhere"
 Write-Step "Verifying install"
 
 try {
+    $akkPath = Join-Path $InstallDir $BinName
 
-```
-& (Join-Path $InstallDir $BinName) --version | Out-Null
+    $process = Start-Process `
+        -FilePath $akkPath `
+        -ArgumentList "--version" `
+        -Wait `
+        -PassThru `
+        -NoNewWindow
 
-Write-Ok "akk runs correctly"
-```
-
+    if ($process.ExitCode -eq 0) {
+        Write-Ok "akk runs correctly"
+    } else {
+        Write-Warn2 "installed but 'akk --version' returned exit code $($process.ExitCode)"
+    }
 } catch {
-
-```
-Write-Warn2 "installed but 'akk --version' didn't run cleanly -- check manually"
-```
-
+    Write-Warn2 "installed but 'akk --version' didn't run cleanly -- check manually"
 }
 
 # ---------------------------------------------------------------------
