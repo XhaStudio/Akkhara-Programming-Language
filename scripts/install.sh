@@ -18,9 +18,9 @@
 set -eu
 
 # ---------------------------------------------------------------------
-# Config -- change REPO to your actual GitHub "owner/repo"
+# Config -- Akkhara GitHub repository
 # ---------------------------------------------------------------------
-REPO="${AKK_REPO:-yourusername/akkhara}"
+REPO="${AKK_REPO:-XhaStudio/akkhara}"
 BIN_NAME="akk"
 INSTALL_DIR="${AKK_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${AKK_VERSION:-latest}"
