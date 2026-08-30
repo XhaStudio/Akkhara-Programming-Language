@@ -145,11 +145,33 @@ if (-not (Test-Path $exeSource)) {
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
-Copy-Item -Path $exeSource -Destination (Join-Path $InstallDir $BinName) -Force
+$destPath = Join-Path $InstallDir $BinName
+
+if (Test-Path $destPath) {
+    # If akk.exe already exists, it may be the very process that invoked
+    # this installer (e.g. via "akk update"), so it's still running and
+    # its file content is locked -- Copy-Item -Force would fail with
+    # "used by another process". Windows *does* allow renaming or deleting
+    # a running executable's directory entry (just not overwriting its
+    # content in place), so rename it out of the way first.
+    Remove-Item -Path "$destPath.old" -Force -ErrorAction SilentlyContinue
+    try {
+        Rename-Item -Path $destPath -NewName "$BinName.old" -Force -ErrorAction Stop
+    } catch {
+        Write-Fail "could not replace $destPath -- it may be locked. Close any running 'akk' processes and try again."
+    }
+}
+
+Copy-Item -Path $exeSource -Destination $destPath -Force
+
+# Best-effort cleanup of the renamed-aside old binary. This can still fail
+# if something else has it locked; that's fine, it'll just linger harmlessly
+# and get cleaned up on the next update.
+Remove-Item -Path "$destPath.old" -Force -ErrorAction SilentlyContinue
 
 Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Ok "Installed to $(Join-Path $InstallDir $BinName)"
+Write-Ok "Installed to $destPath"
 
 # ---------------------------------------------------------------------
 # 4. Add to User PATH if needed
