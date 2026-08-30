@@ -20,7 +20,7 @@ set -eu
 # ---------------------------------------------------------------------
 # Config -- Akkhara GitHub repository
 # ---------------------------------------------------------------------
-REPO="${AKK_REPO:-XhaStudio/akkhara}"
+REPO="${AKK_REPO:-XhaStudio/Akkhara-Programming-Language}"
 BIN_NAME="akk"
 INSTALL_DIR="${AKK_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${AKK_VERSION:-latest}"
