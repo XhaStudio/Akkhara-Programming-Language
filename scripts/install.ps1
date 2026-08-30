@@ -95,20 +95,9 @@ Write-Step "Detecting platform"
 $arch = $env:PROCESSOR_ARCHITECTURE
 
 switch ($arch) {
-"AMD64" {
-$target = "x86_64-pc-windows-msvc"
-}
-
-```
-"ARM64" {
-    Write-Fail "arm64 Windows builds aren't published yet."
-}
-
-default {
-    Write-Fail "unsupported architecture: $arch"
-}
-```
-
+    "AMD64" { $target = "x86_64-pc-windows-msvc" }
+    "ARM64" { Write-Fail "arm64 Windows builds aren't published yet." }
+    default { Write-Fail "unsupported architecture: $arch" }
 }
 
 Write-Ok "Detected $target"
