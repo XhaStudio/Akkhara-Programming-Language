@@ -65,7 +65,7 @@ exit 1
 $Repo = if ($env:AKK_REPO) {
 $env:AKK_REPO
 } else {
-"XhaStudio/akkhara"
+"XhaStudio/Akkhara-Programming-Language"
 }
 
 $Version = if ($env:AKK_VERSION) {
