@@ -266,7 +266,7 @@ impl Interpreter {
                     iterations += 1;
                     if iterations > MAX_ITERS {
                         return Err(format!(
-                            "လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
+                            "E046 လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
                             line
                         ));
                     }
@@ -291,7 +291,7 @@ impl Interpreter {
                     Some(v) => v.clone(),
                     None => {
                         return Err(format!(
-                            "လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                            "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
                             line, name
                         ));
                     }
@@ -302,7 +302,7 @@ impl Interpreter {
                 };
                 if provided.len() != params.len() {
                     return Err(format!(
-                        "လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                        "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                         line,
                         name,
                         params.len(),
@@ -332,7 +332,7 @@ impl Interpreter {
                         }
                         _ => {
                             return Err(format!(
-                                "လိုင်း {} တွင် \"{}\" class အတွင်း method (function) များသာ ပါဝင်နိုင်ပါသည်။",
+                                "E027 လိုင်း {} တွင် \"{}\" class အတွင်း method (function) များသာ ပါဝင်နိုင်ပါသည်။",
                                 line, name
                             ));
                         }
@@ -340,7 +340,7 @@ impl Interpreter {
                 }
                 if methods.is_empty() {
                     return Err(format!(
-                        "လိုင်း {} တွင် \"{}\" class သည် constructor method အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
+                        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor method အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
                         line, name
                     ));
                 }
@@ -359,9 +359,48 @@ impl Interpreter {
                         Ok(())
                     }
                     None => Err(format!(
-                        "လိုင်း {} တွင် \"တန်ဖိုး\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+                        "E035 လိုင်း {} တွင် \"တန်ဖိုး\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
                         line
                     )),
+                }
+            }
+            Stmt::TryCatch {
+                try_body,
+                catch_err,
+                catch_var,
+                catch_body,
+                finally_body,
+                line: _,
+            } => {
+                let try_result = self.run(try_body);
+                match try_result {
+                    Ok(()) => {
+                        if let Some(fb) = finally_body {
+                            self.run(fb)?;
+                        }
+                        Ok(())
+                    }
+                    Err(err_msg) => {
+                        let err_code = extract_error_code(&err_msg);
+                        let matched = match (catch_err, catch_body) {
+                            (Some(name), Some(cb)) => {
+                                // "E" matches any error; otherwise must match exactly.
+                                if name == "E" || *name == err_code {
+                                    if let Some(cv) = catch_var {
+                                        self.env.insert(cv.clone(), Value::Str(err_code));
+                                    }
+                                    self.run(cb)
+                                } else {
+                                    Err(err_msg.clone())
+                                }
+                            }
+                            _ => Err(err_msg.clone()),
+                        };
+                        if let Some(fb) = finally_body {
+                            self.run(fb)?;
+                        }
+                        matched
+                    }
                 }
             }
         }
@@ -390,14 +429,14 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
                 }
                 if !closed {
                     return Err(format!(
-                        "လိုင်း {} တွင် string ထဲက \"{{\" ကိုပိတ်ရန် \"}}\" မရှိပါ။",
+                        "E056 လိုင်း {} တွင် string ထဲက \"{{\" ကိုပိတ်ရန် \"}}\" မရှိပါ။",
                         line
                     ));
                 }
                 let trimmed = name.trim();
                 if trimmed.is_empty() {
                     return Err(format!(
-                        "လိုင်း {} တွင် string interpolation \"{{}}\" ထဲမှာ variable အမည် လိုအပ်ပါသည်။",
+                        "E057 လိုင်း {} တွင် string interpolation \"{{}}\" ထဲမှာ variable အမည် လိုအပ်ပါသည်။",
                         line
                     ));
                 }
@@ -408,13 +447,13 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
                     let field_name = field_name.trim();
                     if field_name.is_empty() {
                         return Err(format!(
-                            "လိုင်း {} တွင် string interpolation \"{{{}}}\" ထဲမှာ field အမည် လိုအပ်ပါသည်။",
+                            "E059 လိုင်း {} တွင် string interpolation \"{{{}}}\" ထဲမှာ field အမည် လိုအပ်ပါသည်။",
                             line, trimmed
                         ));
                     }
                     let fields = self.self_stack.last().ok_or_else(|| {
                         format!(
-                            "လိုင်း {} တွင် \"{{{}}}\" ကို class method အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+                            "E060 လိုင်း {} တွင် \"{{{}}}\" ကို class method အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
                             line, trimmed
                         )
                     })?;
@@ -424,7 +463,7 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
                         .map(|(_, v)| v)
                         .ok_or_else(|| {
                             format!(
-                                "လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော field ကို ရှာမတွေ့ပါ။",
+                                "E059 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော field ကို ရှာမတွေ့ပါ။",
                                 line, trimmed, field_name
                             )
                         })?;
@@ -433,7 +472,7 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
                 }
                 let val = self.env.get(trimmed).ok_or_else(|| {
                     format!(
-                        "လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                        "E058 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
                         line, trimmed, trimmed
                     )
                 })?;
@@ -485,7 +524,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             _ => match lv {
                 Value::Bool(b) => Ok(b),
                 other => Err(format!(
-                    "လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+                    "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
                     atom.line,
                     type_name_mm(&other)
                 )),
@@ -603,18 +642,18 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 if s.contains('.') {
                     s.parse::<f64>()
                         .map(Value::Float)
-                        .map_err(|_| format!("လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
+                        .map_err(|_| format!("E047 လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
                 } else {
                     s.parse::<i64>()
                         .map(Value::Int)
-                        .map_err(|_| format!("လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
+                        .map_err(|_| format!("E047 လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
                 }
             }
             Expr::StrLit(s) => Ok(Value::Str(self.interpolate(s, line)?)),
             Expr::BoolLit(b) => Ok(Value::Bool(*b)),
             Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
                 format!(
-                    "လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
                     line, name
                 )
             }),
@@ -629,7 +668,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     Value::Int(i) => Ok(Value::Int(-i)),
                     Value::Float(f) => Ok(Value::Float(-f)),
                     other => Err(format!(
-                        "လိုင်း {} တွင် {} ကို အနုတ် (-) လုပ်၍မရပါ။",
+                        "E041 လိုင်း {} တွင် {} ကို အနုတ် (-) လုပ်၍မရပါ။",
                         neg_line,
                         type_name_mm(&other)
                     )),
@@ -704,7 +743,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Some(m) => m.clone(),
             None => {
                 return Err(format!(
-                    "လိုင်း {} တွင် \"{}\" ဆိုသော class ကို ရှာမတွေ့ပါ။",
+                    "E032 လိုင်း {} တွင် \"{}\" ဆိုသော class ကို ရှာမတွေ့ပါ။",
                     line, class_name
                 ));
             }
@@ -714,7 +753,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
 
         if arg_exprs.len() != params.len() {
             return Err(format!(
-                "လိုင်း {} တွင် \"{}\" class ၏ constructor သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                "E034 လိုင်း {} တွင် \"{}\" class ၏ constructor သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                 line,
                 class_name,
                 params.len(),
@@ -745,12 +784,20 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     }
 }
 
+/// Error-code helpers for try/catch. All runtime errors are formatted as
+/// "E### <message>". `<error_name> ကို ဖမ်းပါ` binds the code (e.g. "E030")
+/// into a string variable so scripts can match on it.
+fn extract_error_code(msg: &str) -> String {
+    let code = msg.split_whitespace().next().unwrap_or("E");
+    code.to_string()
+}
+
 fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
     match v {
         Value::Int(i) => Ok(*i),
         Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
         _ => Err(format!(
-            "လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။",
+            "E048 လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။",
             line
         )),
     }
@@ -759,13 +806,13 @@ fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
 fn get_seq_item(items: &[Value], idx: i64, line: usize) -> Result<Value, String> {
     if idx < 0 {
         return Err(format!(
-            "လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
             line, idx
         ));
     }
     items.get(idx as usize).cloned().ok_or_else(|| {
         format!(
-            "လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
             line, idx
         )
     })
@@ -783,14 +830,14 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
             match get_seq_item(items, row, line)? {
                 Value::List(cols) | Value::Tuple(cols) => get_seq_item(&cols, col, line),
                 other => Err(format!(
-                    "လိုင်း {} တွင် {} ကို [row, column] ဖြင့် index ယူ၍မရပါ။",
+                    "E054 လိုင်း {} တွင် {} ကို [row, column] ဖြင့် index ယူ၍မရပါ။",
                     line,
                     type_name_mm(&other)
                 )),
             }
         }
         _ => Err(format!(
-            "လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
+            "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
             line
         )),
     }
@@ -804,7 +851,7 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
         Value::Dict(pairs) => {
             if keys.len() != 1 {
                 return Err(format!(
-                    "လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
+                    "E052 လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
                     line
                 ));
             }
@@ -815,14 +862,14 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
                 .map(|(_, v)| v.clone())
                 .ok_or_else(|| {
                     format!(
-                        "လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။",
+                        "E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။",
                         line,
                         repr(key)
                     )
                 })
         }
         other => Err(format!(
-            "လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
+            "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
             line,
             type_name_mm(other)
         )),
@@ -839,21 +886,21 @@ fn as_f64(v: &Value) -> Option<f64> {
 
 fn loop_not_numeric_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် for loop ၏ အစ/အဆုံး/step တန်ဖိုးများသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+        "E044 လိုင်း {} တွင် for loop ၏ အစ/အဆုံး/step တန်ဖိုးများသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
         line
     )
 }
 
 fn loop_not_iterable_err(line: usize, type_name: &str) -> String {
     format!(
-        "လိုင်း {} တွင် {} ကို for loop ဖြင့် ထပ်ခါထပ်ခါ လည်ပတ်၍မရပါ။",
+        "E045 လိုင်း {} တွင် {} ကို for loop ဖြင့် ထပ်ခါထပ်ခါ လည်ပတ်၍မရပါ။",
         line, type_name
     )
 }
 
 fn cmp_type_err(line: usize, t1: &str, t2: &str, op: &str) -> String {
     format!(
-        "လိုင်း {} တွင် {} နှင့် {} ကို \"{}\" ဖြင့် နှိုင်းယှဉ်၍မရပါ။",
+        "E042 လိုင်း {} တွင် {} နှင့် {} ကို \"{}\" ဖြင့် နှိုင်းယှဉ်၍မရပါ။",
         line, t1, t2, op
     )
 }
@@ -903,10 +950,10 @@ fn binary_op(
         let opn = op_name_mm(op);
         match var_ctx {
             Some(name) => format!(
-                "လိုင်း {} ၏ \"{}\"၌ {} နှင့် {} ကို {}၍မရပါ။",
+                "E040 လိုင်း {} ၏ \"{}\"၌ {} နှင့် {} ကို {}၍မရပါ။",
                 line, name, t1, t2, opn
             ),
-            None => format!("လိုင်း {} တွင် {} နှင့် {} ကို {}၍မရပါ။", line, t1, t2, opn),
+            None => format!("E040 လိုင်း {} တွင် {} နှင့် {} ကို {}၍မရပါ။", line, t1, t2, opn),
         }
     };
 
@@ -924,7 +971,7 @@ fn binary_op(
             '*' => Ok(Value::Int(a * b)),
             '/' => {
                 if *b == 0 {
-                    Err(format!("လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
+                    Err(format!("E036 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
                 } else {
                     Ok(Value::Float(*a as f64 / *b as f64))
                 }
@@ -932,7 +979,7 @@ fn binary_op(
             '%' => {
                 if *b == 0 {
                     Err(format!(
-                        "လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
+                        "E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
                         line
                     ))
                 } else {
@@ -955,7 +1002,7 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
         '*' => Ok(Value::Float(a * b)),
         '/' => {
             if b == 0.0 {
-                Err(format!("လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
+                Err(format!("E037 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
             } else {
                 Ok(Value::Float(a / b))
             }
@@ -963,7 +1010,7 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
         '%' => {
             if b == 0.0 {
                 Err(format!(
-                    "လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
+                    "E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
                     line
                 ))
             } else {
@@ -993,7 +1040,7 @@ fn infer_value(s: &str) -> Value {
 fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, String> {
     let fail = || -> String {
         format!(
-            "လိုင်း {} တွင် {} ကို {}သို့ ပြောင်းလဲ၍ မရပါ။",
+            "E055 လိုင်း {} တွင် {} ကို {}သို့ ပြောင်းလဲ၍ မရပါ။",
             line,
             quoted_display(v),
             target_type
