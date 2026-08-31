@@ -91,6 +91,14 @@ pub enum Stmt {
         value: Expr,
         line: usize,
     },
+    TryCatch {
+        try_body: Vec<Stmt>,
+        catch_err: Option<String>,
+        catch_var: Option<String>,
+        catch_body: Option<Vec<Stmt>>,
+        finally_body: Option<Vec<Stmt>>,
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +172,9 @@ const TC_NUM: &str = "ကိန်း";
 const TC_FLOAT: &str = "ဒဿမကိန်း";
 const TC_BOOL: &str = "မှန်/မှား";
 const KW_LOOP_END: &str = "ပြီး";
+const KW_TRY: &str = "စမ်းရန်";
+const KW_CATCH: &str = "ဖမ်းပါ";
+const KW_FINALLY: &str = "နောက်ဆုံးတွင်";
 
 const KW_IF: &str = "အကယ်၍";
 const KW_ELIF: &str = "သို့မဟုတ်";
@@ -247,11 +258,11 @@ fn is_close(tok: &Tok) -> bool {
 }
 
 fn missing_period_err(line: usize) -> String {
-    format!("လိုင်း {} ၏စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
+    format!("E002 လိုင်း {} ၏စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
 }
 
 fn generic_syntax_err(line: usize) -> String {
-    format!("လိုင်း {} သည် ရေးသားပုံစည်းမျဉ်းမမှန်ကန်ပါ။", line)
+    format!("E001 လိုင်း {} သည် ရေးသားပုံစည်းမျဉ်းမမှန်ကန်ပါ။", line)
 }
 
 fn unclosed_bracket_err(line: usize, open: char) -> String {
@@ -262,21 +273,21 @@ fn unclosed_bracket_err(line: usize, open: char) -> String {
         _ => '?',
     };
     format!(
-        "လိုင်း {} တွင် '{}' ကိုပိတ်ရန် '{}' မရှိပါ။",
+        "E003 လိုင်း {} တွင် '{}' ကိုပိတ်ရန် '{}' မရှိပါ။",
         line, open, close
     )
 }
 
 fn mismatched_bracket_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် ကွင်းများ ({{}}/[]/()) မှန်ကန်စွာ မတွဲထားပါ။",
+        "E004 လိုင်း {} တွင် ကွင်းများ ({{}}/[]/()) မှန်ကန်စွာ မတွဲထားပါ။",
         line
     )
 }
 
 fn dict_entry_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် အဘိဓာန် (dict) အတွင်း <key> သည် <value> ဖြစ်၏။ ပုံစံဖြင့် ရေးရပါမည်။",
+        "E005 လိုင်း {} တွင် အဘိဓာန် (dict) အတွင်း <key> သည် <value> ဖြစ်၏။ ပုံစံဖြင့် ရေးရပါမည်။",
         line
     )
 }
@@ -285,7 +296,7 @@ fn dict_entry_err(line: usize) -> String {
 fn fn_missing_particle_err(line: usize, fname: &str) -> String {
     let full = format!("{}။", fname);
     format!(
-        "လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  \"{}\" ၏အရှေ့၌ \"ကို\" ခံရေးရန်လိုအပ်သည်။",
+        "E006 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  \"{}\" ၏အရှေ့၌ \"ကို\" ခံရေးရန်လိုအပ်သည်။",
         line, full, full
     )
 }
@@ -293,161 +304,161 @@ fn fn_missing_particle_err(line: usize, fname: &str) -> String {
 fn fn_missing_value_err(line: usize, fname: &str) -> String {
     let full = format!("{}။", fname);
     format!(
-        "လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  value မရှိသဖြင့် \"{}\" ကို မလုပ်ဆောင်နိုင်ပါ။",
+        "E007 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  value မရှိသဖြင့် \"{}\" ကို မလုပ်ဆောင်နိုင်ပါ။",
         line, full, full
     )
 }
 
 fn convert_missing_value_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် ပြောင်းလဲရန် တန်ဖိုး လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
+        "E008 လိုင်း {} တွင် ပြောင်းလဲရန် တန်ဖိုး လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
         line
     )
 }
 
 fn convert_missing_type_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် ပြောင်းလဲရန် အမျိုးအစား လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
+        "E009 လိုင်း {} တွင် ပြောင်းလဲရန် အမျိုးအစား လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
         line
     )
 }
 
 fn math_missing_value_err(line: usize, fname: &str) -> String {
     format!(
-        "လိုင်း {} တွင် \"{}\" ကိုလုပ်ဆောင်ရန် value မရှိသဖြင့် \"{}\" ကိုမလုပ်ဆောင်နိုင်ပါ။",
+        "E010 လိုင်း {} တွင် \"{}\" ကိုလုပ်ဆောင်ရန် value မရှိသဖြင့် \"{}\" ကိုမလုပ်ဆောင်နိုင်ပါ။",
         line, fname, fname
     )
 }
 
 fn if_missing_condition_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"အကယ်၍\"/\"သို့မဟုတ်\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        "E011 လိုင်း {} တွင် \"အကယ်၍\"/\"သို့မဟုတ်\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn if_condition_syntax_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်လျှင်",
+        "E012 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်လျှင်",
         line
     )
 }
 
 fn if_missing_then_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
+        "E013 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn if_else_not_last_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"မဟုတ်လျှင်\" (else) ကို \"အကယ်၍\"/\"သို့မဟုတ်\" branch အားလုံးအပြီးမှာသာ တစ်ခုတည်း ထားနိုင်ပါသည်။",
+        "E014 လိုင်း {} တွင် \"မဟုတ်လျှင်\" (else) ကို \"အကယ်၍\"/\"သို့မဟုတ်\" branch အားလုံးအပြီးမှာသာ တစ်ခုတည်း ထားနိုင်ပါသည်။",
         line
     )
 }
 
 fn while_missing_condition_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"အခြေအနေ\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        "E015 လိုင်း {} တွင် \"အခြေအနေ\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn while_condition_syntax_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အခြေအနေ (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်နေစဉ်",
+        "E016 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အခြေအနေ (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်နေစဉ်",
         line
     )
 }
 
 fn while_missing_then_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" လိုအပ်ပါသည်။",
+        "E017 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_missing_name_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"လုပ်ငန်း\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        "E018 လိုင်း {} တွင် \"လုပ်ငန်း\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_bad_param_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        "E019 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_missing_by_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
+        "E020 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_call_bad_name_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
+        "E021 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
         line
     )
 }
 
 fn func_call_missing_particle_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် function ခေါ်ရန် \"<fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        "E022 လိုင်း {} တွင် function ခေါ်ရန် \"<fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
         line
     )
 }
 
 fn func_call_missing_by_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"လုပ်ရန်\" ၏ argument အပြီးမှာ \"ဖြင့်\" လိုအပ်ပါသည်။",
+        "E023 လိုင်း {} တွင် \"လုပ်ရန်\" ၏ argument အပြီးမှာ \"ဖြင့်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_call_missing_arg_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။",
+        "E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn class_missing_name_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
+        "E025 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
         line
     )
 }
 
 fn class_missing_period_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"နည်းလမ်း <class name>\" ၏ အပြီးမှာ \"သည်\" သို့မဟုတ် '။' လိုအပ်ပါသည်။",
+        "E026 လိုင်း {} တွင် \"နည်းလမ်း <class name>\" ၏ အပြီးမှာ \"သည်\" သို့မဟုတ် '။' လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn class_body_not_method_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွင်း \"လုပ်ငန်း\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
+        "E027 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွင်း \"လုပ်ငန်း\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
         line
     )
 }
 
 fn class_missing_constructor_err(line: usize, name: &str) -> String {
     format!(
-        "လိုင်း {} တွင် \"{}\" class သည် constructor အနေဖြင့် method (function) အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
+        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor အနေဖြင့် method (function) အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
         line, name
     )
 }
 
 fn new_obj_missing_class_err(line: usize) -> String {
     format!(
-        "လိုင်း {} တွင် object အသစ်ဖန်တီးမည့် class ကို ရေးပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
+        "E029 လိုင်း {} တွင် object အသစ်ဖန်တီးမည့် class ကို ရေးပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
         line
     )
 }
@@ -732,7 +743,7 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
             depth += 1;
         } else if is_close(&t.tok) {
             depth -= 1;
-        } else if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) {
+        } else if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
             // Opens a for-loop, if/else, while, or function-definition block:
             // its header has no terminating '။' of its own, so treat it as a
             // nesting level too, just like brackets, so interior statement-
@@ -771,7 +782,7 @@ fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, u
             depth -= 1;
             continue;
         }
-        if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) {
+        if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
             depth += 1;
             continue;
         }
@@ -820,6 +831,10 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 if !body.is_empty() && ident_eq(&body[0].tok, KW_CLASS_DEF) {
                     let inner = body[1..].to_vec();
                     return parse_class_def(&inner, line);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_TRY) {
+                    let inner = body[1..].to_vec();
+                    return parse_try_catch(&inner, line);
                 }
                 return parse_for_loop(&body, line);
             }
@@ -1044,7 +1059,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         };
         if body.len() < 3 || !ident_eq(&body[2].tok, KW_ASSIGN) {
             return Err(format!(
-                "လိုင်း {} တွင် {} {} ကို တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
+                "E001 လိုင်း {} တွင် {} {} ကို တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
                 line, KW_SELF, field_name
             ));
         }
@@ -1052,7 +1067,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         let value_tokens = &body[3..is_idx];
         if value_tokens.is_empty() {
             return Err(format!(
-                "လိုင်း {} တွင် {} {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
+                "E001 လိုင်း {} တွင် {} {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
                 line, KW_SELF, field_name
             ));
         }
@@ -1083,14 +1098,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             && (ident_eq(&body[1].tok, KW_ASSIGN) || ident_eq(&body[1].tok, KW_ASSIGN_COLLECTION));
         if !assign_ok {
             return Err(format!(
-                "လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
+                "E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
                 line
             ));
         }
         let value_tokens = &body[2..is_idx];
         if value_tokens.is_empty() {
             return Err(format!(
-                "လိုင်း {} တွင် {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
+                "E001 လိုင်း {} တွင် {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
                 line, name
             ));
         }
@@ -1190,6 +1205,83 @@ fn parse_for_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
         var_name,
         source,
         body: body_stmts,
+        line,
+    })
+}
+
+/// Parse a try/catch/finally block. `inner` has the leading `စမ်းရန်` and
+/// trailing `ပြီး` already stripped by the caller.
+fn parse_try_catch(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    // Find `နောက်ဆုံးတွင်` (finally) at block level.
+    let finally_rel = find_first_at_block_level(inner, &[KW_FINALLY]);
+    let (try_catch_tokens, finally_tokens) = match finally_rel {
+        Some((idx, _)) => (&inner[..idx], Some(&inner[idx + 1..])),
+        None => (inner, None),
+    };
+
+    // Find `ဖမ်းပါ` (catch) at block level within the try+catch section.
+    // The catch header is "<error_name> ကို ဖမ်းပါ။", spanning the tokens
+    // [<error_name>, ကို, ဖမ်းပါ, End]. `ဖမ်းပါ` sits at `idx`, so the header
+    // runs from `idx-2` through `idx+1`; the try body ends at `idx-2` and the
+    // catch body begins right after the header's trailing '။'.
+    let catch_rel = find_first_at_block_level(try_catch_tokens, &[KW_CATCH]);
+    let (catch_err, try_tokens, catch_body_tokens) = match catch_rel {
+        Some((idx, _))
+            if idx >= 2
+                && ident_eq(&try_catch_tokens[idx - 1].tok, KW_PARTICLE)
+                && try_catch_tokens.get(idx + 1).map(|t| &t.tok) == Some(&Tok::End) =>
+        {
+            let err_name = match &try_catch_tokens[idx - 2].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => {
+                    return Err(format!(
+                        "E001 လိုင်း {} တွင် catch block ထဲတွင် <error_name> မှားနေပါသည်။",
+                        try_catch_tokens[idx - 2].line
+                    ))
+                }
+            };
+            // Validate the error-name itself: "E" or "E###".
+            if err_name != "E" && !(err_name.len() == 4 && err_name.starts_with('E')) {
+                return Err(format!(
+                    "E001 လိုင်း {} တွင် catch block ၏ error name \"{}\" မှားနေပါသည်။ (E သို့မဟုတ် E001 ကဲ့သို့ ရေးရပါမည်)",
+                    try_catch_tokens[idx - 2].line,
+                    err_name
+                ));
+            }
+            let try_end = idx - 2;
+            let body_start = idx + 2;
+            (
+                Some(err_name),
+                &try_catch_tokens[..try_end],
+                Some(&try_catch_tokens[body_start..]),
+            )
+        }
+        Some((idx, _)) => (
+            None,
+            &try_catch_tokens[..idx],
+            Some(&try_catch_tokens[idx + 1..]),
+        ),
+        None => (None, try_catch_tokens, None),
+    };
+
+    let try_body = parse_block(try_tokens)?;
+
+    let (catch_var, catch_body) = match catch_body_tokens {
+        Some(ct) => (catch_err.clone(), Some(parse_block(ct)?)),
+        None => (None, None),
+    };
+
+    let finally_body = match finally_tokens {
+        Some(ft) => Some(parse_block(ft)?),
+        None => None,
+    };
+
+    Ok(Stmt::TryCatch {
+        try_body,
+        catch_err,
+        catch_var,
+        catch_body,
+        finally_body,
         line,
     })
 }
