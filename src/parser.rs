@@ -39,6 +39,12 @@ pub enum Stmt {
         value: Expr,
         line: usize,
     },
+    RandomDecl {
+        name: String,
+        min: Expr,
+        max: Expr,
+        line: usize,
+    },
     ConvertStmt {
         value: Expr,
         target_type: String,
@@ -97,6 +103,18 @@ pub enum Stmt {
         catch_var: Option<String>,
         catch_body: Option<Vec<Stmt>>,
         finally_body: Option<Vec<Stmt>>,
+        line: usize,
+    },
+    /// Library import: `နည်းပညာများ <lib name> ကို အသုံးပြုပါ။`
+    UseLibrary {
+        name: String,
+        line: usize,
+    },
+    /// Wait (sleep): `10s ကို စောင့်ပါ။` (also `10m` / `10h`, or a bare
+    /// number which defaults to seconds).
+    Wait {
+        amount: Expr,
+        unit: WaitUnit,
         line: usize,
     },
 }
@@ -196,6 +214,13 @@ const KW_CALL_WITH: &str = "လုပ်ရန်";
 const KW_CLASS_DEF: &str = "နည်းလမ်း";
 const KW_SELF: &str = "တန်ဖိုး";
 const KW_NEW: &str = "အသစ်";
+
+// Library system keywords.
+const KW_USE: &str = "အသုံးပြုပါ";
+const KW_LIBRARIES: &str = "နည်းပညာများ";
+const KW_WAIT: &str = "စောင့်ပါ";
+const KW_RANDOM: &str = "ကျပန်းကိန်း";
+const KW_BETWEEN: &str = "အကြား";
 
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
@@ -706,6 +731,14 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
     }
 }
 
+/// Unit of a wait amount: `s` (seconds), `m` (minutes), `h` (hours).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitUnit {
+    Seconds,
+    Minutes,
+    Hours,
+}
+
 /// Parse "value ကို <FUNC>" shaped statements (print / input-no-assign),
 /// where `body` excludes the trailing End token and the function keyword itself.
 fn parse_particle_call(
@@ -839,6 +872,72 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 return parse_for_loop(&body, line);
             }
         }
+    }
+
+    // --- Library import: နည်းပညာများ <lib name> ကို အသုံးပြုပါ။ ---
+    if !body.is_empty() && ident_eq(&body[0].tok, KW_LIBRARIES) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if ident_eq(&body.last().unwrap().tok, KW_USE)
+            && body.len() == 4
+            && ident_eq(&body[2].tok, KW_PARTICLE)
+            && matches!(body[1].tok, Tok::Ident(_))
+        {
+            let lib_name = match &body[1].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            return Ok(Stmt::UseLibrary { name: lib_name, line });
+        }
+        return Err(generic_syntax_err(line));
+    }
+
+    // --- Wait (sleep): <amount><unit?> ကို စောင့်ပါ။ ---
+    if let Some(wait_idx) = find_kw(&body, KW_WAIT) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if wait_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        if wait_idx == 0 || !ident_eq(&body[wait_idx - 1].tok, KW_PARTICLE) {
+            return Err(generic_syntax_err(line));
+        }
+        let value_tokens = &body[..wait_idx - 1];
+        if value_tokens.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        // Optional unit suffix (s/m/h) fused on the amount, defaults to seconds.
+        let (amount_tokens, unit) =
+            if let Some(Tok::Ident(suf)) = value_tokens.last().map(|t| &t.tok) {
+                match suf.as_str() {
+                    "s" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Seconds,
+                    ),
+                    "m" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Minutes,
+                    ),
+                    "h" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Hours,
+                    ),
+                    _ => (value_tokens, WaitUnit::Seconds),
+                }
+            } else {
+                (value_tokens, WaitUnit::Seconds)
+            };
+        if amount_tokens.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        let amount = parse_expr(amount_tokens, line)?;
+        return Ok(Stmt::Wait {
+            amount,
+            unit,
+            line,
+        });
     }
 
     // --- Function call with argument: <fn name> ကို လုပ်ရန် <argument> ဖြင့်။ ---
@@ -1083,6 +1182,37 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             value,
             line,
         });
+    }
+
+    // --- Random number assignment: ကျပန်းကိန်း <name> သည် <min> နှင့် <max> အကြား ဖြစ်၏။ ---
+    if !body.is_empty() && ident_eq(&body[0].tok, KW_RANDOM) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if body.len() < 8 {
+            return Err(generic_syntax_err(line));
+        }
+        if !ident_eq(&body[2].tok, KW_ASSIGN) {
+            return Err(generic_syntax_err(line));
+        }
+        let and_idx = find_kw(&body[3..], KW_AND).map(|i| i + 3);
+        let between_idx = find_kw(&body[3..], KW_BETWEEN).map(|i| i + 3);
+
+        match (and_idx, between_idx) {
+            (Some(a_idx), Some(b_idx)) if a_idx < b_idx => {
+                if !ident_eq(&body[b_idx + 1].tok, KW_IS) {
+                    return Err(generic_syntax_err(line));
+                }
+                let name = match &body[1].tok {
+                    Tok::Ident(s) => s.clone(),
+                    _ => return Err(generic_syntax_err(line)),
+                };
+                let min = parse_expr(&body[3..a_idx], line)?;
+                let max = parse_expr(&body[a_idx + 1..b_idx], line)?;
+                return Ok(Stmt::RandomDecl { name, min, max, line });
+            }
+            _ => return Err(generic_syntax_err(line)),
+        }
     }
 
     // --- Variable / collection declaration: name (သည်|မှာ) value ဖြစ်၏။ ---
