@@ -1,4 +1,5 @@
-use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt};
+use crate::library::LibraryLoader;
+use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
 use std::collections::HashMap;
 use std::io::{self, Write};
 
@@ -136,6 +137,10 @@ pub struct Interpreter {
     /// "တန်ဖိုး <field> သည် <value> ဖြစ်၏။" statement writes into the field
     /// list on top of this stack instead of the global environment.
     self_stack: Vec<Vec<(String, Value)>>,
+    /// Loader that resolves and activates libraries imported with
+    /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။`. Only loaded libraries may use
+    /// their builtins (e.g. စောင့်ပါ).
+    libraries: LibraryLoader,
 }
 
 impl Interpreter {
@@ -145,6 +150,7 @@ impl Interpreter {
             functions: HashMap::new(),
             classes: HashMap::new(),
             self_stack: Vec::new(),
+            libraries: LibraryLoader::new(),
         }
     }
 
@@ -402,6 +408,36 @@ impl Interpreter {
                         matched
                     }
                 }
+            }
+            Stmt::UseLibrary { name, line } => {
+                match self.libraries.load(name) {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(format!(
+                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
+                        line, name
+                    )),
+                }
+            }
+            Stmt::Wait { amount, unit, line } => {
+                if !self.libraries.is_loaded("အချိန်") {
+                    return Err(format!(
+                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန် ကို အသုံးပြုပါ။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        line
+                    ));
+                }
+                let v = self.eval(amount, *line, None)?;
+                let secs = as_f64(&v).ok_or_else(|| {
+                    format!(
+                        "E061 လိုင်း {} တွင် စောင့်ရန် အချိန်တန်ဖိုးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+                        line
+                    )
+                })?;
+                let unit = match unit {
+                    WaitUnit::Seconds => crate::time_library::WaitUnit::Seconds,
+                    WaitUnit::Minutes => crate::time_library::WaitUnit::Minutes,
+                    WaitUnit::Hours => crate::time_library::WaitUnit::Hours,
+                };
+                crate::time_library::wait(secs, unit)
             }
         }
     }
