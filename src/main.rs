@@ -9,6 +9,12 @@ mod parser;
 #[path = "../libraries/အချိန်/main.rs"]
 mod time_library;
 
+/// The Akkhara "ကျပန်း" (Random) library, compiled in from its own source
+/// under `libraries/ကျပန်း/main.rs`. Programs load it with:
+///     နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+#[path = "../libraries/ကျပန်း/main.rs"]
+mod random_library;
+
 use std::env;
 use std::fs;
 use std::process::{self, Command};
@@ -23,6 +29,7 @@ fn print_usage() {
     eprintln!("Usage: akk <file name>");
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
+    eprintln!("       akk install <library>");
     eprintln!("       akk update");
     eprintln!("       akk uninstall");
 }
@@ -46,6 +53,14 @@ fn main() {
         }
         "--check" | "check" => {
             cmd_check();
+            return;
+        }
+        "install" => {
+            if args.len() < 3 {
+                eprintln!("အသုံးပြုပုံ: akk install <library>");
+                process::exit(1);
+            }
+            cmd_install(&args[2]);
             return;
         }
         "update" => {
@@ -221,6 +236,14 @@ fn cmd_update() {
             process::exit(1);
         }
     }
+}
+
+fn cmd_install(lib: &str) {
+    println!("==> Installing library: {}...", lib);
+    println!("    [INFO] Akkhara libraries are currently compiled into the core binary.");
+    println!("    If '{}' is a built-in library, you can use it directly in your script:", lib);
+    println!("    \n    နည်းပညာများ {} ကို အသုံးပြုပါ။\n", lib);
+    println!("    To add new custom libraries, please update the source code and recompile.");
 }
 
 /// `akk uninstall` -- removes the akk binary itself.
