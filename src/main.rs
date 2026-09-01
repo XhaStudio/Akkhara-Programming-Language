@@ -1,6 +1,13 @@
 mod interpreter;
 mod lexer;
+mod library;
 mod parser;
+
+/// The Akkhara "အချိန်" (Time) library, compiled in from its own source
+/// under `libraries/အချိန်/main.rs`. Programs load it with:
+///     နည်းပညာများ အချိန် ကို အသုံးပြုပါ။
+#[path = "../libraries/အချိန်/main.rs"]
+mod time_library;
 
 use std::env;
 use std::fs;
