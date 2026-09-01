@@ -418,6 +418,27 @@ impl Interpreter {
                     )),
                 }
             }
+            Stmt::RandomDecl { name, min, max, line } => {
+                if !self.libraries.is_loaded("ကျပန်း") {
+                    return Err(format!(
+                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        line
+                    ));
+                }
+                let min_v = self.eval(min, *line, None)?;
+                let max_v = self.eval(max, *line, None)?;
+
+                let min_i = as_i64(&min_v).ok_or_else(|| {
+                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အစသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
+                })?;
+                let max_i = as_i64(&max_v).ok_or_else(|| {
+                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အဆုံးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
+                })?;
+
+                let val = crate::random_library::random_int(min_i, max_i)?;
+                self.env.insert(name.clone(), Value::Int(val));
+                Ok(())
+            }
             Stmt::Wait { amount, unit, line } => {
                 if !self.libraries.is_loaded("အချိန်") {
                     return Err(format!(
@@ -916,6 +937,14 @@ fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
         Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+fn as_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(i) => Some(*i),
+        Value::Float(f) => Some(*f as i64),
         _ => None,
     }
 }
