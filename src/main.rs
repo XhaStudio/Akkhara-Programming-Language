@@ -17,6 +17,7 @@ mod random_library;
 
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::{self, Command};
 
 /// Pulled from Cargo.toml at build time (`[package] version = "..."`).
@@ -24,6 +25,24 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// GitHub repo the installer / updater pulls releases from.
 const REPO: &str = "XhaStudio/Akkhara-Programming-Language";
+
+/// GitHub repo that hosts installable Akkhara library packages. Each
+/// package is a folder under `packages/<name>/` containing `main.akk`
+/// (the library's source) and `metadata.json` (name/version/description).
+/// `index.json` at the repo root lists every published package name, and
+/// is what `akk install` browses when it can't find an exact match.
+const LIBRARY_REPO: &str = "XhaStudio/Akkhara-Libraries";
+
+/// Where `akk install` places downloaded packages, and where
+/// `နည်းပညာများ <name> ကို အသုံးပြုပါ။` looks for them at runtime: a
+/// `libraries/` folder next to the akk binary itself (not the current
+/// working directory), so it works no matter where a script is run from.
+fn libraries_dir() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("libraries")))
+        .unwrap_or_else(|| PathBuf::from("libraries"))
+}
 
 fn print_usage() {
     eprintln!("Usage: akk <file name>");
@@ -35,6 +54,12 @@ fn print_usage() {
 }
 
 fn main() {
+    // Make sure the libraries/ folder exists next to the binary. Older
+    // installs (and fresh downloads of a release tarball/zip) don't ship
+    // this folder, so create it lazily on every run rather than relying on
+    // the install scripts alone.
+    let _ = fs::create_dir_all(libraries_dir());
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -99,7 +124,7 @@ fn main() {
         }
     };
 
-    let mut interp = interpreter::Interpreter::new();
+    let mut interp = interpreter::Interpreter::new(libraries_dir());
     if let Err(e) = interp.run(&stmts) {
         eprintln!("{}", e);
         process::exit(1);
@@ -182,8 +207,9 @@ fn cmd_check() {
 }
 
 /// Pulls `"field": "value"` out of a flat JSON body without a JSON crate.
-/// Good enough for GitHub's release API response shape; not a general parser.
-#[cfg(not(target_os = "windows"))]
+/// Good enough for GitHub's release API response shape and akk's own
+/// metadata.json/index.json files; not a general parser.
+#[allow(dead_code)]
 fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
     let needle = format!("\"{}\":", field);
     let start = body.find(&needle)? + needle.len();
@@ -191,6 +217,34 @@ fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+/// Pulls the quoted string entries out of a `"field": ["a", "b", ...]`
+/// JSON array. Used to read the package name list out of index.json.
+fn extract_json_string_array(body: &str, field: &str) -> Vec<String> {
+    let needle = format!("\"{}\":", field);
+    let Some(start) = body.find(&needle) else {
+        return Vec::new();
+    };
+    let rest = &body[start + needle.len()..];
+    let Some(open) = rest.find('[') else {
+        return Vec::new();
+    };
+    let Some(close) = rest[open..].find(']') else {
+        return Vec::new();
+    };
+    let array_body = &rest[open + 1..open + close];
+
+    let mut names = Vec::new();
+    let mut chars = array_body.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '"' {
+            if let Some(end_offset) = array_body[i + 1..].find('"') {
+                names.push(array_body[i + 1..i + 1 + end_offset].to_string());
+            }
+        }
+    }
+    names
 }
 
 /// `akk update` -- re-runs the official installer, which always fetches the
@@ -238,12 +292,130 @@ fn cmd_update() {
     }
 }
 
-fn cmd_install(lib: &str) {
-    println!("==> Installing library: {}...", lib);
-    println!("    [INFO] Akkhara libraries are currently compiled into the core binary.");
-    println!("    If '{}' is a built-in library, you can use it directly in your script:", lib);
-    println!("    \n    နည်းပညာများ {} ကို အသုံးပြုပါ။\n", lib);
-    println!("    To add new custom libraries, please update the source code and recompile.");
+/// `akk install <name>` -- downloads a package from the Akkhara library
+/// repo (`LIBRARY_REPO`) into the local `libraries/` folder next to the
+/// akk binary, so `နည်းပညာများ <name> ကို အသုံးပြုပါ။` can find it later.
+///
+/// Packages live at `packages/<name>/` in that repo: `main.akk` is the
+/// library's source (plain Akkhara, so no recompiling akk is needed), and
+/// `metadata.json` carries a version/description shown after install.
+fn cmd_install(name: &str) {
+    println!("==> Installing library: {}...", name);
+
+    let dest_dir = libraries_dir();
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        eprintln!(
+            "    [FAILED] could not create libraries folder {}: {}",
+            dest_dir.display(),
+            e
+        );
+        process::exit(1);
+    }
+
+    let base = format!(
+        "https://raw.githubusercontent.com/{}/main/packages/{}",
+        LIBRARY_REPO, name
+    );
+    let main_akk_url = format!("{}/main.akk", base);
+    let metadata_url = format!("{}/metadata.json", base);
+
+    let source = match ureq::get(&main_akk_url).call() {
+        Ok(resp) => match resp.into_string() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("    [FAILED] could not read downloaded source: {}", e);
+                process::exit(1);
+            }
+        },
+        Err(ureq::Error::Status(404, _)) => {
+            eprintln!(
+                "    [FAILED] no library named \"{}\" was found in {}",
+                name, LIBRARY_REPO
+            );
+            suggest_libraries(name);
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("    [FAILED] could not reach the library repo: {}", e);
+            eprintln!("    Make sure you have network access.");
+            process::exit(1);
+        }
+    };
+
+    // metadata.json is optional -- version/description are just nice to
+    // show; installation still succeeds without it.
+    let metadata_body = ureq::get(&metadata_url)
+        .call()
+        .ok()
+        .and_then(|r| r.into_string().ok());
+
+    let pkg_dir = dest_dir.join(name);
+    if let Err(e) = fs::create_dir_all(&pkg_dir) {
+        eprintln!("    [FAILED] could not create {}: {}", pkg_dir.display(), e);
+        process::exit(1);
+    }
+    let main_akk_path = pkg_dir.join("main.akk");
+    if let Err(e) = fs::write(&main_akk_path, &source) {
+        eprintln!("    [FAILED] could not write {}: {}", main_akk_path.display(), e);
+        process::exit(1);
+    }
+    if let Some(meta) = &metadata_body {
+        let _ = fs::write(pkg_dir.join("metadata.json"), meta);
+    }
+
+    println!("    [OK] Installed \"{}\" to {}", name, pkg_dir.display());
+    if let Some(meta) = &metadata_body {
+        if let Some(v) = extract_json_string_field(meta, "version") {
+            println!("    Version: {}", v);
+        }
+        if let Some(d) = extract_json_string_field(meta, "description") {
+            println!("    {}", d);
+        }
+    }
+    println!();
+    println!("    Use it in a program with:");
+    println!("        နည်းပညာများ {} ကို အသုံးပြုပါ။", name);
+}
+
+/// On an install miss, browses the repo's `index.json` (a flat list of
+/// published package names) and prints anything related, so the person can
+/// see what's actually available instead of guessing blind.
+fn suggest_libraries(query: &str) {
+    let index_url = format!(
+        "https://raw.githubusercontent.com/{}/main/index.json",
+        LIBRARY_REPO
+    );
+    let Ok(resp) = ureq::get(&index_url).call() else {
+        return;
+    };
+    let Ok(body) = resp.into_string() else {
+        return;
+    };
+    let names = extract_json_string_array(&body, "packages");
+    if names.is_empty() {
+        return;
+    }
+
+    let query_lower = query.to_lowercase();
+    let related: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            let n_lower = n.to_lowercase();
+            n_lower.contains(&query_lower) || query_lower.contains(&n_lower)
+        })
+        .collect();
+
+    if !related.is_empty() {
+        eprintln!("    Did you mean:");
+        for n in related {
+            eprintln!("      - {}", n);
+        }
+    } else {
+        eprintln!("    Available libraries:");
+        for n in names.iter().take(20) {
+            eprintln!("      - {}", n);
+        }
+    }
 }
 
 /// `akk uninstall` -- removes the akk binary itself.
