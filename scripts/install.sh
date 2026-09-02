@@ -110,6 +110,11 @@ install_binary() {
     mv "$tmp_dir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
     chmod +x "$INSTALL_DIR/$BIN_NAME"
     ok "Installed to $INSTALL_DIR/$BIN_NAME"
+
+    # akk itself also creates this on every run, but making it here too
+    # means it's visible right away instead of only after the first `akk`
+    # invocation.
+    mkdir -p "$INSTALL_DIR/libraries"
 }
 
 # ---------------------------------------------------------------------
