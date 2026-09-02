@@ -173,6 +173,10 @@ Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Ok "Installed to $destPath"
 
+# akk itself also creates this on every run, but making it here too means
+# it's visible right away instead of only after the first `akk` invocation.
+New-Item -ItemType Directory -Path (Join-Path $InstallDir "libraries") -Force | Out-Null
+
 # ---------------------------------------------------------------------
 # 4. Add to User PATH if needed
 # ---------------------------------------------------------------------
