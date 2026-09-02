@@ -144,13 +144,17 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    pub fn new() -> Self {
+    /// `libraries_dir` is where `akk install <name>` places downloaded
+    /// packages (normally the `libraries/` folder next to the akk binary).
+    /// It's used to resolve `နည်းပညာများ <name> ကို အသုံးပြုပါ။` for any
+    /// name that isn't one of the built-in libraries compiled into akk.
+    pub fn new(libraries_dir: std::path::PathBuf) -> Self {
         Interpreter {
             env: HashMap::new(),
             functions: HashMap::new(),
             classes: HashMap::new(),
             self_stack: Vec::new(),
-            libraries: LibraryLoader::new(),
+            libraries: LibraryLoader::new(libraries_dir),
         }
     }
 
@@ -410,11 +414,38 @@ impl Interpreter {
                 }
             }
             Stmt::UseLibrary { name, line } => {
-                match self.libraries.load(name) {
-                    Ok(()) => Ok(()),
-                    Err(_) => Err(format!(
-                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
-                        line, name
+                // Built-ins are compiled straight into the akk binary.
+                if name == "ကျပန်း" || name == "အချိန်" {
+                    self.libraries.mark_loaded(name);
+                    return Ok(());
+                }
+
+                // Otherwise, look for a package downloaded with
+                // `akk install <name>` under the libraries/ folder. Its
+                // source is plain Akkhara, so loading it just means
+                // running it -- that registers its function/class
+                // definitions the same way any top-level definition does.
+                match self.libraries.find_dynamic_source(name) {
+                    Some(src) => {
+                        let tokens = crate::lexer::lex(&src).map_err(|e| {
+                            format!(
+                                "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                line, name, e
+                            )
+                        })?;
+                        let stmts = crate::parser::parse(&tokens).map_err(|e| {
+                            format!(
+                                "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                line, name, e
+                            )
+                        })?;
+                        self.run(&stmts)?;
+                        self.libraries.mark_loaded(name);
+                        Ok(())
+                    }
+                    None => Err(format!(
+                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
+                        line, name, name
                     )),
                 }
             }
