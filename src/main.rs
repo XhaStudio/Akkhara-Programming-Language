@@ -31,7 +31,7 @@ const REPO: &str = "XhaStudio/Akkhara-Programming-Language";
 /// (the library's source) and `metadata.json` (name/version/description).
 /// `index.json` at the repo root lists every published package name, and
 /// is what `akk install` browses when it can't find an exact match.
-const LIBRARY_REPO: &str = "XhaStudio/Akkhara-Libraries";
+const LIBRARY_REPO: &str = "XhaStudio/Akkhara-Libraries/Libraries";
 
 /// Where `akk install` places downloaded packages, and where
 /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။` looks for them at runtime: a
