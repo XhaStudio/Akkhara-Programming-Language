@@ -2,6 +2,7 @@ mod interpreter;
 mod lexer;
 mod library;
 mod parser;
+mod ui;
 
 /// The Akkhara "အချိန်" (Time) library, compiled in from its own source
 /// under `libraries/အချိန်/main.rs`. Programs load it with:
@@ -49,7 +50,7 @@ fn print_usage() {
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
     eprintln!("       akk install <library>");
-    eprintln!("       akk update");
+    eprintln!("       akk update [version]");
     eprintln!("       akk uninstall");
 }
 
@@ -89,7 +90,8 @@ fn main() {
             return;
         }
         "update" => {
-            cmd_update();
+            let version = args.get(2).map(|s| s.as_str());
+            cmd_update(version);
             return;
         }
         "uninstall" => {
@@ -247,41 +249,69 @@ fn extract_json_string_array(body: &str, field: &str) -> Vec<String> {
     names
 }
 
-/// `akk update` -- re-runs the official installer, which always fetches the
-/// latest release and overwrites the current binary in place. Kept
+/// `akk update [version]` -- re-runs the official installer, which fetches
+/// either the latest release or a specific tag (via `AKK_VERSION`, which
+/// both install.sh and install.ps1 already understand) and overwrites the
+/// current binary in place. Asks for interactive confirmation first, then
+/// runs the installer quietly in the background behind a spinner. Kept
 /// dependency-free by shelling out to curl/sh (or PowerShell on Windows)
 /// instead of pulling in an HTTP client crate.
-fn cmd_update() {
-    println!("==> Updating akk to the latest version...");
+fn cmd_update(version: Option<&str>) {
+    let label = version.unwrap_or("latest");
 
-    #[cfg(target_os = "windows")]
-    let result = {
-        let url = format!(
-            "https://raw.githubusercontent.com/{}/main/scripts/install.ps1",
-            REPO
-        );
-        let ps_cmd = format!("irm {} | iex", url);
-        Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
-            .status()
-    };
+    if !ui::confirm(&format!("Update akk to version \"{}\"?", label)) {
+        println!("    Cancelled.");
+        return;
+    }
 
-    #[cfg(not(target_os = "windows"))]
-    let result = {
-        let url = format!(
-            "https://raw.githubusercontent.com/{}/main/scripts/install.sh",
-            REPO
-        );
-        let shell_cmd = format!("curl -fsSL {} | sh", url);
-        Command::new("sh").arg("-c").arg(&shell_cmd).status()
-    };
+    println!("==> Updating akk to version \"{}\"...", label);
 
-    match result {
-        Ok(status) if status.success() => {
-            println!("    [OK] Update complete. Run 'akk --version' to confirm.");
+    let version_owned = version.map(|s| s.to_string());
+    let spinner_message = format!("Downloading akk {}...", label);
+
+    let outcome = ui::with_spinner(&spinner_message, move || -> std::io::Result<std::process::Output> {
+        #[cfg(target_os = "windows")]
+        {
+            let url = format!(
+                "https://raw.githubusercontent.com/{}/main/scripts/install.ps1",
+                REPO
+            );
+            let version_arg = version_owned.as_deref().unwrap_or("latest");
+            let ps_cmd = format!(
+                "$env:AKK_VERSION = '{}'; irm {} | iex",
+                version_arg, url
+            );
+            Command::new("powershell")
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+                .output()
         }
-        Ok(status) => {
-            eprintln!("    [FAILED] updater exited with status: {}", status);
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let url = format!(
+                "https://raw.githubusercontent.com/{}/main/scripts/install.sh",
+                REPO
+            );
+            let shell_cmd = format!("curl -fsSL {} | sh", url);
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(&shell_cmd);
+            if let Some(v) = &version_owned {
+                cmd.env("AKK_VERSION", v);
+            }
+            cmd.output()
+        }
+    });
+
+    match outcome {
+        Ok(output) if output.status.success() => {
+            println!("    [OK] Updated to {}. Run 'akk --version' to confirm.", label);
+        }
+        Ok(output) => {
+            eprintln!("    [FAILED] updater exited with status: {}", output.status);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr.trim_end());
+            }
             process::exit(1);
         }
         Err(e) => {
@@ -292,6 +322,16 @@ fn cmd_update() {
     }
 }
 
+/// A download outcome handed back from the spinner's background thread, so
+/// the error message / process::exit happens on the main thread only after
+/// the spinner has finished cleaning up the terminal (cursor, line, etc.).
+enum InstallDownload {
+    Ok { source: String, metadata: Option<String> },
+    NotFound,
+    NetworkError(String),
+    ReadError(String),
+}
+
 /// `akk install <name>` -- downloads a package from the Akkhara library
 /// repo (`LIBRARY_REPO`) into the local `libraries/` folder next to the
 /// akk binary, so `နည်းပညာများ <name> ကို အသုံးပြုပါ။` can find it later.
@@ -300,6 +340,11 @@ fn cmd_update() {
 /// library's source (plain Akkhara, so no recompiling akk is needed), and
 /// `metadata.json` carries a version/description shown after install.
 fn cmd_install(name: &str) {
+    if !ui::confirm(&format!("Install library \"{}\"?", name)) {
+        println!("    Cancelled.");
+        return;
+    }
+
     println!("==> Installing library: {}...", name);
 
     let dest_dir = libraries_dir();
@@ -318,16 +363,31 @@ fn cmd_install(name: &str) {
     );
     let main_akk_url = format!("{}/main.akk", base);
     let metadata_url = format!("{}/metadata.json", base);
+    let spinner_message = format!("Downloading \"{}\"...", name);
 
-    let source = match ureq::get(&main_akk_url).call() {
-        Ok(resp) => match resp.into_string() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("    [FAILED] could not read downloaded source: {}", e);
-                process::exit(1);
-            }
-        },
-        Err(ureq::Error::Status(404, _)) => {
+    let download = ui::with_spinner(&spinner_message, move || -> InstallDownload {
+        let source = match ureq::get(&main_akk_url).call() {
+            Ok(resp) => match resp.into_string() {
+                Ok(s) => s,
+                Err(e) => return InstallDownload::ReadError(e.to_string()),
+            },
+            Err(ureq::Error::Status(404, _)) => return InstallDownload::NotFound,
+            Err(e) => return InstallDownload::NetworkError(e.to_string()),
+        };
+
+        // metadata.json is optional -- version/description are just nice to
+        // show; installation still succeeds without it.
+        let metadata = ureq::get(&metadata_url)
+            .call()
+            .ok()
+            .and_then(|r| r.into_string().ok());
+
+        InstallDownload::Ok { source, metadata }
+    });
+
+    let (source, metadata_body) = match download {
+        InstallDownload::Ok { source, metadata } => (source, metadata),
+        InstallDownload::NotFound => {
             eprintln!(
                 "    [FAILED] no library named \"{}\" was found in {}",
                 name, LIBRARY_REPO
@@ -335,19 +395,16 @@ fn cmd_install(name: &str) {
             suggest_libraries(name);
             process::exit(1);
         }
-        Err(e) => {
+        InstallDownload::NetworkError(e) => {
             eprintln!("    [FAILED] could not reach the library repo: {}", e);
             eprintln!("    Make sure you have network access.");
             process::exit(1);
         }
+        InstallDownload::ReadError(e) => {
+            eprintln!("    [FAILED] could not read downloaded source: {}", e);
+            process::exit(1);
+        }
     };
-
-    // metadata.json is optional -- version/description are just nice to
-    // show; installation still succeeds without it.
-    let metadata_body = ureq::get(&metadata_url)
-        .call()
-        .ok()
-        .and_then(|r| r.into_string().ok());
 
     let pkg_dir = dest_dir.join(name);
     if let Err(e) = fs::create_dir_all(&pkg_dir) {
