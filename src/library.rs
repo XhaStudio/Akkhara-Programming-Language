@@ -10,9 +10,12 @@ use std::path::PathBuf;
 ///      `akk` binary. The interpreter recognizes these names itself and
 ///      just calls `mark_loaded` on them.
 ///   2. Downloaded packages -- plain Akkhara source files that live under
-///      `<libraries_dir>/<name>/main.akk`. `find_dynamic_source` reads one
-///      of these so the interpreter can lex/parse/run it like any other
-///      Akkhara program, which registers its functions/classes globally.
+///      `<libraries_dir>/<name>/main/`. `find_dynamic_source` reads the
+///      entry file named in `<name>/index.json`'s `entry` field
+///      (defaulting to `main/main.akk` when there's no manifest, or no
+///      `entry` field in it) so the interpreter can lex/parse/run it like
+///      any other Akkhara program, which registers its functions/classes
+///      globally.
 pub struct LibraryLoader {
     loaded: HashMap<String, ()>,
     libraries_dir: PathBuf,
@@ -34,11 +37,18 @@ impl LibraryLoader {
         self.loaded.contains_key(name)
     }
 
-    /// Reads `<libraries_dir>/<name>/main.akk` if a downloaded package by
-    /// that name exists. Returns `None` if there's no such package, so the
+    /// Reads a downloaded package's entry source file, if one exists.
+    /// Consults `<libraries_dir>/<name>/index.json`'s `entry` field for
+    /// the path to the entry file (relative to the package folder),
+    /// defaulting to `main/main.akk` when there's no manifest or no
+    /// `entry` field. Returns `None` if there's no such package, so the
     /// caller can fall back to a "library not found" error.
     pub fn find_dynamic_source(&self, name: &str) -> Option<String> {
-        let path = self.libraries_dir.join(name).join("main.akk");
-        fs::read_to_string(path).ok()
+        let pkg_dir = self.libraries_dir.join(name);
+        let entry = fs::read_to_string(pkg_dir.join("index.json"))
+            .ok()
+            .and_then(|manifest| crate::extract_json_string_field(&manifest, "entry"))
+            .unwrap_or_else(|| "main/main.akk".to_string());
+        fs::read_to_string(pkg_dir.join(entry)).ok()
     }
 }
