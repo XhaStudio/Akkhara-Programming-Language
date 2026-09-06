@@ -27,12 +27,26 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// GitHub repo the installer / updater pulls releases from.
 const REPO: &str = "XhaStudio/Akkhara-Programming-Language";
 
-/// GitHub repo that hosts installable Akkhara library packages. Each
-/// package is a folder under `packages/<name>/` containing `main.akk`
-/// (the library's source) and `metadata.json` (name/version/description).
-/// `index.json` at the repo root lists every published package name, and
-/// is what `akk install` browses when it can't find an exact match.
-const LIBRARY_REPO: &str = "XhaStudio/Akkhara-Libraries/Libraries";
+/// GitHub `owner/repo` that hosts installable Akkhara library packages.
+const LIBRARY_REPO: &str = "XhaStudio/Akkhara-Libraries";
+
+/// Path, within `LIBRARY_REPO`'s `main` branch, to the folder holding all
+/// published libraries. Each library is a folder under
+/// `<LIBRARY_PATH>/<name>/`: `main/` holds the library's source file(s)
+/// (an entry `main.akk`, plus any others it needs), and `index.json` is
+/// its manifest (name/version/description/entry). `<LIBRARY_PATH>/index.json`
+/// lists every published library name, and is what `akk install` browses
+/// when it can't find an exact match.
+const LIBRARY_PATH: &str = "Libraries";
+
+/// Base raw-content URL for `LIBRARY_PATH` on `LIBRARY_REPO`'s `main`
+/// branch, e.g. `.../Libraries/<name>/index.json`.
+fn library_raw_base() -> String {
+    format!(
+        "https://raw.githubusercontent.com/{}/main/{}",
+        LIBRARY_REPO, LIBRARY_PATH
+    )
+}
 
 /// Where `akk install` places downloaded packages, and where
 /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။` looks for them at runtime: a
@@ -208,11 +222,52 @@ fn cmd_check() {
     }
 }
 
+/// Splits a top-level JSON array of objects (`[{...}, {...}]`) into the
+/// raw text of each object, so per-item fields can be pulled out with
+/// `extract_json_string_field`. Used to walk the GitHub contents API's
+/// directory-listing response. Braces and quotes inside string literals
+/// are skipped so they don't confuse the split; not a general parser.
+fn split_json_objects(body: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, c) in body.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    objects.push(&body[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    objects
+}
+
 /// Pulls `"field": "value"` out of a flat JSON body without a JSON crate.
-/// Good enough for GitHub's release API response shape and akk's own
-/// metadata.json/index.json files; not a general parser.
-#[allow(dead_code)]
-fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
+/// Good enough for GitHub's release/contents API response shapes and
+/// akk's own index.json manifests; not a general parser.
+pub(crate) fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
     let needle = format!("\"{}\":", field);
     let start = body.find(&needle)? + needle.len();
     let rest = body[start..].trim_start();
@@ -326,19 +381,20 @@ fn cmd_update(version: Option<&str>) {
 /// the error message / process::exit happens on the main thread only after
 /// the spinner has finished cleaning up the terminal (cursor, line, etc.).
 enum InstallDownload {
-    Ok { source: String, metadata: Option<String> },
+    Ok { files: Vec<(String, String)>, manifest: Option<String> },
     NotFound,
     NetworkError(String),
     ReadError(String),
 }
 
-/// `akk install <name>` -- downloads a package from the Akkhara library
+/// `akk install <name>` -- downloads a library from the Akkhara library
 /// repo (`LIBRARY_REPO`) into the local `libraries/` folder next to the
 /// akk binary, so `နည်းပညာများ <name> ကို အသုံးပြုပါ။` can find it later.
 ///
-/// Packages live at `packages/<name>/` in that repo: `main.akk` is the
-/// library's source (plain Akkhara, so no recompiling akk is needed), and
-/// `metadata.json` carries a version/description shown after install.
+/// Libraries live at `<LIBRARY_PATH>/<name>/` in that repo: `main/`
+/// holds the library's source file(s) (plain Akkhara, so no recompiling
+/// akk is needed), and `index.json` is its manifest, carrying a
+/// version/description shown after install.
 fn cmd_install(name: &str) {
     if !ui::confirm(&format!("Install library \"{}\"?", name)) {
         println!("    Cancelled.");
@@ -347,7 +403,7 @@ fn cmd_install(name: &str) {
 
     println!("==> Installing library: {}...", name);
 
-    let dest_dir = libraries_dir();
+    let dest_dir = libraries_dir().join(name);
     if let Err(e) = fs::create_dir_all(&dest_dir) {
         eprintln!(
             "    [FAILED] could not create libraries folder {}: {}",
@@ -357,16 +413,30 @@ fn cmd_install(name: &str) {
         process::exit(1);
     }
 
-    let base = format!(
-        "https://raw.githubusercontent.com/{}/main/packages/{}",
-        LIBRARY_REPO, name
+    let lib_base = format!("{}/{}", library_raw_base(), name);
+    let index_url = format!("{}/index.json", lib_base);
+    // raw.githubusercontent.com has no directory listing, so the GitHub
+    // contents API is used to enumerate every file under this library's
+    // `main/` folder -- this is what lets a library ship more than a
+    // single main.akk file.
+    let contents_api_url = format!(
+        "https://api.github.com/repos/{}/contents/{}/{}/main",
+        LIBRARY_REPO, LIBRARY_PATH, name
     );
-    let main_akk_url = format!("{}/main.akk", base);
-    let metadata_url = format!("{}/metadata.json", base);
     let spinner_message = format!("Downloading \"{}\"...", name);
 
     let download = ui::with_spinner(&spinner_message, move || -> InstallDownload {
-        let source = match ureq::get(&main_akk_url).call() {
+        // index.json is optional -- version/description are just nice to
+        // show; installation still succeeds without it.
+        let manifest = ureq::get(&index_url)
+            .call()
+            .ok()
+            .and_then(|r| r.into_string().ok());
+
+        let listing = match ureq::get(&contents_api_url)
+            .set("User-Agent", "akk-cli")
+            .call()
+        {
             Ok(resp) => match resp.into_string() {
                 Ok(s) => s,
                 Err(e) => return InstallDownload::ReadError(e.to_string()),
@@ -375,18 +445,38 @@ fn cmd_install(name: &str) {
             Err(e) => return InstallDownload::NetworkError(e.to_string()),
         };
 
-        // metadata.json is optional -- version/description are just nice to
-        // show; installation still succeeds without it.
-        let metadata = ureq::get(&metadata_url)
-            .call()
-            .ok()
-            .and_then(|r| r.into_string().ok());
+        let mut files = Vec::new();
+        for obj in split_json_objects(&listing) {
+            let Some(item_type) = extract_json_string_field(obj, "type") else {
+                continue;
+            };
+            if item_type != "file" {
+                continue; // subfolders inside main/ aren't supported yet
+            }
+            let (Some(file_name), Some(download_url)) = (
+                extract_json_string_field(obj, "name"),
+                extract_json_string_field(obj, "download_url"),
+            ) else {
+                continue;
+            };
+            match ureq::get(&download_url).call() {
+                Ok(resp) => match resp.into_string() {
+                    Ok(body) => files.push((file_name, body)),
+                    Err(e) => return InstallDownload::ReadError(e.to_string()),
+                },
+                Err(e) => return InstallDownload::NetworkError(e.to_string()),
+            }
+        }
 
-        InstallDownload::Ok { source, metadata }
+        if files.is_empty() {
+            return InstallDownload::NotFound;
+        }
+
+        InstallDownload::Ok { files, manifest }
     });
 
-    let (source, metadata_body) = match download {
-        InstallDownload::Ok { source, metadata } => (source, metadata),
+    let (files, manifest_body) = match download {
+        InstallDownload::Ok { files, manifest } => (files, manifest),
         InstallDownload::NotFound => {
             eprintln!(
                 "    [FAILED] no library named \"{}\" was found in {}",
@@ -406,26 +496,28 @@ fn cmd_install(name: &str) {
         }
     };
 
-    let pkg_dir = dest_dir.join(name);
-    if let Err(e) = fs::create_dir_all(&pkg_dir) {
-        eprintln!("    [FAILED] could not create {}: {}", pkg_dir.display(), e);
+    let main_dir = dest_dir.join("main");
+    if let Err(e) = fs::create_dir_all(&main_dir) {
+        eprintln!("    [FAILED] could not create {}: {}", main_dir.display(), e);
         process::exit(1);
     }
-    let main_akk_path = pkg_dir.join("main.akk");
-    if let Err(e) = fs::write(&main_akk_path, &source) {
-        eprintln!("    [FAILED] could not write {}: {}", main_akk_path.display(), e);
-        process::exit(1);
+    for (file_name, body) in &files {
+        let path = main_dir.join(file_name);
+        if let Err(e) = fs::write(&path, body) {
+            eprintln!("    [FAILED] could not write {}: {}", path.display(), e);
+            process::exit(1);
+        }
     }
-    if let Some(meta) = &metadata_body {
-        let _ = fs::write(pkg_dir.join("metadata.json"), meta);
+    if let Some(manifest) = &manifest_body {
+        let _ = fs::write(dest_dir.join("index.json"), manifest);
     }
 
-    println!("    [OK] Installed \"{}\" to {}", name, pkg_dir.display());
-    if let Some(meta) = &metadata_body {
-        if let Some(v) = extract_json_string_field(meta, "version") {
+    println!("    [OK] Installed \"{}\" to {}", name, dest_dir.display());
+    if let Some(manifest) = &manifest_body {
+        if let Some(v) = extract_json_string_field(manifest, "version") {
             println!("    Version: {}", v);
         }
-        if let Some(d) = extract_json_string_field(meta, "description") {
+        if let Some(d) = extract_json_string_field(manifest, "description") {
             println!("    {}", d);
         }
     }
@@ -438,10 +530,7 @@ fn cmd_install(name: &str) {
 /// published package names) and prints anything related, so the person can
 /// see what's actually available instead of guessing blind.
 fn suggest_libraries(query: &str) {
-    let index_url = format!(
-        "https://raw.githubusercontent.com/{}/main/index.json",
-        LIBRARY_REPO
-    );
+    let index_url = format!("{}/index.json", library_raw_base());
     let Ok(resp) = ureq::get(&index_url).call() else {
         return;
     };
