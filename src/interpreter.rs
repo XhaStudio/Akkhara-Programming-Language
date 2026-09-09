@@ -296,36 +296,24 @@ impl Interpreter {
                     .insert(name.clone(), (params.clone(), body.clone()));
                 Ok(())
             }
-            Stmt::FuncCall { name, arg, line } => {
-                let (params, body) = match self.functions.get(name) {
-                    Some(v) => v.clone(),
-                    None => {
-                        return Err(format!(
-                            "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
-                            line, name
-                        ));
-                    }
-                };
-                let provided: Vec<Expr> = match arg {
-                    Some(e) => vec![e.clone()],
-                    None => vec![],
-                };
-                if provided.len() != params.len() {
-                    return Err(format!(
-                        "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
-                        line,
-                        name,
-                        params.len(),
-                        provided.len()
-                    ));
-                }
-                for (p, e) in params.iter().zip(provided.iter()) {
-                    let v = self.eval(e, *line, None)?;
-                    self.env.insert(p.clone(), v);
-                }
-                for s in &body {
-                    self.exec(s)?;
-                }
+            Stmt::FuncCall { name, args, line } => {
+                self.call_function(name, args, *line)?;
+                Ok(())
+            }
+            Stmt::FuncCallAssign {
+                name,
+                fn_name,
+                args,
+                line,
+            } => {
+                let result = self.call_function(fn_name, args, *line)?;
+                let value = result.ok_or_else(|| {
+                    format!(
+                        "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
+                        line, fn_name, name
+                    )
+                })?;
+                self.env.insert(name.clone(), value);
                 Ok(())
             }
             Stmt::ClassDef { name, body, line } => {
@@ -413,41 +401,45 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::UseLibrary { name, line } => {
-                // Built-ins are compiled straight into the akk binary.
-                if name == "ကျပန်း" || name == "အချိန်" {
-                    self.libraries.mark_loaded(name);
-                    return Ok(());
-                }
-
-                // Otherwise, look for a package downloaded with
-                // `akk install <name>` under the libraries/ folder. Its
-                // source is plain Akkhara, so loading it just means
-                // running it -- that registers its function/class
-                // definitions the same way any top-level definition does.
-                match self.libraries.find_dynamic_source(name) {
-                    Some(src) => {
-                        let tokens = crate::lexer::lex(&src).map_err(|e| {
-                            format!(
-                                "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                line, name, e
-                            )
-                        })?;
-                        let stmts = crate::parser::parse(&tokens).map_err(|e| {
-                            format!(
-                                "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                line, name, e
-                            )
-                        })?;
-                        self.run(&stmts)?;
+            Stmt::UseLibrary { names, line } => {
+                for name in names {
+                    // Built-ins are compiled straight into the akk binary.
+                    if name == "ကျပန်း" || name == "အချိန်" {
                         self.libraries.mark_loaded(name);
-                        Ok(())
+                        continue;
                     }
-                    None => Err(format!(
-                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
-                        line, name, name
-                    )),
+
+                    // Otherwise, look for a package downloaded with
+                    // `akk install <name>` under the libraries/ folder. Its
+                    // source is plain Akkhara, so loading it just means
+                    // running it -- that registers its function/class
+                    // definitions the same way any top-level definition does.
+                    match self.libraries.find_dynamic_source(name) {
+                        Some(src) => {
+                            let tokens = crate::lexer::lex(&src).map_err(|e| {
+                                format!(
+                                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                    line, name, e
+                                )
+                            })?;
+                            let stmts = crate::parser::parse(&tokens).map_err(|e| {
+                                format!(
+                                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                    line, name, e
+                                )
+                            })?;
+                            self.run(&stmts)?;
+                            self.libraries.mark_loaded(name);
+                        }
+                        None => {
+                            return Err(format!(
+                                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
+                                line, name, name
+                            ));
+                        }
+                    }
                 }
+                Ok(())
             }
             Stmt::RandomDecl { name, min, max, line } => {
                 if !self.libraries.is_loaded("ကျပန်း") {
@@ -815,6 +807,52 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.construct_object(class_name, arg_exprs, *new_line)
             }
         }
+    }
+
+    /// Look up a user-defined function, bind its argument(s) to its
+    /// parameter(s) in the shared environment, and run its body. If the
+    /// body's final statement is a bare expression statement (`ExprStmt`),
+    /// that expression's value is returned as the function's "return value";
+    /// otherwise `None` is returned (the function produced no value).
+    fn call_function(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        let (params, body) = match self.functions.get(name) {
+            Some(v) => v.clone(),
+            None => {
+                return Err(format!(
+                    "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                    line, name
+                ));
+            }
+        };
+        if args.len() != params.len() {
+            return Err(format!(
+                "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                line,
+                name,
+                params.len(),
+                args.len()
+            ));
+        }
+        for (p, e) in params.iter().zip(args.iter()) {
+            let v = self.eval(e, line, None)?;
+            self.env.insert(p.clone(), v);
+        }
+        let mut return_value: Option<Value> = None;
+        for (i, s) in body.iter().enumerate() {
+            if i + 1 == body.len() {
+                if let Stmt::ExprStmt { value, line: sline } = s {
+                    return_value = Some(self.eval(value, *sline, None)?);
+                    continue;
+                }
+            }
+            self.exec(s)?;
+        }
+        Ok(return_value)
     }
 
     /// Instantiate an object: evaluate the constructor arguments, bind them
