@@ -84,7 +84,18 @@ pub enum Stmt {
     },
     FuncCall {
         name: String,
-        arg: Option<Expr>,
+        args: Vec<Expr>,
+        line: usize,
+    },
+    /// `<var> အတွက် <fn> ကို လုပ်ရန် <arg> ဖြင့်` / `<var> အတွက် <fn> ကို လုပ်ပါ။`
+    /// Also accepts a multi-line, multi-argument brace form:
+    /// `<var> အတွက် <fn> ကို လုပ်ရန် { <arg1>, <arg2>, ... } ဖြင့်`
+    /// Calls a function and stores its return value (the function body's
+    /// final bare expression statement) into `name`.
+    FuncCallAssign {
+        name: String,
+        fn_name: String,
+        args: Vec<Expr>,
         line: usize,
     },
     ClassDef {
@@ -105,9 +116,9 @@ pub enum Stmt {
         finally_body: Option<Vec<Stmt>>,
         line: usize,
     },
-    /// Library import: `နည်းပညာများ <lib name> ကို အသုံးပြုပါ။`
+    /// Library import: `နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။`
     UseLibrary {
-        name: String,
+        names: Vec<String>,
         line: usize,
     },
     /// Wait (sleep): `10s ကို စောင့်ပါ။` (also `10m` / `10h`, or a bare
@@ -453,6 +464,34 @@ fn func_call_missing_arg_err(line: usize) -> String {
     )
 }
 
+fn library_use_bad_list_err(line: usize) -> String {
+    format!(
+        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို အသုံးပြုပါ။",
+        line
+    )
+}
+
+fn func_call_assign_missing_var_err(line: usize) -> String {
+    format!(
+        "E068 လိုင်း {} တွင် function ခေါ်ပြီး တန်ဖိုးသိမ်းမည့် variable အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — <var> အတွက် <fn name> ကို လုပ်ပါ။ သို့မဟုတ် <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်",
+        line
+    )
+}
+
+fn func_call_assign_bad_name_err(line: usize) -> String {
+    format!(
+        "E069 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
+        line
+    )
+}
+
+fn func_call_assign_missing_particle_err(line: usize) -> String {
+    format!(
+        "E070 လိုင်း {} တွင် function ခေါ်ရန် \"<var> အတွက် <fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        line
+    )
+}
+
 fn class_missing_name_err(line: usize) -> String {
     format!(
         "E025 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
@@ -574,6 +613,56 @@ fn find_kw_top_level(tokens: &[Token], kw: &str) -> Option<usize> {
 
 fn find_kw(tokens: &[Token], kw: &str) -> Option<usize> {
     find_kw_top_level(tokens, kw)
+}
+
+/// True if `tokens` is a single balanced `{ ... }` group spanning the whole
+/// slice (i.e. the opening brace's matching close is the very last token).
+fn is_single_braced_group(tokens: &[Token]) -> bool {
+    if tokens.len() < 2 || !matches!(tokens[0].tok, Tok::LBrace) {
+        return false;
+    }
+    if !matches!(tokens.last().unwrap().tok, Tok::RBrace) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+            if depth == 0 {
+                return i == tokens.len() - 1;
+            }
+        }
+    }
+    false
+}
+
+/// Parse the argument list for a function call. Accepts either a single
+/// inline expression (`<arg>`), a comma-separated inline list
+/// (`<arg1>, <arg2>`), or a multi-line brace form spanning multiple lines:
+/// `{ <arg1>, <arg2>, ... }`.
+fn parse_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, String> {
+    if tokens.is_empty() {
+        return Err(func_call_missing_arg_err(line));
+    }
+    let inner: &[Token] = if is_single_braced_group(tokens) {
+        &tokens[1..tokens.len() - 1]
+    } else {
+        tokens
+    };
+    if inner.is_empty() {
+        return Err(func_call_missing_arg_err(line));
+    }
+    let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+    let mut args = Vec::with_capacity(parts.len());
+    for p in parts {
+        if p.is_empty() {
+            return Err(func_call_missing_arg_err(line));
+        }
+        args.push(parse_expr(p, line)?);
+    }
+    Ok(args)
 }
 
 fn has_end(tokens: &[Token]) -> bool {
@@ -874,21 +963,30 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
     }
 
-    // --- Library import: နည်းပညာများ <lib name> ကို အသုံးပြုပါ။ ---
+    // --- Library import: နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။ ---
     if !body.is_empty() && ident_eq(&body[0].tok, KW_LIBRARIES) {
         if !end_present {
             return Err(missing_period_err(line));
         }
-        if ident_eq(&body.last().unwrap().tok, KW_USE)
-            && body.len() == 4
-            && ident_eq(&body[2].tok, KW_PARTICLE)
-            && matches!(body[1].tok, Tok::Ident(_))
+        if body.len() >= 4
+            && ident_eq(&body.last().unwrap().tok, KW_USE)
+            && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
         {
-            let lib_name = match &body[1].tok {
-                Tok::Ident(s) => s.clone(),
-                _ => unreachable!(),
-            };
-            return Ok(Stmt::UseLibrary { name: lib_name, line });
+            let names_tokens = &body[1..body.len() - 2];
+            let mut names = Vec::new();
+            for part in names_tokens.split(|t| matches!(t.tok, Tok::Comma)) {
+                match part {
+                    [t] => match &t.tok {
+                        Tok::Ident(s) => names.push(s.clone()),
+                        _ => return Err(library_use_bad_list_err(line)),
+                    },
+                    _ => return Err(library_use_bad_list_err(line)),
+                }
+            }
+            if names.is_empty() {
+                return Err(library_use_bad_list_err(line));
+            }
+            return Ok(Stmt::UseLibrary { names, line });
         }
         return Err(generic_syntax_err(line));
     }
@@ -940,8 +1038,52 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         });
     }
 
-    // --- Function call with argument: <fn name> ကို လုပ်ရန် <argument> ဖြင့်။ ---
+    // --- Function call with argument(s): <fn name> ကို လုပ်ရန် <argument> ဖြင့်။
+    //     Multi-line, multi-argument brace form is also accepted:
+    //       <fn name> ကို လုပ်ရန် { <arg1>, <arg2>, ... } ဖြင့်
+    //     OR, assigned to a variable: <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်။ ---
     if let Some(call_idx) = find_kw(&body, KW_CALL_WITH) {
+        if let Some(for_idx) = find_kw(&body[..call_idx], KW_FOR) {
+            // Assigned form: "<var> အတွက် <fn name> ကို လုပ်ရန် <arg(s)> ဖြင့်"
+            if for_idx == 0 || !matches!(body[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_missing_var_err(line));
+            }
+            let var_name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let rest = &body[for_idx + 1..];
+            if rest.is_empty() || !matches!(rest[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_bad_name_err(line));
+            }
+            let fn_name = match &rest[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let call_idx_in_rest = find_kw(rest, KW_CALL_WITH)
+                .ok_or_else(|| func_call_assign_missing_particle_err(line))?;
+            if call_idx_in_rest != 2 || !ident_eq(&rest[1].tok, KW_PARTICLE) {
+                return Err(func_call_assign_missing_particle_err(line));
+            }
+            let after_call = &rest[call_idx_in_rest + 1..];
+            let by_idx = find_kw_top_level(after_call, KW_BY)
+                .ok_or_else(|| func_call_missing_by_err(line))?;
+            let arg_tokens = &after_call[..by_idx];
+            let args = parse_call_args(arg_tokens, line)?;
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if by_idx + 1 != after_call.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::FuncCallAssign {
+                name: var_name,
+                fn_name,
+                args,
+                line,
+            });
+        }
+
         if body.is_empty() || !matches!(body[0].tok, Tok::Ident(_)) {
             return Err(func_call_bad_name_err(line));
         }
@@ -956,10 +1098,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         let by_idx = find_kw_top_level(after_call, KW_BY)
             .ok_or_else(|| func_call_missing_by_err(line))?;
         let arg_tokens = &after_call[..by_idx];
-        if arg_tokens.is_empty() {
-            return Err(func_call_missing_arg_err(line));
-        }
-        let arg = parse_expr(arg_tokens, line)?;
+        let args = parse_call_args(arg_tokens, line)?;
         if !end_present {
             return Err(missing_period_err(line));
         }
@@ -968,13 +1107,50 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
         return Ok(Stmt::FuncCall {
             name: fn_name,
-            arg: Some(arg),
+            args,
             line,
         });
     }
 
-    // --- Function call (no argument): <fn name> ကို လုပ်ပါ။ ---
+    // --- Function call (no argument): <fn name> ကို လုပ်ပါ။
+    //     OR, assigned to a variable: <var> အတွက် <fn name> ကို လုပ်ပါ။ ---
     if let Some(call_idx) = find_kw(&body, KW_CALL) {
+        if let Some(for_idx) = find_kw(&body[..call_idx], KW_FOR) {
+            // Assigned form: "<var> အတွက် <fn name> ကို လုပ်ပါ။"
+            if for_idx == 0 || !matches!(body[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_missing_var_err(line));
+            }
+            let var_name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let rest = &body[for_idx + 1..];
+            if rest.is_empty() || !matches!(rest[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_bad_name_err(line));
+            }
+            let fn_name = match &rest[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let call_idx_in_rest = find_kw(rest, KW_CALL)
+                .ok_or_else(|| func_call_assign_missing_particle_err(line))?;
+            if call_idx_in_rest != 2 || !ident_eq(&rest[1].tok, KW_PARTICLE) {
+                return Err(func_call_assign_missing_particle_err(line));
+            }
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if call_idx_in_rest + 1 != rest.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::FuncCallAssign {
+                name: var_name,
+                fn_name,
+                args: Vec::new(),
+                line,
+            });
+        }
+
         if body.is_empty() || !matches!(body[0].tok, Tok::Ident(_)) {
             return Err(func_call_bad_name_err(line));
         }
@@ -993,7 +1169,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
         return Ok(Stmt::FuncCall {
             name: fn_name,
-            arg: None,
+            args: Vec::new(),
             line,
         });
     }
