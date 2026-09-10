@@ -1,1252 +1,1960 @@
-use crate::library::LibraryLoader;
-use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
-use std::collections::HashMap;
-use std::io::{self, Write};
+use crate::lexer::{Tok, Token};
 
 #[derive(Debug, Clone)]
-pub enum Value {
-    Str(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    List(Vec<Value>),
-    Tuple(Vec<Value>),
-    Set(Vec<Value>),
-    Dict(Vec<(Value, Value)>),
-    Object(String, Vec<(String, Value)>),
+pub enum Expr {
+    NumLit(String),
+    StrLit(String),
+    BoolLit(bool),
+    Ident(String),
+    Binary(Box<Expr>, char, Box<Expr>, usize), // line of the operator
+    Neg(Box<Expr>, usize),                     // unary minus, line
+    Convert(Box<Expr>, String, usize),         // inner expr, target type keyword, line
+    ListLit(Vec<Expr>),
+    TupleLit(Vec<Expr>),
+    SetLit(Vec<Expr>),
+    DictLit(Vec<(Expr, Expr)>),
+    /// Postfix index: `xs[i]` or table `xs[row, col]` (or dict `xs[key]`).
+    Index(Box<Expr>, Vec<Expr>),
+    /// Object instantiation: `<ClassName> [အသစ်] (arg1, arg2, ...)`.
+    NewObj(String, Vec<Expr>, usize),
 }
+
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    VarDecl {
+        name: String,
+        value: Expr,
+        line: usize,
+    },
+    Print {
+        value: Expr,
+        line: usize,
+    },
+    InputNoAssign {
+        value: Expr,
+        line: usize,
+    },
+    InputAssign {
+        name: String,
+        value: Expr,
+        line: usize,
+    },
+    RandomDecl {
+        name: String,
+        min: Expr,
+        max: Expr,
+        line: usize,
+    },
+    ConvertStmt {
+        value: Expr,
+        target_type: String,
+        line: usize,
+    },
+    ExprStmt {
+        value: Expr,
+        line: usize,
+    },
+    MathAssign {
+        target: Expr,
+        op: char,
+        amount: Expr,
+        line: usize,
+    },
+    ForLoop {
+        var_name: String,
+        source: ForSource,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    If {
+        branches: Vec<IfBranch>,
+        line: usize,
+    },
+    While {
+        cond: CondChain,
+        negate: bool,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    FuncDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    FuncCall {
+        name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
+    /// `<var> အတွက် <fn> ကို လုပ်ရန် <arg> ဖြင့်` / `<var> အတွက် <fn> ကို လုပ်ပါ။`
+    /// Also accepts a multi-line, multi-argument brace form:
+    /// `<var> အတွက် <fn> ကို လုပ်ရန် { <arg1>, <arg2>, ... } ဖြင့်`
+    /// Calls a function and stores its return value (the function body's
+    /// final bare expression statement) into `name`.
+    FuncCallAssign {
+        name: String,
+        fn_name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
+    ClassDef {
+        name: String,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    SelfFieldSet {
+        field: String,
+        value: Expr,
+        line: usize,
+    },
+    TryCatch {
+        try_body: Vec<Stmt>,
+        catch_err: Option<String>,
+        catch_var: Option<String>,
+        catch_body: Option<Vec<Stmt>>,
+        finally_body: Option<Vec<Stmt>>,
+        line: usize,
+    },
+    /// Library import: `နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။`
+    UseLibrary {
+        names: Vec<String>,
+        line: usize,
+    },
+    /// Wait (sleep): `10s ကို စောင့်ပါ။` (also `10m` / `10h`, or a bare
+    /// number which defaults to seconds).
+    Wait {
+        amount: Expr,
+        unit: WaitUnit,
+        line: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct IfBranch {
+    /// None only for the final, unconditional "မဟုတ်လျှင်" (else) branch.
+    pub cond: Option<CondChain>,
+    /// True if this branch used the negative form ("မဖြစ်လျှင်": run when
+    /// the condition chain is FALSE) rather than the positive form
+    /// ("ဖြစ်လျှင်": run when TRUE).
+    pub negate: bool,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone)]
+pub struct CondAtom {
+    pub lhs: Expr,
+    /// None for a bare boolean check like "(အလုပ်)" -- just test lhs's
+    /// truthiness. Some(op) for a full comparison "lhs op rhs".
+    pub op: Option<String>, // "<" ">" "==" "!=" "<=" ">="
+    pub rhs: Option<Expr>,
+    /// Some(type_name) for a type-check condition "lhs သည် <type>", e.g.
+    /// "(x သည် ကိန်း)". Mutually exclusive with `op`/`rhs`.
+    pub type_check: Option<String>,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CondChain {
+    pub first: CondAtom,
+    pub rest: Vec<(LogicalOp, CondAtom)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForSource {
+    Range {
+        start: Option<Expr>,
+        end: Expr,
+        step: Expr,
+        op: char,
+    },
+    /// No explicit step-function clause was given. Resolved at runtime:
+    /// a number auto-ranges from 0 (step +1); a list/tuple/set/dict iterates
+    /// its elements (keys, for dict).
+    Auto(Expr),
+}
+
+const KW_ASSIGN: &str = "သည်";
+const KW_ASSIGN_COLLECTION: &str = "မှာ";
+const KW_IS: &str = "ဖြစ်၏";
+const KW_PARTICLE: &str = "ကို";
+const KW_PRINT: &str = "ဖော်ပြပါ";
+const KW_INPUT: &str = "မေးပါ";
+const KW_FOR: &str = "အတွက်";
+const KW_TO: &str = "သို့";
+const KW_CONVERT: &str = "ပြောင်းပါ";
+const KW_LOOP_FROM: &str = "ထဲမှ";
+const KW_LOOP_EACH: &str = "တစ်ခုစီ";
+
+// Type-check condition keywords: "<var/val> သည် <type>" inside if/while.
+// Distinct from the conversion-target type keywords (e.g. "ကိန်းပြည့်" = int):
+// here "ကိန်း" (no ပြည့်) means a broad "is this a number" check that also
+// accepts numeric-looking strings, per spec.
+const TC_STR: &str = "စာသား";
+const TC_NUM: &str = "ကိန်း";
+const TC_FLOAT: &str = "ဒဿမကိန်း";
+const TC_BOOL: &str = "မှန်/မှား";
+const KW_LOOP_END: &str = "ပြီး";
+const KW_TRY: &str = "စမ်းရန်";
+const KW_CATCH: &str = "ဖမ်းပါ";
+const KW_FINALLY: &str = "နောက်ဆုံးတွင်";
+
+const KW_IF: &str = "အကယ်၍";
+const KW_ELIF: &str = "သို့မဟုတ်";
+const KW_ELSE: &str = "မဟုတ်လျှင်";
+const KW_THEN_POS: &str = "ဖြစ်လျှင်";
+const KW_THEN_NEG: &str = "မဖြစ်လျှင်";
+const KW_AND: &str = "နှင့်";
+const KW_OR: &str = "သို့";
+
+const KW_WHILE: &str = "အခြေအနေ";
+const KW_WHILE_POS: &str = "ဖြစ်နေစဉ်";
+const KW_WHILE_NEG: &str = "မဖြစ်နေစဉ်";
+
+const KW_FUNC_DEF: &str = "လုပ်ငန်း";
+const KW_BY: &str = "ဖြင့်";
+const KW_CALL: &str = "လုပ်ပါ";
+const KW_CALL_WITH: &str = "လုပ်ရန်";
+
+const KW_CLASS_DEF: &str = "နည်းလမ်း";
+const KW_SELF: &str = "တန်ဖိုး";
+const KW_NEW: &str = "အသစ်";
+
+// Library system keywords.
+const KW_USE: &str = "အသုံးပြုပါ";
+const KW_LIBRARIES: &str = "နည်းပညာများ";
+const KW_WAIT: &str = "စောင့်ပါ";
+const KW_RANDOM: &str = "ကျပန်းကိန်း";
+const KW_BETWEEN: &str = "အကြား";
 
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
 const TYPE_STR: &str = "စာသား";
+const TYPE_LIST: &str = "စာရင်း";
+const TYPE_TUPLE: &str = "အစု";
+const TYPE_SET: &str = "အုပ်စု";
+const TYPE_DICT: &str = "အဘိဓာန်";
+const TYPE_TABLE: &str = "ဇယား";
 
-fn type_name_mm(v: &Value) -> &'static str {
-    match v {
-        Value::Str(_) => "စာသား",
-        Value::Int(_) => "ကိန်းပြည့်",
-        Value::Float(_) => "ဒဿမကိန်း",
-        Value::Bool(_) => "မှန်/မှား",
-        Value::List(_) => "စာရင်း",
-        Value::Tuple(_) => "အစု",
-        Value::Set(_) => "အုပ်စု",
-        Value::Dict(_) => "အဘိဓာန်",
-        Value::Object(_, _) => "class object",
-    }
-}
+pub const MATH_FN_INC: &str = "တိုးပါ";
+pub const MATH_FN_DEC: &str = "လျော့ပါ";
+pub const MATH_FN_MUL: &str = "မြှောက်ပါ";
+pub const MATH_FN_DIV: &str = "စားပါ";
 
-/// Structural equality used for set de-duplication and dict key matching.
-/// Compares by display representation, which is adequate for the primitive
-/// element types Akkhara collections are expected to hold.
-fn value_eq(a: &Value, b: &Value) -> bool {
-    repr(a) == repr(b)
-}
-
-fn op_name_mm(op: char) -> &'static str {
-    match op {
-        '+' => "ပေါင်း",
-        '-' => "နှတ်",
-        '*' => "မြှောက်",
-        '/' => "စား",
-        '%' => "ကြွင်းကိန်းရှာ",
-        '^' => "ထပ်ကိန်းတင်",
-        '\\' => "အပြည့်ကိန်းစား",
-        _ => "?",
-    }
-}
-
-pub fn display(v: &Value) -> String {
-    match v {
-        Value::Str(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => {
-            if f.fract() == 0.0 {
-                format!("{:.1}", f)
-            } else {
-                let s = format!("{}", f);
-                s
-            }
-        }
-        Value::Bool(b) => {
-            if *b {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            }
-        }
-        Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_, _) => {
-            repr(v)
-        }
-    }
-}
-
-/// Element-level representation used inside collections (quotes strings),
-/// and as the top-level rendering for collection values themselves.
-fn repr(v: &Value) -> String {
-    match v {
-        Value::Str(s) => format!("\"{}\"", s),
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) => display(v),
-        Value::List(items) => {
-            format!(
-                "[{}]",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
-        }
-        Value::Tuple(items) => {
-            format!(
-                "({})",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
-        }
-        Value::Set(items) => {
-            format!(
-                "{{{}}}",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
-        }
-        Value::Dict(pairs) => {
-            format!(
-                "{{{}}}",
-                pairs
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", repr(k), repr(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-        Value::Object(class_name, fields) => {
-            format!(
-                "{} {{{}}}",
-                class_name,
-                fields
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, repr(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-    }
-}
-
-fn quoted_display(v: &Value) -> String {
-    repr(v)
-}
-
-pub struct Interpreter {
-    env: HashMap<String, Value>,
-    functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
-    classes: HashMap<String, Vec<(String, Vec<String>, Vec<Stmt>)>>,
-    /// Stack of in-progress object constructions. While non-empty, a
-    /// "တန်ဖိုး <field> သည် <value> ဖြစ်၏။" statement writes into the field
-    /// list on top of this stack instead of the global environment.
-    self_stack: Vec<Vec<(String, Value)>>,
-    /// Loader that resolves and activates libraries imported with
-    /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။`. Only loaded libraries may use
-    /// their builtins (e.g. စောင့်ပါ).
-    libraries: LibraryLoader,
-}
-
-impl Interpreter {
-    /// `libraries_dir` is where `akk install <name>` places downloaded
-    /// packages (normally the `libraries/` folder next to the akk binary).
-    /// It's used to resolve `နည်းပညာများ <name> ကို အသုံးပြုပါ။` for any
-    /// name that isn't one of the built-in libraries compiled into akk.
-    pub fn new(libraries_dir: std::path::PathBuf) -> Self {
-        Interpreter {
-            env: HashMap::new(),
-            functions: HashMap::new(),
-            classes: HashMap::new(),
-            self_stack: Vec::new(),
-            libraries: LibraryLoader::new(libraries_dir),
-        }
-    }
-
-    pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
-        for stmt in stmts {
-            self.exec(stmt)?;
-        }
-        Ok(())
-    }
-
-    fn exec(&mut self, stmt: &Stmt) -> Result<(), String> {
-        match stmt {
-            Stmt::VarDecl { name, value, line } => {
-                let v = self.eval(value, *line, Some(name))?;
-                self.env.insert(name.clone(), v);
-                Ok(())
-            }
-            Stmt::Print { value, line } => {
-                let v = self.eval(value, *line, None)?;
-                println!("{}", display(&v));
-                Ok(())
-            }
-            Stmt::InputNoAssign { value, line } => {
-                let prompt = self.eval(value, *line, None)?;
-                print!("{}", display(&prompt));
-                io::stdout().flush().ok();
-                let mut buf = String::new();
-                io::stdin().read_line(&mut buf).ok();
-                Ok(())
-            }
-            Stmt::InputAssign { name, value, line } => {
-                let prompt = self.eval(value, *line, None)?;
-                print!("{}", display(&prompt));
-                io::stdout().flush().ok();
-                let mut buf = String::new();
-                io::stdin().read_line(&mut buf).ok();
-                let trimmed = buf.trim().to_string();
-                let inferred = infer_value(&trimmed);
-                self.env.insert(name.clone(), inferred);
-                Ok(())
-            }
-            Stmt::ConvertStmt {
-                value,
-                target_type,
-                line,
-            } => {
-                let v = self.eval(value, *line, None)?;
-                convert_value(&v, target_type, *line)?;
-                Ok(())
-            }
-            Stmt::ExprStmt { value, line } => {
-                self.eval(value, *line, None)?;
-                Ok(())
-            }
-            Stmt::MathAssign {
-                target,
-                op,
-                amount,
-                line,
-            } => {
-                let amt = self.eval(amount, *line, None)?;
-                match target {
-                    Expr::Ident(name) => {
-                        // Undeclared variables default to 0 in math-assignment context.
-                        let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
-                        let result = binary_op(&current, &amt, *op, *line, Some(name))?;
-                        self.env.insert(name.clone(), result);
-                        Ok(())
-                    }
-                    other => {
-                        let current = self.eval(other, *line, None)?;
-                        binary_op(&current, &amt, *op, *line, None)?;
-                        Ok(())
-                    }
-                }
-            }
-            Stmt::ForLoop {
-                var_name,
-                source,
-                body,
-                line,
-            } => self.exec_for_loop(var_name, source, body, *line),
-            Stmt::If { branches, .. } => {
-                for branch in branches {
-                    let take = match &branch.cond {
-                        None => true, // the final, unconditional "else" branch
-                        Some(chain) => {
-                            let c = self.eval_cond_chain(chain)?;
-                            if branch.negate {
-                                !c
-                            } else {
-                                c
-                            }
-                        }
-                    };
-                    if take {
-                        for s in &branch.body {
-                            self.exec(s)?;
-                        }
-                        break;
-                    }
-                }
-                Ok(())
-            }
-            Stmt::While {
-                cond,
-                negate,
-                body,
-                line,
-            } => {
-                const MAX_ITERS: u64 = 5_000_000;
-                let mut iterations: u64 = 0;
-                loop {
-                    let c = self.eval_cond_chain(cond)?;
-                    let should_run = if *negate { !c } else { c };
-                    if !should_run {
-                        break;
-                    }
-                    iterations += 1;
-                    if iterations > MAX_ITERS {
-                        return Err(format!(
-                            "E046 လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
-                            line
-                        ));
-                    }
-                    for s in body {
-                        self.exec(s)?;
-                    }
-                }
-                Ok(())
-            }
-            Stmt::FuncDef {
-                name,
-                params,
-                body,
-                ..
-            } => {
-                self.functions
-                    .insert(name.clone(), (params.clone(), body.clone()));
-                Ok(())
-            }
-            Stmt::FuncCall { name, args, line } => {
-                self.call_function(name, args, *line)?;
-                Ok(())
-            }
-            Stmt::FuncCallAssign {
-                name,
-                fn_name,
-                args,
-                line,
-            } => {
-                let result = self.call_function(fn_name, args, *line)?;
-                let value = result.ok_or_else(|| {
-                    format!(
-                        "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
-                        line, fn_name, name
-                    )
-                })?;
-                self.env.insert(name.clone(), value);
-                Ok(())
-            }
-            Stmt::ClassDef { name, body, line } => {
-                let mut methods: Vec<(String, Vec<String>, Vec<Stmt>)> = Vec::new();
-                for s in body {
-                    match s {
-                        Stmt::FuncDef {
-                            name: mname,
-                            params,
-                            body: mbody,
-                            ..
-                        } => {
-                            methods.push((mname.clone(), params.clone(), mbody.clone()));
-                        }
-                        _ => {
-                            return Err(format!(
-                                "E027 လိုင်း {} တွင် \"{}\" class အတွင်း method (function) များသာ ပါဝင်နိုင်ပါသည်။",
-                                line, name
-                            ));
-                        }
-                    }
-                }
-                if methods.is_empty() {
-                    return Err(format!(
-                        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor method အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
-                        line, name
-                    ));
-                }
-                self.classes.insert(name.clone(), methods);
-                Ok(())
-            }
-            Stmt::SelfFieldSet { field, value, line } => {
-                let v = self.eval(value, *line, None)?;
-                match self.self_stack.last_mut() {
-                    Some(fields) => {
-                        if let Some(slot) = fields.iter_mut().find(|(k, _)| k == field) {
-                            slot.1 = v;
-                        } else {
-                            fields.push((field.clone(), v));
-                        }
-                        Ok(())
-                    }
-                    None => Err(format!(
-                        "E035 လိုင်း {} တွင် \"တန်ဖိုး\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
-                        line
-                    )),
-                }
-            }
-            Stmt::TryCatch {
-                try_body,
-                catch_err,
-                catch_var,
-                catch_body,
-                finally_body,
-                line: _,
-            } => {
-                let try_result = self.run(try_body);
-                match try_result {
-                    Ok(()) => {
-                        if let Some(fb) = finally_body {
-                            self.run(fb)?;
-                        }
-                        Ok(())
-                    }
-                    Err(err_msg) => {
-                        let err_code = extract_error_code(&err_msg);
-                        let matched = match (catch_err, catch_body) {
-                            (Some(name), Some(cb)) => {
-                                // "E" matches any error; otherwise must match exactly.
-                                if name == "E" || *name == err_code {
-                                    if let Some(cv) = catch_var {
-                                        self.env.insert(cv.clone(), Value::Str(err_code));
-                                    }
-                                    self.run(cb)
-                                } else {
-                                    Err(err_msg.clone())
-                                }
-                            }
-                            _ => Err(err_msg.clone()),
-                        };
-                        if let Some(fb) = finally_body {
-                            self.run(fb)?;
-                        }
-                        matched
-                    }
-                }
-            }
-            Stmt::UseLibrary { names, line } => {
-                for name in names {
-                    // Built-ins are compiled straight into the akk binary.
-                    if name == "ကျပန်း" || name == "အချိန်" {
-                        self.libraries.mark_loaded(name);
-                        continue;
-                    }
-
-                    // Otherwise, look for a package downloaded with
-                    // `akk install <name>` under the libraries/ folder. Its
-                    // source is plain Akkhara, so loading it just means
-                    // running it -- that registers its function/class
-                    // definitions the same way any top-level definition does.
-                    match self.libraries.find_dynamic_source(name) {
-                        Some(src) => {
-                            let tokens = crate::lexer::lex(&src).map_err(|e| {
-                                format!(
-                                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            let stmts = crate::parser::parse(&tokens).map_err(|e| {
-                                format!(
-                                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            self.run(&stmts)?;
-                            self.libraries.mark_loaded(name);
-                        }
-                        None => {
-                            return Err(format!(
-                                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
-                                line, name, name
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Stmt::RandomDecl { name, min, max, line } => {
-                if !self.libraries.is_loaded("ကျပန်း") {
-                    return Err(format!(
-                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
-                        line
-                    ));
-                }
-                let min_v = self.eval(min, *line, None)?;
-                let max_v = self.eval(max, *line, None)?;
-
-                let min_i = as_i64(&min_v).ok_or_else(|| {
-                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အစသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
-                })?;
-                let max_i = as_i64(&max_v).ok_or_else(|| {
-                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အဆုံးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
-                })?;
-
-                let val = crate::random_library::random_int(min_i, max_i)?;
-                self.env.insert(name.clone(), Value::Int(val));
-                Ok(())
-            }
-            Stmt::Wait { amount, unit, line } => {
-                if !self.libraries.is_loaded("အချိန်") {
-                    return Err(format!(
-                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန် ကို အသုံးပြုပါ။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
-                        line
-                    ));
-                }
-                let v = self.eval(amount, *line, None)?;
-                let secs = as_f64(&v).ok_or_else(|| {
-                    format!(
-                        "E061 လိုင်း {} တွင် စောင့်ရန် အချိန်တန်ဖိုးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
-                        line
-                    )
-                })?;
-                let unit = match unit {
-                    WaitUnit::Seconds => crate::time_library::WaitUnit::Seconds,
-                    WaitUnit::Minutes => crate::time_library::WaitUnit::Minutes,
-                    WaitUnit::Hours => crate::time_library::WaitUnit::Hours,
-                };
-                crate::time_library::wait(secs, unit)
-            }
-        }
-    }
-
-    /// Substitute "{VarName}" placeholders inside a string literal with the
-    /// current value of that variable, e.g. "Hello!, {Name}".
-const SELF_PREFIX: &'static str = "တန်ဖိုး ";
-
-    fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
-        if !s.contains('{') {
-            return Ok(s.to_string());
-        }
-        let mut out = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '{' {
-                let mut name = String::new();
-                let mut closed = false;
-                for nc in chars.by_ref() {
-                    if nc == '}' {
-                        closed = true;
-                        break;
-                    }
-                    name.push(nc);
-                }
-                if !closed {
-                    return Err(format!(
-                        "E056 လိုင်း {} တွင် string ထဲက \"{{\" ကိုပိတ်ရန် \"}}\" မရှိပါ။",
-                        line
-                    ));
-                }
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    return Err(format!(
-                        "E057 လိုင်း {} တွင် string interpolation \"{{}}\" ထဲမှာ variable အမည် လိုအပ်ပါသည်။",
-                        line
-                    ));
-                }
-                // "{တန်ဖိုး <field>}" reads the given field off the
-                // object currently under construction (inside a class
-                // method), rather than a plain global variable.
-                if let Some(field_name) = trimmed.strip_prefix(Self::SELF_PREFIX) {
-                    let field_name = field_name.trim();
-                    if field_name.is_empty() {
-                        return Err(format!(
-                            "E059 လိုင်း {} တွင် string interpolation \"{{{}}}\" ထဲမှာ field အမည် လိုအပ်ပါသည်။",
-                            line, trimmed
-                        ));
-                    }
-                    let fields = self.self_stack.last().ok_or_else(|| {
-                        format!(
-                            "E060 လိုင်း {} တွင် \"{{{}}}\" ကို class method အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
-                            line, trimmed
-                        )
-                    })?;
-                    let val = fields
-                        .iter()
-                        .find(|(k, _)| k == field_name)
-                        .map(|(_, v)| v)
-                        .ok_or_else(|| {
-                            format!(
-                                "E059 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော field ကို ရှာမတွေ့ပါ။",
-                                line, trimmed, field_name
-                            )
-                        })?;
-                    out.push_str(&display(val));
-                    continue;
-                }
-                let val = self.env.get(trimmed).ok_or_else(|| {
-                    format!(
-                        "E058 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
-                        line, trimmed, trimmed
-                    )
-                })?;
-                out.push_str(&display(val));
-            } else {
-                out.push(c);
-            }
-        }
-        Ok(out)
-    }
-
-/// Type-check for the "<var/val> သည် <type>" condition form.
-/// "ကိန်း" (num) and "ဒဿမကိန်း" (float) also accept numeric-looking strings,
-/// per spec: `"10" သည် ကိန်း` must be true.
-fn check_type(v: &Value, type_name: &str) -> bool {
-    match type_name {
-        "စာသား" => matches!(v, Value::Str(_)),
-        "ကိန်း" => match v {
-            Value::Int(_) | Value::Float(_) => true,
-            Value::Str(s) => {
-                let t = s.trim();
-                t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok()
-            }
-            _ => false,
-        },
-        "ဒဿမကိန်း" => match v {
-            Value::Float(_) => true,
-            Value::Str(s) => {
-                let t = s.trim();
-                t.contains('.') && t.parse::<f64>().is_ok()
-            }
-            _ => false,
-        },
-        "မှန်/မှား" => matches!(v, Value::Bool(_)),
-        _ => false,
-    }
-}
-
-    fn eval_cond_atom(&mut self, atom: &CondAtom) -> Result<bool, String> {
-        let lv = self.eval(&atom.lhs, atom.line, None)?;
-        if let Some(type_name) = &atom.type_check {
-            return Ok(Self::check_type(&lv, type_name));
-        }
-        match (&atom.op, &atom.rhs) {
-            (Some(op), Some(rhs_expr)) => {
-                let rv = self.eval(rhs_expr, atom.line, None)?;
-                compare_values(&lv, &rv, op, atom.line)
-            }
-            _ => match lv {
-                Value::Bool(b) => Ok(b),
-                other => Err(format!(
-                    "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
-                    atom.line,
-                    type_name_mm(&other)
-                )),
-            },
-        }
-    }
-
-    fn eval_cond_chain(&mut self, chain: &CondChain) -> Result<bool, String> {
-        let mut result = self.eval_cond_atom(&chain.first)?;
-        for (op, atom) in &chain.rest {
-            // Every atom is always evaluated (no short-circuiting), so a
-            // type error anywhere in the condition chain always surfaces
-            // rather than silently being skipped.
-            let v = self.eval_cond_atom(atom)?;
-            result = match op {
-                LogicalOp::And => result && v,
-                LogicalOp::Or => result || v,
-            };
-        }
-        Ok(result)
-    }
-
-    fn exec_for_loop(
-        &mut self,
-        var_name: &str,
-        source: &ForSource,
-        body: &[Stmt],
-        line: usize,
-    ) -> Result<(), String> {
-        match source {
-            ForSource::Range {
-                start,
-                end,
-                step,
-                op,
-            } => {
-                let start_v = match start {
-                    Some(e) => self.eval(e, line, None)?,
-                    None => Value::Int(0),
-                };
-                let end_v = self.eval(end, line, None)?;
-                let step_v = self.eval(step, line, None)?;
-
-                let mut current = start_v;
-                loop {
-                    let cur_f = as_f64(&current).ok_or_else(|| loop_not_numeric_err(line))?;
-                    let end_f = as_f64(&end_v).ok_or_else(|| loop_not_numeric_err(line))?;
-                    let keep_going = match op {
-                        '+' | '*' => cur_f < end_f,
-                        '-' | '/' => cur_f > end_f,
-                        _ => false,
-                    };
-                    if !keep_going {
-                        break;
-                    }
-                    self.env.insert(var_name.to_string(), current.clone());
-                    for s in body {
-                        self.exec(s)?;
-                    }
-                    current = binary_op(&current, &step_v, *op, line, Some(var_name))?;
-                }
-                Ok(())
-            }
-            ForSource::Auto(src) => {
-                let src_v = self.eval(src, line, None)?;
-                match src_v {
-                    Value::Int(_) | Value::Float(_) => {
-                        // Bare numeric source with no step clause: auto-range
-                        // from 0, incrementing by 1, matching the source value
-                        // as an exclusive upper bound (so "10" loops 10 times).
-                        let end_f = as_f64(&src_v).ok_or_else(|| loop_not_numeric_err(line))?;
-                        let mut current = Value::Int(0);
-                        loop {
-                            let cur_f =
-                                as_f64(&current).ok_or_else(|| loop_not_numeric_err(line))?;
-                            if cur_f >= end_f {
-                                break;
-                            }
-                            self.env.insert(var_name.to_string(), current.clone());
-                            for s in body {
-                                self.exec(s)?;
-                            }
-                            current =
-                                binary_op(&current, &Value::Int(1), '+', line, Some(var_name))?;
-                        }
-                        Ok(())
-                    }
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-                        for item in items {
-                            self.env.insert(var_name.to_string(), item);
-                            for s in body {
-                                self.exec(s)?;
-                            }
-                        }
-                        Ok(())
-                    }
-                    Value::Dict(pairs) => {
-                        for (k, _) in pairs {
-                            self.env.insert(var_name.to_string(), k);
-                            for s in body {
-                                self.exec(s)?;
-                            }
-                        }
-                        Ok(())
-                    }
-                    other => Err(loop_not_iterable_err(line, type_name_mm(&other))),
-                }
-            }
-        }
-    }
-
-    fn eval(&mut self, expr: &Expr, line: usize, var_ctx: Option<&str>) -> Result<Value, String> {
-        match expr {
-            Expr::NumLit(s) => {
-                if s.contains('.') {
-                    s.parse::<f64>()
-                        .map(Value::Float)
-                        .map_err(|_| format!("E047 လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
-                } else {
-                    s.parse::<i64>()
-                        .map(Value::Int)
-                        .map_err(|_| format!("E047 လိုင်း {} တွင် ကိန်းဂဏန်း တန်ဖိုးမှားနေသည်။", line))
-                }
-            }
-            Expr::StrLit(s) => Ok(Value::Str(self.interpolate(s, line)?)),
-            Expr::BoolLit(b) => Ok(Value::Bool(*b)),
-            Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
-                format!(
-                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
-                    line, name
-                )
-            }),
-            Expr::Binary(l, op, r, op_line) => {
-                let lv = self.eval(l, line, var_ctx)?;
-                let rv = self.eval(r, line, var_ctx)?;
-                binary_op(&lv, &rv, *op, *op_line, var_ctx)
-            }
-            Expr::Neg(inner, neg_line) => {
-                let iv = self.eval(inner, line, var_ctx)?;
-                match iv {
-                    Value::Int(i) => Ok(Value::Int(-i)),
-                    Value::Float(f) => Ok(Value::Float(-f)),
-                    other => Err(format!(
-                        "E041 လိုင်း {} တွင် {} ကို အနုတ် (-) လုပ်၍မရပါ။",
-                        neg_line,
-                        type_name_mm(&other)
-                    )),
-                }
-            }
-            Expr::Convert(inner, target_type, cline) => {
-                let iv = self.eval(inner, line, var_ctx)?;
-                convert_value(&iv, target_type, *cline)
-            }
-            Expr::ListLit(items) => {
-                let mut vals = Vec::with_capacity(items.len());
-                for it in items {
-                    vals.push(self.eval(it, line, var_ctx)?);
-                }
-                Ok(Value::List(vals))
-            }
-            Expr::TupleLit(items) => {
-                let mut vals = Vec::with_capacity(items.len());
-                for it in items {
-                    vals.push(self.eval(it, line, var_ctx)?);
-                }
-                Ok(Value::Tuple(vals))
-            }
-            Expr::SetLit(items) => {
-                let mut vals: Vec<Value> = Vec::with_capacity(items.len());
-                for it in items {
-                    let v = self.eval(it, line, var_ctx)?;
-                    if !vals.iter().any(|existing| value_eq(existing, &v)) {
-                        vals.push(v);
-                    }
-                }
-                Ok(Value::Set(vals))
-            }
-            Expr::DictLit(pairs) => {
-                let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    let kv = self.eval(k, line, var_ctx)?;
-                    let vv = self.eval(v, line, var_ctx)?;
-                    if let Some(slot) = out.iter_mut().find(|(ek, _)| value_eq(ek, &kv)) {
-                        slot.1 = vv;
-                    } else {
-                        out.push((kv, vv));
-                    }
-                }
-                Ok(Value::Dict(out))
-            }
-            Expr::Index(base, indices) => {
-                let base_v = self.eval(base, line, var_ctx)?;
-                let mut keys = Vec::with_capacity(indices.len());
-                for idx_e in indices {
-                    keys.push(self.eval(idx_e, line, var_ctx)?);
-                }
-                index_value(&base_v, &keys, line)
-            }
-            Expr::NewObj(class_name, arg_exprs, new_line) => {
-                self.construct_object(class_name, arg_exprs, *new_line)
-            }
-        }
-    }
-
-    /// Look up a user-defined function, bind its argument(s) to its
-    /// parameter(s) in the shared environment, and run its body. If the
-    /// body's final statement is a bare expression statement (`ExprStmt`),
-    /// that expression's value is returned as the function's "return value";
-    /// otherwise `None` is returned (the function produced no value).
-    fn call_function(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Option<Value>, String> {
-        let (params, body) = match self.functions.get(name) {
-            Some(v) => v.clone(),
-            None => {
-                return Err(format!(
-                    "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
-                    line, name
-                ));
-            }
-        };
-        if args.len() != params.len() {
-            return Err(format!(
-                "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
-                line,
-                name,
-                params.len(),
-                args.len()
-            ));
-        }
-        for (p, e) in params.iter().zip(args.iter()) {
-            let v = self.eval(e, line, None)?;
-            self.env.insert(p.clone(), v);
-        }
-        let mut return_value: Option<Value> = None;
-        for (i, s) in body.iter().enumerate() {
-            if i + 1 == body.len() {
-                if let Stmt::ExprStmt { value, line: sline } = s {
-                    return_value = Some(self.eval(value, *sline, None)?);
-                    continue;
-                }
-            }
-            self.exec(s)?;
-        }
-        Ok(return_value)
-    }
-
-    /// Instantiate an object: evaluate the constructor arguments, bind them
-    /// to the class's (first-defined) method's parameters, run that method's
-    /// body with a fresh field accumulator active, and return the resulting
-    /// Value::Object.
-    fn construct_object(
-        &mut self,
-        class_name: &str,
-        arg_exprs: &[Expr],
-        line: usize,
-    ) -> Result<Value, String> {
-        let methods = match self.classes.get(class_name) {
-            Some(m) => m.clone(),
-            None => {
-                return Err(format!(
-                    "E032 လိုင်း {} တွင် \"{}\" ဆိုသော class ကို ရှာမတွေ့ပါ။",
-                    line, class_name
-                ));
-            }
-        };
-        // The first method defined in the class acts as its constructor.
-        let (_, params, body) = &methods[0];
-
-        if arg_exprs.len() != params.len() {
-            return Err(format!(
-                "E034 လိုင်း {} တွင် \"{}\" class ၏ constructor သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
-                line,
-                class_name,
-                params.len(),
-                arg_exprs.len()
-            ));
-        }
-
-        let mut arg_values = Vec::with_capacity(arg_exprs.len());
-        for e in arg_exprs {
-            arg_values.push(self.eval(e, line, None)?);
-        }
-        for (p, v) in params.iter().zip(arg_values.into_iter()) {
-            self.env.insert(p.clone(), v);
-        }
-
-        self.self_stack.push(Vec::new());
-        let body = body.clone();
-        let run_result = (|| -> Result<(), String> {
-            for s in &body {
-                self.exec(s)?;
-            }
-            Ok(())
-        })();
-        let fields = self.self_stack.pop().unwrap_or_default();
-        run_result?;
-
-        Ok(Value::Object(class_name.to_string(), fields))
-    }
-}
-
-/// Error-code helpers for try/catch. All runtime errors are formatted as
-/// "E### <message>". `<error_name> ကို ဖမ်းပါ` binds the code (e.g. "E030")
-/// into a string variable so scripts can match on it.
-fn extract_error_code(msg: &str) -> String {
-    let code = msg.split_whitespace().next().unwrap_or("E");
-    code.to_string()
-}
-
-fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
-    match v {
-        Value::Int(i) => Ok(*i),
-        Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
-        _ => Err(format!(
-            "E048 လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။",
-            line
-        )),
-    }
-}
-
-fn get_seq_item(items: &[Value], idx: i64, line: usize) -> Result<Value, String> {
-    if idx < 0 {
-        return Err(format!(
-            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
-            line, idx
-        ));
-    }
-    items.get(idx as usize).cloned().ok_or_else(|| {
-        format!(
-            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
-            line, idx
-        )
-    })
-}
-
-fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, String> {
-    match keys {
-        [i] => {
-            let idx = index_as_int(i, line)?;
-            get_seq_item(items, idx, line)
-        }
-        [row_k, col_k] => {
-            let row = index_as_int(row_k, line)?;
-            let col = index_as_int(col_k, line)?;
-            match get_seq_item(items, row, line)? {
-                Value::List(cols) | Value::Tuple(cols) => get_seq_item(&cols, col, line),
-                other => Err(format!(
-                    "E054 လိုင်း {} တွင် {} ကို [row, column] ဖြင့် index ယူ၍မရပါ။",
-                    line,
-                    type_name_mm(&other)
-                )),
-            }
-        }
-        _ => Err(format!(
-            "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
-            line
-        )),
-    }
-}
-
-fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, String> {
-    match base {
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-            index_seq(items, keys, line)
-        }
-        Value::Dict(pairs) => {
-            if keys.len() != 1 {
-                return Err(format!(
-                    "E052 လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
-                    line
-                ));
-            }
-            let key = &keys[0];
-            pairs
-                .iter()
-                .find(|(k, _)| value_eq(k, key))
-                .map(|(_, v)| v.clone())
-                .ok_or_else(|| {
-                    format!(
-                        "E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။",
-                        line,
-                        repr(key)
-                    )
-                })
-        }
-        other => Err(format!(
-            "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
-            line,
-            type_name_mm(other)
-        )),
-    }
-}
-
-fn as_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Int(i) => Some(*i as f64),
-        Value::Float(f) => Some(*f),
+fn math_fn_op(kw: &str) -> Option<char> {
+    match kw {
+        MATH_FN_INC => Some('+'),
+        MATH_FN_DEC => Some('-'),
+        MATH_FN_MUL => Some('*'),
+        MATH_FN_DIV => Some('/'),
         _ => None,
     }
 }
 
-fn as_i64(v: &Value) -> Option<i64> {
-    match v {
-        Value::Int(i) => Some(*i),
-        Value::Float(f) => Some(*f as i64),
+pub const LOOP_FN_INC: &str = "တိုးခြင်းဖြင့်";
+pub const LOOP_FN_DEC: &str = "လျော့ခြင်းဖြင့်";
+pub const LOOP_FN_MUL: &str = "မြှောက်ခြင်းဖြင့်";
+pub const LOOP_FN_DIV: &str = "စားခြင်းဖြင့်";
+
+fn loop_fn_op(kw: &str) -> Option<char> {
+    match kw {
+        LOOP_FN_INC => Some('+'),
+        LOOP_FN_DEC => Some('-'),
+        LOOP_FN_MUL => Some('*'),
+        LOOP_FN_DIV => Some('/'),
         _ => None,
     }
 }
 
-fn loop_not_numeric_err(line: usize) -> String {
+pub fn is_type_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        TYPE_INT | TYPE_FLOAT | TYPE_STR | TYPE_LIST | TYPE_TUPLE | TYPE_SET | TYPE_DICT
+            | TYPE_TABLE
+    ) || s == "မှန်/မှား"
+        || s == "ဘူလ်"
+}
+
+fn ident_eq(tok: &Tok, s: &str) -> bool {
+    matches!(tok, Tok::Ident(v) if v == s)
+}
+
+fn is_open(tok: &Tok) -> bool {
+    matches!(tok, Tok::LBracket | Tok::LParen | Tok::LBrace)
+}
+
+fn is_close(tok: &Tok) -> bool {
+    matches!(tok, Tok::RBracket | Tok::RParen | Tok::RBrace)
+}
+
+fn missing_period_err(line: usize) -> String {
+    format!("E002 လိုင်း {} ၏စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
+}
+
+fn generic_syntax_err(line: usize) -> String {
+    format!("E001 လိုင်း {} သည် ရေးသားပုံစည်းမျဉ်းမမှန်ကန်ပါ။", line)
+}
+
+fn unclosed_bracket_err(line: usize, open: char) -> String {
+    let close = match open {
+        '[' => ']',
+        '(' => ')',
+        '{' => '}',
+        _ => '?',
+    };
     format!(
-        "E044 လိုင်း {} တွင် for loop ၏ အစ/အဆုံး/step တန်ဖိုးများသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+        "E003 လိုင်း {} တွင် '{}' ကိုပိတ်ရန် '{}' မရှိပါ။",
+        line, open, close
+    )
+}
+
+fn mismatched_bracket_err(line: usize) -> String {
+    format!(
+        "E004 လိုင်း {} တွင် ကွင်းများ ({{}}/[]/()) မှန်ကန်စွာ မတွဲထားပါ။",
         line
     )
 }
 
-fn loop_not_iterable_err(line: usize, type_name: &str) -> String {
+fn dict_entry_err(line: usize) -> String {
     format!(
-        "E045 လိုင်း {} တွင် {} ကို for loop ဖြင့် ထပ်ခါထပ်ခါ လည်ပတ်၍မရပါ။",
-        line, type_name
+        "E005 လိုင်း {} တွင် အဘိဓာန် (dict) အတွင်း <key> သည် <value> ဖြစ်၏။ ပုံစံဖြင့် ရေးရပါမည်။",
+        line
     )
 }
 
-fn cmp_type_err(line: usize, t1: &str, t2: &str, op: &str) -> String {
+// Generic "function call" particle errors, shared by ဖော်ပြပါ / မေးပါ.
+fn fn_missing_particle_err(line: usize, fname: &str) -> String {
+    let full = format!("{}။", fname);
     format!(
-        "E042 လိုင်း {} တွင် {} နှင့် {} ကို \"{}\" ဖြင့် နှိုင်းယှဉ်၍မရပါ။",
-        line, t1, t2, op
+        "E006 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  \"{}\" ၏အရှေ့၌ \"ကို\" ခံရေးရန်လိုအပ်သည်။",
+        line, full, full
     )
 }
 
-/// Evaluate one comparison ("<", ">", "==", "!=", "<=", ">=") between two
-/// already-evaluated values. Equality/inequality works for any pair of
-/// values (structural comparison); ordering comparisons require both sides
-/// to be numeric, or both sides to be strings (lexicographic order).
-fn compare_values(lhs: &Value, rhs: &Value, op: &str, line: usize) -> Result<bool, String> {
-    match op {
-        "==" => Ok(value_eq(lhs, rhs)),
-        "!=" => Ok(!value_eq(lhs, rhs)),
-        "<" | ">" | "<=" | ">=" => {
-            if let (Some(a), Some(b)) = (as_f64(lhs), as_f64(rhs)) {
-                return Ok(match op {
-                    "<" => a < b,
-                    ">" => a > b,
-                    "<=" => a <= b,
-                    ">=" => a >= b,
-                    _ => unreachable!(),
-                });
-            }
-            if let (Value::Str(a), Value::Str(b)) = (lhs, rhs) {
-                return Ok(match op {
-                    "<" => a < b,
-                    ">" => a > b,
-                    "<=" => a <= b,
-                    ">=" => a >= b,
-                    _ => unreachable!(),
-                });
-            }
-            Err(cmp_type_err(line, type_name_mm(lhs), type_name_mm(rhs), op))
-        }
+fn fn_missing_value_err(line: usize, fname: &str) -> String {
+    let full = format!("{}။", fname);
+    format!(
+        "E007 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  value မရှိသဖြင့် \"{}\" ကို မလုပ်ဆောင်နိုင်ပါ။",
+        line, full, full
+    )
+}
+
+fn convert_missing_value_err(line: usize) -> String {
+    format!(
+        "E008 လိုင်း {} တွင် ပြောင်းလဲရန် တန်ဖိုး လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
+        line
+    )
+}
+
+fn convert_missing_type_err(line: usize) -> String {
+    format!(
+        "E009 လိုင်း {} တွင် ပြောင်းလဲရန် အမျိုးအစား လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
+        line
+    )
+}
+
+fn math_missing_value_err(line: usize, fname: &str) -> String {
+    format!(
+        "E010 လိုင်း {} တွင် \"{}\" ကိုလုပ်ဆောင်ရန် value မရှိသဖြင့် \"{}\" ကိုမလုပ်ဆောင်နိုင်ပါ။",
+        line, fname, fname
+    )
+}
+
+fn if_missing_condition_err(line: usize) -> String {
+    format!(
+        "E011 လိုင်း {} တွင် \"အကယ်၍\"/\"သို့မဟုတ်\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn if_condition_syntax_err(line: usize) -> String {
+    format!(
+        "E012 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်လျှင်",
+        line
+    )
+}
+
+fn if_missing_then_err(line: usize) -> String {
+    format!(
+        "E013 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn if_else_not_last_err(line: usize) -> String {
+    format!(
+        "E014 လိုင်း {} တွင် \"မဟုတ်လျှင်\" (else) ကို \"အကယ်၍\"/\"သို့မဟုတ်\" branch အားလုံးအပြီးမှာသာ တစ်ခုတည်း ထားနိုင်ပါသည်။",
+        line
+    )
+}
+
+fn while_missing_condition_err(line: usize) -> String {
+    format!(
+        "E015 လိုင်း {} တွင် \"အခြေအနေ\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn while_condition_syntax_err(line: usize) -> String {
+    format!(
+        "E016 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အခြေအနေ (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်နေစဉ်",
+        line
+    )
+}
+
+fn while_missing_then_err(line: usize) -> String {
+    format!(
+        "E017 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn func_missing_name_err(line: usize) -> String {
+    format!(
+        "E018 လိုင်း {} တွင် \"လုပ်ငန်း\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        line
+    )
+}
+
+fn func_bad_param_err(line: usize) -> String {
+    format!(
+        "E019 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        line
+    )
+}
+
+fn func_missing_by_err(line: usize) -> String {
+    format!(
+        "E020 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn func_call_bad_name_err(line: usize) -> String {
+    format!(
+        "E021 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
+        line
+    )
+}
+
+fn func_call_missing_particle_err(line: usize) -> String {
+    format!(
+        "E022 လိုင်း {} တွင် function ခေါ်ရန် \"<fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        line
+    )
+}
+
+fn func_call_missing_by_err(line: usize) -> String {
+    format!(
+        "E023 လိုင်း {} တွင် \"လုပ်ရန်\" ၏ argument အပြီးမှာ \"ဖြင့်\" လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn func_call_missing_arg_err(line: usize) -> String {
+    format!(
+        "E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn library_use_bad_list_err(line: usize) -> String {
+    format!(
+        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို အသုံးပြုပါ။",
+        line
+    )
+}
+
+fn func_call_assign_missing_var_err(line: usize) -> String {
+    format!(
+        "E068 လိုင်း {} တွင် function ခေါ်ပြီး တန်ဖိုးသိမ်းမည့် variable အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — <var> အတွက် <fn name> ကို လုပ်ပါ။ သို့မဟုတ် <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်",
+        line
+    )
+}
+
+fn func_call_assign_bad_name_err(line: usize) -> String {
+    format!(
+        "E069 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
+        line
+    )
+}
+
+fn func_call_assign_missing_particle_err(line: usize) -> String {
+    format!(
+        "E070 လိုင်း {} တွင် function ခေါ်ရန် \"<var> အတွက် <fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        line
+    )
+}
+
+fn class_missing_name_err(line: usize) -> String {
+    format!(
+        "E025 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
+        line
+    )
+}
+
+fn class_missing_period_err(line: usize) -> String {
+    format!(
+        "E026 လိုင်း {} တွင် \"နည်းလမ်း <class name>\" ၏ အပြီးမှာ \"သည်\" သို့မဟုတ် '။' လိုအပ်ပါသည်။",
+        line
+    )
+}
+
+fn class_body_not_method_err(line: usize) -> String {
+    format!(
+        "E027 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွင်း \"လုပ်ငန်း\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
+        line
+    )
+}
+
+fn class_missing_constructor_err(line: usize, name: &str) -> String {
+    format!(
+        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor အနေဖြင့် method (function) အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
+        line, name
+    )
+}
+
+fn new_obj_missing_class_err(line: usize) -> String {
+    format!(
+        "E029 လိုင်း {} တွင် object အသစ်ဖန်တီးမည့် class ကို ရေးပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
+        line
+    )
+}
+
+// ---------------------------------------------------------------------
+// Bracket-aware helpers
+// ---------------------------------------------------------------------
+
+/// Given the index of an opening bracket token, find the index of its
+/// matching closing bracket, validating proper nesting along the way.
+fn find_close(tokens: &[Token], open_idx: usize, line: usize) -> Result<usize, String> {
+    let open_char = match &tokens[open_idx].tok {
+        Tok::LBracket => '[',
+        Tok::LParen => '(',
+        Tok::LBrace => '{',
         _ => unreachable!(),
-    }
-}
-
-fn binary_op(
-    lv: &Value,
-    rv: &Value,
-    op: char,
-    line: usize,
-    var_ctx: Option<&str>,
-) -> Result<Value, String> {
-    let type_err = || -> String {
-        let (t1, t2) = (type_name_mm(lv), type_name_mm(rv));
-        let opn = op_name_mm(op);
-        match var_ctx {
-            Some(name) => format!(
-                "E040 လိုင်း {} ၏ \"{}\"၌ {} နှင့် {} ကို {}၍မရပါ။",
-                line, name, t1, t2, opn
-            ),
-            None => format!("E040 လိုင်း {} တွင် {} နှင့် {} ကို {}၍မရပါ။", line, t1, t2, opn),
-        }
     };
-
-    match (lv, rv) {
-        (Value::Str(a), Value::Str(b)) => {
-            if op == '+' {
-                Ok(Value::Str(format!("{}{}", a, b)))
-            } else {
-                Err(type_err())
-            }
-        }
-        (Value::Int(a), Value::Int(b)) => match op {
-            '+' => Ok(Value::Int(a + b)),
-            '-' => Ok(Value::Int(a - b)),
-            '*' => Ok(Value::Int(a * b)),
-            '/' => {
-                if *b == 0 {
-                    Err(format!("E036 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
-                } else {
-                    Ok(Value::Float(*a as f64 / *b as f64))
-                }
-            }
-            '%' => {
-                if *b == 0 {
-                    Err(format!(
-                        "E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
-                        line
-                    ))
-                } else {
-                    Ok(Value::Int(a.rem_euclid(*b)))
-                }
-            }
-            '^' => {
-                if *b >= 0 {
-                    match (*a).checked_pow(*b as u32) {
-                        Some(v) => Ok(Value::Int(v)),
-                        None => Ok(Value::Float((*a as f64).powf(*b as f64))),
+    let mut stack: Vec<char> = vec![open_char];
+    let mut i = open_idx + 1;
+    while i < tokens.len() {
+        match &tokens[i].tok {
+            Tok::LBracket => stack.push('['),
+            Tok::LParen => stack.push('('),
+            Tok::LBrace => stack.push('{'),
+            Tok::RBracket | Tok::RParen | Tok::RBrace => {
+                let expected = match &tokens[i].tok {
+                    Tok::RBracket => '[',
+                    Tok::RParen => '(',
+                    Tok::RBrace => '{',
+                    _ => unreachable!(),
+                };
+                match stack.pop() {
+                    Some(top) if top == expected => {
+                        if stack.is_empty() {
+                            return Ok(i);
+                        }
                     }
-                } else {
-                    Ok(Value::Float((*a as f64).powf(*b as f64)))
+                    _ => return Err(mismatched_bracket_err(tokens[i].line)),
                 }
             }
-            '\\' => {
-                if *b == 0 {
-                    Err(format!(
-                        "E073 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                        line
-                    ))
-                } else {
-                    Ok(Value::Int((*a as f64 / *b as f64).floor() as i64))
-                }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(unclosed_bracket_err(line, open_char))
+}
+
+/// Split `tokens` at top-level (bracket-depth 0) positions matching `is_delim`.
+/// A trailing empty part (from a trailing delimiter, or from a fully-empty
+/// input) is dropped so `[]`/`[1,]` behave sensibly.
+fn split_top_level<'a>(tokens: &'a [Token], is_delim: impl Fn(&Tok) -> bool) -> Vec<&'a [Token]> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+        } else if depth == 0 && is_delim(&t.tok) {
+            parts.push(&tokens[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&tokens[start..]);
+    if let Some(last) = parts.last() {
+        if last.is_empty() {
+            parts.pop();
+        }
+    }
+    parts
+}
+
+/// Find the first top-level (bracket-depth 0) index matching `kw`.
+fn find_kw_top_level(tokens: &[Token], kw: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+        } else if depth == 0 && ident_eq(&t.tok, kw) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_kw(tokens: &[Token], kw: &str) -> Option<usize> {
+    find_kw_top_level(tokens, kw)
+}
+
+/// True if `tokens` is a single balanced `{ ... }` group spanning the whole
+/// slice (i.e. the opening brace's matching close is the very last token).
+fn is_single_braced_group(tokens: &[Token]) -> bool {
+    if tokens.len() < 2 || !matches!(tokens[0].tok, Tok::LBrace) {
+        return false;
+    }
+    if !matches!(tokens.last().unwrap().tok, Tok::RBrace) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+            if depth == 0 {
+                return i == tokens.len() - 1;
             }
-            _ => Err(type_err()),
+        }
+    }
+    false
+}
+
+/// Parse the argument list for a function call. Accepts either a single
+/// inline expression (`<arg>`), a comma-separated inline list
+/// (`<arg1>, <arg2>`), or a multi-line brace form spanning multiple lines:
+/// `{ <arg1>, <arg2>, ... }`.
+fn parse_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, String> {
+    if tokens.is_empty() {
+        return Err(func_call_missing_arg_err(line));
+    }
+    let inner: &[Token] = if is_single_braced_group(tokens) {
+        &tokens[1..tokens.len() - 1]
+    } else {
+        tokens
+    };
+    if inner.is_empty() {
+        return Err(func_call_missing_arg_err(line));
+    }
+    let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+    let mut args = Vec::with_capacity(parts.len());
+    for p in parts {
+        if p.is_empty() {
+            return Err(func_call_missing_arg_err(line));
+        }
+        args.push(parse_expr(p, line)?);
+    }
+    Ok(args)
+}
+
+fn has_end(tokens: &[Token]) -> bool {
+    matches!(tokens.last().map(|t| &t.tok), Some(Tok::End))
+}
+
+// ---------------------------------------------------------------------
+// Expression parsing (cursor based, supports collection literals)
+// ---------------------------------------------------------------------
+
+/// Parse a complete expression from a token slice; errors if any tokens
+/// are left over after the expression.
+fn parse_expr(tokens: &[Token], line: usize) -> Result<Expr, String> {
+    if tokens.is_empty() {
+        return Err(generic_syntax_err(line));
+    }
+    let (expr, pos) = parse_expr_at(tokens, 0, line)?;
+    if pos != tokens.len() {
+        return Err(generic_syntax_err(line));
+    }
+    Ok(expr)
+}
+
+fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_term_at(tokens, pos, line)?;
+    while i < tokens.len() {
+        if let Tok::Op(c) = &tokens[i].tok {
+            let op_line = tokens[i].line;
+            let (rhs, ni) = parse_term_at(tokens, i + 1, line)?;
+            expr = Expr::Binary(Box::new(expr), *c, Box::new(rhs), op_line);
+            i = ni;
+        } else {
+            break;
+        }
+    }
+    Ok((expr, i))
+}
+
+fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_primary_at(tokens, pos, line)?;
+    while i < tokens.len() && matches!(tokens[i].tok, Tok::LBracket) {
+        let close = find_close(tokens, i, tokens[i].line)?;
+        let inner = &tokens[i + 1..close];
+        if inner.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+        let mut indices = Vec::with_capacity(parts.len());
+        for p in parts {
+            if p.is_empty() {
+                return Err(generic_syntax_err(line));
+            }
+            indices.push(parse_expr(p, line)?);
+        }
+        expr = Expr::Index(Box::new(expr), indices);
+        i = close + 1;
+    }
+    Ok((expr, i))
+}
+
+fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    if pos >= tokens.len() {
+        return Err(generic_syntax_err(line));
+    }
+    match &tokens[pos].tok {
+        Tok::Op('-') => {
+            let op_line = tokens[pos].line;
+            let (inner, next) = parse_term_at(tokens, pos + 1, line)?;
+            Ok((Expr::Neg(Box::new(inner), op_line), next))
+        }
+        Tok::Num(s) => Ok((Expr::NumLit(s.clone()), pos + 1)),
+        Tok::Str(s) => Ok((Expr::StrLit(s.clone()), pos + 1)),
+        Tok::Ident(s) => match s.as_str() {
+            "True" => Ok((Expr::BoolLit(true), pos + 1)),
+            "False" => Ok((Expr::BoolLit(false), pos + 1)),
+            "မှန်" => Ok((Expr::BoolLit(true), pos + 1)),
+            "မှား" => Ok((Expr::BoolLit(false), pos + 1)),
+            _ => {
+                // Object instantiation. Two accepted orderings for the
+                // optional "အသစ်" (new) marker, since both are seen in the
+                // wild: "<ClassName> အသစ် (args)" and "<ClassName>(args) အသစ်".
+                let mut next = pos + 1;
+                if next < tokens.len() && ident_eq(&tokens[next].tok, KW_NEW) {
+                    next += 1;
+                }
+                if next < tokens.len() && matches!(tokens[next].tok, Tok::LParen) {
+                    let close = find_close(tokens, next, tokens[next].line)?;
+                    let inner = &tokens[next + 1..close];
+                    let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+                    let mut args = Vec::with_capacity(parts.len());
+                    for p in parts {
+                        args.push(parse_expr(p, line)?);
+                    }
+                    let mut after = close + 1;
+                    if after < tokens.len() && ident_eq(&tokens[after].tok, KW_NEW) {
+                        after += 1;
+                    }
+                    return Ok((Expr::NewObj(s.clone(), args, tokens[pos].line), after));
+                }
+                Ok((Expr::Ident(s.clone()), pos + 1))
+            }
         },
-        (Value::Int(a), Value::Float(b)) => numeric_op(*a as f64, *b, op, line),
-        (Value::Float(a), Value::Int(b)) => numeric_op(*a, *b as f64, op, line),
-        (Value::Float(a), Value::Float(b)) => numeric_op(*a, *b, op, line),
-        _ => Err(type_err()),
+        Tok::LBracket => {
+            let close = find_close(tokens, pos, tokens[pos].line)?;
+            let inner = &tokens[pos + 1..close];
+            let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+            let mut elems = Vec::with_capacity(parts.len());
+            for p in parts {
+                elems.push(parse_expr(p, line)?);
+            }
+            Ok((Expr::ListLit(elems), close + 1))
+        }
+        Tok::LParen => {
+            let close = find_close(tokens, pos, tokens[pos].line)?;
+            let inner = &tokens[pos + 1..close];
+            let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+            if parts.len() == 1 {
+                // A single, comma-less parenthesized group is just a
+                // grouping for precedence (e.g. "(temp - 32) * 5"), not a
+                // one-element tuple -- Akkhara has no precedence tiers of
+                // its own, so parens are the only way to group arithmetic.
+                let inner_expr = parse_expr(parts[0], line)?;
+                Ok((inner_expr, close + 1))
+            } else {
+                let mut elems = Vec::with_capacity(parts.len());
+                for p in parts {
+                    elems.push(parse_expr(p, line)?);
+                }
+                Ok((Expr::TupleLit(elems), close + 1))
+            }
+        }
+        Tok::LBrace => {
+            let close = find_close(tokens, pos, tokens[pos].line)?;
+            let inner = &tokens[pos + 1..close];
+            if inner.iter().any(|t| matches!(t.tok, Tok::End)) {
+                // Dict: entries separated by "။", each "<key> သည် <value> ဖြစ်၏"
+                let entries = split_top_level(inner, |t| matches!(t, Tok::End));
+                let mut pairs = Vec::with_capacity(entries.len());
+                for e in entries {
+                    let is_idx =
+                        find_kw_top_level(e, KW_IS).ok_or_else(|| dict_entry_err(line))?;
+                    if is_idx + 1 != e.len() {
+                        return Err(dict_entry_err(line));
+                    }
+                    let body_e = &e[..is_idx];
+                    let assign_idx = find_kw_top_level(body_e, KW_ASSIGN)
+                        .ok_or_else(|| dict_entry_err(line))?;
+                    let key = parse_expr(&body_e[..assign_idx], line)?;
+                    let value = parse_expr(&body_e[assign_idx + 1..], line)?;
+                    pairs.push((key, value));
+                }
+                Ok((Expr::DictLit(pairs), close + 1))
+            } else {
+                // Set: comma-separated elements
+                let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+                let mut elems = Vec::with_capacity(parts.len());
+                for p in parts {
+                    elems.push(parse_expr(p, line)?);
+                }
+                Ok((Expr::SetLit(elems), close + 1))
+            }
+        }
+        _ => Err(generic_syntax_err(line)),
     }
 }
 
-fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
-    match op {
-        '+' => Ok(Value::Float(a + b)),
-        '-' => Ok(Value::Float(a - b)),
-        '*' => Ok(Value::Float(a * b)),
-        '/' => {
-            if b == 0.0 {
-                Err(format!("E037 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line))
-            } else {
-                Ok(Value::Float(a / b))
-            }
-        }
-        '%' => {
-            if b == 0.0 {
-                Err(format!(
-                    "E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
-                    line
-                ))
-            } else {
-                Ok(Value::Float(a.rem_euclid(b)))
-            }
-        }
-        '^' => Ok(Value::Float(a.powf(b))),
-        '\\' => {
-            if b == 0.0 {
-                Err(format!(
-                    "E074 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                    line
-                ))
-            } else {
-                Ok(Value::Float((a / b).floor()))
-            }
-        }
-        _ => unreachable!(),
-    }
+/// Unit of a wait amount: `s` (seconds), `m` (minutes), `h` (hours).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitUnit {
+    Seconds,
+    Minutes,
+    Hours,
 }
 
-fn infer_value(s: &str) -> Value {
-    if s == "True" || s == "မှန်" {
-        return Value::Bool(true);
+/// Parse "value ကို <FUNC>" shaped statements (print / input-no-assign),
+/// where `body` excludes the trailing End token and the function keyword itself.
+fn parse_particle_call(
+    body: &[Token],
+    fn_idx: usize,
+    fname: &str,
+    line: usize,
+) -> Result<Expr, String> {
+    let before = &body[..fn_idx];
+    if let Some(last) = before.last() {
+        if ident_eq(&last.tok, KW_PARTICLE) {
+            let value_tokens = &before[..before.len() - 1];
+            if value_tokens.is_empty() {
+                return Err(fn_missing_value_err(line, fname));
+            }
+            return parse_expr(value_tokens, line);
+        }
     }
-    if s == "False" || s == "မှား" {
-        return Value::Bool(false);
+    if before.is_empty() {
+        return Err(fn_missing_value_err(line, fname));
     }
-    if let Ok(i) = s.parse::<i64>() {
-        return Value::Int(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Value::Float(f);
-    }
-    Value::Str(s.to_string())
+    Err(fn_missing_particle_err(line, fname))
 }
 
-fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, String> {
-    let fail = || -> String {
-        format!(
-            "E055 လိုင်း {} တွင် {} ကို {}သို့ ပြောင်းလဲ၍ မရပါ။",
-            line,
-            quoted_display(v),
-            target_type
-        )
+// ---------------------------------------------------------------------
+// Statement splitting: '။' at bracket-depth 0 ends a statement.
+// ---------------------------------------------------------------------
+
+fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
+    let mut stmts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+        } else if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
+            // Opens a for-loop, if/else, while, or function-definition block:
+            // its header has no terminating '။' of its own, so treat it as a
+            // nesting level too, just like brackets, so interior statement-
+            // terminating '။' tokens don't prematurely close the outer
+            // chunk. All block kinds share the same closing keyword "ပြီး".
+            depth += 1;
+        } else if ident_eq(&t.tok, KW_LOOP_END) {
+            depth -= 1;
+        } else if depth == 0 && matches!(t.tok, Tok::End) {
+            let slice = &tokens[start..=i];
+            let line = slice[0].line;
+            stmts.push((slice.to_vec(), line));
+            start = i + 1;
+        }
+    }
+    if start < tokens.len() {
+        let slice = &tokens[start..];
+        let line = slice[0].line;
+        stmts.push((slice.to_vec(), line));
+    }
+    stmts
+}
+
+/// Same nesting rules as `split_statements` (brackets + for/if block
+/// keywords), but used to locate the first top-level occurrence of one of
+/// several target keywords within an if-statement's tokens (branch
+/// separators / condition terminators). Returns (index, which kws entry).
+fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, usize)> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+            continue;
+        }
+        if is_close(&t.tok) {
+            depth -= 1;
+            continue;
+        }
+        if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
+            depth += 1;
+            continue;
+        }
+        if ident_eq(&t.tok, KW_LOOP_END) {
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 {
+            if let Tok::Ident(s) = &t.tok {
+                for (ki, kw) in kws.iter().enumerate() {
+                    if s == kw {
+                        return Some((i, ki));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    let end_present = has_end(tokens);
+    let mut body: Vec<Token> = if end_present {
+        tokens[..tokens.len() - 1].to_vec()
+    } else {
+        tokens.to_vec()
     };
 
-    match target_type {
-        TYPE_STR => Ok(Value::Str(display(v))),
-        TYPE_INT => match v {
-            Value::Int(i) => Ok(Value::Int(*i)),
-            Value::Float(f) => Ok(Value::Int(*f as i64)),
-            Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-            Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| fail()),
-            _ => Err(fail()),
-        },
-        TYPE_FLOAT => match v {
-            Value::Int(i) => Ok(Value::Float(*i as f64)),
-            Value::Float(f) => Ok(Value::Float(*f)),
-            Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-            Value::Str(s) => s
-                .trim()
-                .parse::<f64>()
-                .map(Value::Float)
-                .map_err(|_| fail()),
-            _ => Err(fail()),
-        },
-        _ => {
-            // bool-ish target
-            match v {
-                Value::Bool(b) => Ok(Value::Bool(*b)),
-                Value::Str(s) => match s.as_str() {
-                    "True" | "မှန်" => Ok(Value::Bool(true)),
-                    "False" | "မှား" => Ok(Value::Bool(false)),
-                    _ => Err(fail()),
-                },
-                Value::Int(i) => Ok(Value::Bool(*i != 0)),
-                Value::Float(f) => Ok(Value::Bool(*f != 0.0)),
-                _ => Err(fail()),
+    // --- For-loop / if-else / while block: header (no '။' of its own) ... body ... ပြီး။ ---
+    if end_present {
+        if let Some(last) = body.last() {
+            if ident_eq(&last.tok, KW_LOOP_END) {
+                body.pop();
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_IF) {
+                    let inner = body[1..].to_vec();
+                    return parse_if_statement(&inner, line);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_WHILE) {
+                    let inner = body[1..].to_vec();
+                    return parse_while_statement(&inner, line);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_FUNC_DEF) {
+                    let inner = body[1..].to_vec();
+                    return parse_func_def(&inner, line);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_CLASS_DEF) {
+                    let inner = body[1..].to_vec();
+                    return parse_class_def(&inner, line);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_TRY) {
+                    let inner = body[1..].to_vec();
+                    return parse_try_catch(&inner, line);
+                }
+                return parse_for_loop(&body, line);
             }
         }
     }
+
+    // --- Library import: နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။ ---
+    if !body.is_empty() && ident_eq(&body[0].tok, KW_LIBRARIES) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if body.len() >= 4
+            && ident_eq(&body.last().unwrap().tok, KW_USE)
+            && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
+        {
+            let names_tokens = &body[1..body.len() - 2];
+            let mut names = Vec::new();
+            for part in names_tokens.split(|t| matches!(t.tok, Tok::Comma)) {
+                match part {
+                    [t] => match &t.tok {
+                        Tok::Ident(s) => names.push(s.clone()),
+                        _ => return Err(library_use_bad_list_err(line)),
+                    },
+                    _ => return Err(library_use_bad_list_err(line)),
+                }
+            }
+            if names.is_empty() {
+                return Err(library_use_bad_list_err(line));
+            }
+            return Ok(Stmt::UseLibrary { names, line });
+        }
+        return Err(generic_syntax_err(line));
+    }
+
+    // --- Wait (sleep): <amount><unit?> ကို စောင့်ပါ။ ---
+    if let Some(wait_idx) = find_kw(&body, KW_WAIT) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if wait_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        if wait_idx == 0 || !ident_eq(&body[wait_idx - 1].tok, KW_PARTICLE) {
+            return Err(generic_syntax_err(line));
+        }
+        let value_tokens = &body[..wait_idx - 1];
+        if value_tokens.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        // Optional unit suffix (s/m/h) fused on the amount, defaults to seconds.
+        let (amount_tokens, unit) =
+            if let Some(Tok::Ident(suf)) = value_tokens.last().map(|t| &t.tok) {
+                match suf.as_str() {
+                    "s" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Seconds,
+                    ),
+                    "m" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Minutes,
+                    ),
+                    "h" if value_tokens.len() >= 2 => (
+                        &value_tokens[..value_tokens.len() - 1],
+                        WaitUnit::Hours,
+                    ),
+                    _ => (value_tokens, WaitUnit::Seconds),
+                }
+            } else {
+                (value_tokens, WaitUnit::Seconds)
+            };
+        if amount_tokens.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        let amount = parse_expr(amount_tokens, line)?;
+        return Ok(Stmt::Wait {
+            amount,
+            unit,
+            line,
+        });
+    }
+
+    // --- Function call with argument(s): <fn name> ကို လုပ်ရန် <argument> ဖြင့်။
+    //     Multi-line, multi-argument brace form is also accepted:
+    //       <fn name> ကို လုပ်ရန် { <arg1>, <arg2>, ... } ဖြင့်
+    //     OR, assigned to a variable: <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်။ ---
+    if let Some(call_idx) = find_kw(&body, KW_CALL_WITH) {
+        if let Some(for_idx) = find_kw(&body[..call_idx], KW_FOR) {
+            // Assigned form: "<var> အတွက် <fn name> ကို လုပ်ရန် <arg(s)> ဖြင့်"
+            if for_idx == 0 || !matches!(body[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_missing_var_err(line));
+            }
+            let var_name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let rest = &body[for_idx + 1..];
+            if rest.is_empty() || !matches!(rest[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_bad_name_err(line));
+            }
+            let fn_name = match &rest[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let call_idx_in_rest = find_kw(rest, KW_CALL_WITH)
+                .ok_or_else(|| func_call_assign_missing_particle_err(line))?;
+            if call_idx_in_rest != 2 || !ident_eq(&rest[1].tok, KW_PARTICLE) {
+                return Err(func_call_assign_missing_particle_err(line));
+            }
+            let after_call = &rest[call_idx_in_rest + 1..];
+            let by_idx = find_kw_top_level(after_call, KW_BY)
+                .ok_or_else(|| func_call_missing_by_err(line))?;
+            let arg_tokens = &after_call[..by_idx];
+            let args = parse_call_args(arg_tokens, line)?;
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if by_idx + 1 != after_call.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::FuncCallAssign {
+                name: var_name,
+                fn_name,
+                args,
+                line,
+            });
+        }
+
+        if body.is_empty() || !matches!(body[0].tok, Tok::Ident(_)) {
+            return Err(func_call_bad_name_err(line));
+        }
+        let fn_name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        if call_idx != 2 || !ident_eq(&body[1].tok, KW_PARTICLE) {
+            return Err(func_call_missing_particle_err(line));
+        }
+        let after_call = &body[call_idx + 1..];
+        let by_idx = find_kw_top_level(after_call, KW_BY)
+            .ok_or_else(|| func_call_missing_by_err(line))?;
+        let arg_tokens = &after_call[..by_idx];
+        let args = parse_call_args(arg_tokens, line)?;
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if by_idx + 1 != after_call.len() {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::FuncCall {
+            name: fn_name,
+            args,
+            line,
+        });
+    }
+
+    // --- Function call (no argument): <fn name> ကို လုပ်ပါ။
+    //     OR, assigned to a variable: <var> အတွက် <fn name> ကို လုပ်ပါ။ ---
+    if let Some(call_idx) = find_kw(&body, KW_CALL) {
+        if let Some(for_idx) = find_kw(&body[..call_idx], KW_FOR) {
+            // Assigned form: "<var> အတွက် <fn name> ကို လုပ်ပါ။"
+            if for_idx == 0 || !matches!(body[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_missing_var_err(line));
+            }
+            let var_name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let rest = &body[for_idx + 1..];
+            if rest.is_empty() || !matches!(rest[0].tok, Tok::Ident(_)) {
+                return Err(func_call_assign_bad_name_err(line));
+            }
+            let fn_name = match &rest[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let call_idx_in_rest = find_kw(rest, KW_CALL)
+                .ok_or_else(|| func_call_assign_missing_particle_err(line))?;
+            if call_idx_in_rest != 2 || !ident_eq(&rest[1].tok, KW_PARTICLE) {
+                return Err(func_call_assign_missing_particle_err(line));
+            }
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if call_idx_in_rest + 1 != rest.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::FuncCallAssign {
+                name: var_name,
+                fn_name,
+                args: Vec::new(),
+                line,
+            });
+        }
+
+        if body.is_empty() || !matches!(body[0].tok, Tok::Ident(_)) {
+            return Err(func_call_bad_name_err(line));
+        }
+        let fn_name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        if call_idx != 2 || !ident_eq(&body[1].tok, KW_PARTICLE) {
+            return Err(func_call_missing_particle_err(line));
+        }
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if call_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::FuncCall {
+            name: fn_name,
+            args: Vec::new(),
+            line,
+        });
+    }
+
+    // --- Print statement: ... ကို ဖော်ပြပါ။ ---
+    if let Some(idx) = find_kw(&body, KW_PRINT) {
+        let value = parse_particle_call(&body, idx, KW_PRINT, line)?;
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::Print { value, line });
+    }
+
+    // --- Input statements: ... ကို မေးပါ။  OR  name အတွက် ... ကို မေးပါ။ ---
+    if let Some(idx) = find_kw(&body, KW_INPUT) {
+        if let Some(for_idx) = find_kw(&body, KW_FOR) {
+            if for_idx == 0 {
+                return Err(generic_syntax_err(line));
+            }
+            let name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => return Err(generic_syntax_err(line)),
+            };
+            let rest = &body[for_idx + 1..];
+            let inp_idx_in_rest = find_kw(rest, KW_INPUT).ok_or_else(|| generic_syntax_err(line))?;
+            let value = parse_particle_call(rest, inp_idx_in_rest, KW_INPUT, line)?;
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if inp_idx_in_rest + 1 != rest.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::InputAssign { name, value, line });
+        } else {
+            let value = parse_particle_call(&body, idx, KW_INPUT, line)?;
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            if idx + 1 != body.len() {
+                return Err(generic_syntax_err(line));
+            }
+            return Ok(Stmt::InputNoAssign { value, line });
+        }
+    }
+
+    // --- Convert statement (standalone): value ကို <type> သို့ ပြောင်းပါ။ ---
+    if let Some(conv_idx) = find_kw(&body, KW_CONVERT) {
+        if conv_idx == 0 || !ident_eq(&body[conv_idx - 1].tok, KW_TO) {
+            return Err(generic_syntax_err(line));
+        }
+        let to_idx = conv_idx - 1;
+        if to_idx == 0 {
+            return Err(convert_missing_type_err(line));
+        }
+        let type_idx = to_idx - 1;
+
+        if ident_eq(&body[type_idx].tok, KW_PARTICLE) {
+            return Err(convert_missing_type_err(line));
+        }
+
+        let type_name = match &body[type_idx].tok {
+            Tok::Ident(s) if is_type_keyword(s) => s.clone(),
+            _ => return Err(convert_missing_type_err(line)),
+        };
+
+        if type_idx == 0 || !ident_eq(&body[type_idx - 1].tok, KW_PARTICLE) {
+            return Err(convert_missing_value_err(line));
+        }
+        let ko_idx = type_idx - 1;
+        let value_tokens = &body[..ko_idx];
+        if value_tokens.is_empty() {
+            return Err(convert_missing_value_err(line));
+        }
+        let value = parse_expr(value_tokens, line)?;
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if conv_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::ConvertStmt {
+            value,
+            target_type: type_name,
+            line,
+        });
+    }
+
+    // --- Math assignment: <var/value> ကို <amount> <fn>ပါ။  OR  <var> အတွက် <amount> <fn>ပါ။ ---
+    let math_fn_idx = body
+        .iter()
+        .position(|t| matches!(&t.tok, Tok::Ident(s) if math_fn_op(s).is_some()));
+    if let Some(fn_idx) = math_fn_idx {
+        let fname = match &body[fn_idx].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let op = math_fn_op(&fname).unwrap();
+
+        let amount_idx = if fn_idx == 0 { None } else { Some(fn_idx - 1) };
+        let amount_is_num = amount_idx
+            .map(|i| matches!(&body[i].tok, Tok::Num(_)))
+            .unwrap_or(false);
+        let amount_is_neg_num = fn_idx >= 2
+            && matches!(&body[fn_idx - 1].tok, Tok::Num(_))
+            && matches!(&body[fn_idx - 2].tok, Tok::Op('-'));
+
+        if !amount_is_num && !amount_is_neg_num {
+            return Err(math_missing_value_err(line, &fname));
+        }
+        let amount_start = if amount_is_neg_num { fn_idx - 2 } else { fn_idx - 1 };
+        let (amount, _) = parse_term_at(&body, amount_start, line)?;
+
+        if amount_start == 0 {
+            return Err(generic_syntax_err(line));
+        }
+        let particle_idx = amount_start - 1;
+
+        let target = if ident_eq(&body[particle_idx].tok, KW_FOR) {
+            if particle_idx != 1 {
+                return Err(generic_syntax_err(line));
+            }
+            match &body[0].tok {
+                Tok::Ident(s) => Expr::Ident(s.clone()),
+                _ => return Err(generic_syntax_err(line)),
+            }
+        } else if ident_eq(&body[particle_idx].tok, KW_PARTICLE) {
+            let target_tokens = &body[..particle_idx];
+            if target_tokens.is_empty() {
+                return Err(generic_syntax_err(line));
+            }
+            parse_expr(target_tokens, line)?
+        } else {
+            return Err(generic_syntax_err(line));
+        };
+
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if fn_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+
+        return Ok(Stmt::MathAssign {
+            target,
+            op,
+            amount,
+            line,
+        });
+    }
+
+    // --- Self field assignment: တန်ဖိုး <field> သည် <value> ဖြစ်၏။ (inside a class method) ---
+    if !body.is_empty() && ident_eq(&body[0].tok, KW_SELF) {
+        if body.len() < 2 {
+            return Err(generic_syntax_err(line));
+        }
+        let field_name = match &body[1].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => return Err(generic_syntax_err(line)),
+        };
+        if body.len() < 3 || !ident_eq(&body[2].tok, KW_ASSIGN) {
+            return Err(format!(
+                "E001 လိုင်း {} တွင် {} {} ကို တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
+                line, KW_SELF, field_name
+            ));
+        }
+        let is_idx = find_kw(&body, KW_IS).ok_or_else(|| missing_period_err(line))?;
+        let value_tokens = &body[3..is_idx];
+        if value_tokens.is_empty() {
+            return Err(format!(
+                "E001 လိုင်း {} တွင် {} {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
+                line, KW_SELF, field_name
+            ));
+        }
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if is_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        let value = parse_expr(value_tokens, line)?;
+        return Ok(Stmt::SelfFieldSet {
+            field: field_name,
+            value,
+            line,
+        });
+    }
+
+    // --- Random number assignment: ကျပန်းကိန်း <name> သည် <min> နှင့် <max> အကြား ဖြစ်၏။ ---
+    if !body.is_empty() && ident_eq(&body[0].tok, KW_RANDOM) {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if body.len() < 8 {
+            return Err(generic_syntax_err(line));
+        }
+        if !ident_eq(&body[2].tok, KW_ASSIGN) {
+            return Err(generic_syntax_err(line));
+        }
+        let and_idx = find_kw(&body[3..], KW_AND).map(|i| i + 3);
+        let between_idx = find_kw(&body[3..], KW_BETWEEN).map(|i| i + 3);
+
+        match (and_idx, between_idx) {
+            (Some(a_idx), Some(b_idx)) if a_idx < b_idx => {
+                if !ident_eq(&body[b_idx + 1].tok, KW_IS) {
+                    return Err(generic_syntax_err(line));
+                }
+                let name = match &body[1].tok {
+                    Tok::Ident(s) => s.clone(),
+                    _ => return Err(generic_syntax_err(line)),
+                };
+                let min = parse_expr(&body[3..a_idx], line)?;
+                let max = parse_expr(&body[a_idx + 1..b_idx], line)?;
+                return Ok(Stmt::RandomDecl { name, min, max, line });
+            }
+            _ => return Err(generic_syntax_err(line)),
+        }
+    }
+
+    // --- Variable / collection declaration: name (သည်|မှာ) value ဖြစ်၏။ ---
+    if let Some(is_idx) = find_kw(&body, KW_IS) {
+        if body.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        let name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => return Err(generic_syntax_err(line)),
+        };
+        let assign_ok = body.len() >= 2
+            && (ident_eq(&body[1].tok, KW_ASSIGN) || ident_eq(&body[1].tok, KW_ASSIGN_COLLECTION));
+        if !assign_ok {
+            return Err(format!(
+                "E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
+                line
+            ));
+        }
+        let value_tokens = &body[2..is_idx];
+        if value_tokens.is_empty() {
+            return Err(format!(
+                "E001 လိုင်း {} တွင် {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
+                line, name
+            ));
+        }
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        if is_idx + 1 != body.len() {
+            return Err(generic_syntax_err(line));
+        }
+        let value = parse_expr(value_tokens, line)?;
+        return Ok(Stmt::VarDecl { name, value, line });
+    }
+
+    // --- Bare expression statement (e.g. "10 + \"10\"") ---
+    if body.iter().any(|t| matches!(t.tok, Tok::Op(_))) {
+        let value = parse_expr(&body, line)?;
+        return Ok(Stmt::ExprStmt { value, line });
+    }
+
+    Err(generic_syntax_err(line))
+}
+
+/// Parse a for-loop's inner tokens: the header (variable, source, optional
+/// step+fn) followed by the loop body's own statement tokens. The trailing
+/// "ပြီး" marker has already been stripped by the caller.
+fn parse_for_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    if inner.len() < 2 {
+        return Err(generic_syntax_err(line));
+    }
+    let var_name = match &inner[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => return Err(generic_syntax_err(line)),
+    };
+    if !ident_eq(&inner[1].tok, KW_ASSIGN) {
+        return Err(generic_syntax_err(line));
+    }
+
+    let htm_idx =
+        find_kw_top_level(inner, KW_LOOP_FROM).ok_or_else(|| generic_syntax_err(line))?;
+    let source_tokens = &inner[2..htm_idx];
+    if source_tokens.is_empty() {
+        return Err(generic_syntax_err(line));
+    }
+
+    let tcs_idx = htm_idx + 1;
+    if tcs_idx >= inner.len() || !ident_eq(&inner[tcs_idx].tok, KW_LOOP_EACH) {
+        return Err(generic_syntax_err(line));
+    }
+
+    // Optionally, a range step + math-fn immediately follows "တစ်ခုစီ"
+    // (e.g. "1 တိုးခြင်းဖြင့်"). If it's not there, this is a plain
+    // collection-iteration loop and the body starts right away.
+    let mut cursor = tcs_idx + 1;
+    let mut range_step: Option<(Expr, char)> = None;
+    if cursor < inner.len()
+        && (matches!(inner[cursor].tok, Tok::Num(_)) || matches!(inner[cursor].tok, Tok::Op('-')))
+    {
+        if let Ok((step_expr, next)) = parse_term_at(inner, cursor, line) {
+            if next < inner.len() {
+                if let Tok::Ident(s) = &inner[next].tok {
+                    if let Some(op) = loop_fn_op(s) {
+                        range_step = Some((step_expr, op));
+                        cursor = next + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let body_tokens = &inner[cursor..];
+    let mut body_stmts = Vec::new();
+    for (chunk, cline) in split_statements(body_tokens) {
+        body_stmts.push(parse_stmt(&chunk, cline)?);
+    }
+
+    let source = if let Some((step, op)) = range_step {
+        let parts = split_top_level(source_tokens, |t| matches!(t, Tok::Comma));
+        let (start, end) = match parts.len() {
+            1 => (None, parse_expr(parts[0], line)?),
+            2 => (
+                Some(parse_expr(parts[0], line)?),
+                parse_expr(parts[1], line)?,
+            ),
+            _ => return Err(generic_syntax_err(line)),
+        };
+        ForSource::Range {
+            start,
+            end,
+            step,
+            op,
+        }
+    } else {
+        ForSource::Auto(parse_expr(source_tokens, line)?)
+    };
+
+    Ok(Stmt::ForLoop {
+        var_name,
+        source,
+        body: body_stmts,
+        line,
+    })
+}
+
+/// Parse a try/catch/finally block. `inner` has the leading `စမ်းရန်` and
+/// trailing `ပြီး` already stripped by the caller.
+fn parse_try_catch(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    // Find `နောက်ဆုံးတွင်` (finally) at block level.
+    let finally_rel = find_first_at_block_level(inner, &[KW_FINALLY]);
+    let (try_catch_tokens, finally_tokens) = match finally_rel {
+        Some((idx, _)) => (&inner[..idx], Some(&inner[idx + 1..])),
+        None => (inner, None),
+    };
+
+    // Find `ဖမ်းပါ` (catch) at block level within the try+catch section.
+    // The catch header is "<error_name> ကို ဖမ်းပါ။", spanning the tokens
+    // [<error_name>, ကို, ဖမ်းပါ, End]. `ဖမ်းပါ` sits at `idx`, so the header
+    // runs from `idx-2` through `idx+1`; the try body ends at `idx-2` and the
+    // catch body begins right after the header's trailing '။'.
+    let catch_rel = find_first_at_block_level(try_catch_tokens, &[KW_CATCH]);
+    let (catch_err, try_tokens, catch_body_tokens) = match catch_rel {
+        Some((idx, _))
+            if idx >= 2
+                && ident_eq(&try_catch_tokens[idx - 1].tok, KW_PARTICLE)
+                && try_catch_tokens.get(idx + 1).map(|t| &t.tok) == Some(&Tok::End) =>
+        {
+            let err_name = match &try_catch_tokens[idx - 2].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => {
+                    return Err(format!(
+                        "E001 လိုင်း {} တွင် catch block ထဲတွင် <error_name> မှားနေပါသည်။",
+                        try_catch_tokens[idx - 2].line
+                    ))
+                }
+            };
+            // Validate the error-name itself: "E" or "E###".
+            if err_name != "E" && !(err_name.len() == 4 && err_name.starts_with('E')) {
+                return Err(format!(
+                    "E001 လိုင်း {} တွင် catch block ၏ error name \"{}\" မှားနေပါသည်။ (E သို့မဟုတ် E001 ကဲ့သို့ ရေးရပါမည်)",
+                    try_catch_tokens[idx - 2].line,
+                    err_name
+                ));
+            }
+            let try_end = idx - 2;
+            let body_start = idx + 2;
+            (
+                Some(err_name),
+                &try_catch_tokens[..try_end],
+                Some(&try_catch_tokens[body_start..]),
+            )
+        }
+        Some((idx, _)) => (
+            None,
+            &try_catch_tokens[..idx],
+            Some(&try_catch_tokens[idx + 1..]),
+        ),
+        None => (None, try_catch_tokens, None),
+    };
+
+    let try_body = parse_block(try_tokens)?;
+
+    let (catch_var, catch_body) = match catch_body_tokens {
+        Some(ct) => (catch_err.clone(), Some(parse_block(ct)?)),
+        None => (None, None),
+    };
+
+    let finally_body = match finally_tokens {
+        Some(ft) => Some(parse_block(ft)?),
+        None => None,
+    };
+
+    Ok(Stmt::TryCatch {
+        try_body,
+        catch_err,
+        catch_var,
+        catch_body,
+        finally_body,
+        line,
+    })
+}
+
+fn parse_block(tokens: &[Token]) -> Result<Vec<Stmt>, String> {
+    let mut stmts = Vec::new();
+    for (chunk, cline) in split_statements(tokens) {
+        stmts.push(parse_stmt(&chunk, cline)?);
+    }
+    Ok(stmts)
+}
+
+/// Recognize a type-check target name from the tokens after "သည်" inside a
+/// condition group, e.g. "ကိန်း". The bool keyword "မှန်/မှား" contains a
+/// literal '/', which the lexer tokenizes as a division operator, so it
+/// actually arrives as three tokens: Ident("မှန်"), Op('/'), Ident("မှား").
+fn parse_typecheck_name(tokens: &[Token]) -> Option<String> {
+    if tokens.len() == 3 {
+        if let (Tok::Ident(a), Tok::Op('/'), Tok::Ident(b)) =
+            (&tokens[0].tok, &tokens[1].tok, &tokens[2].tok)
+        {
+            if a == "မှန်" && b == "မှား" {
+                return Some(TC_BOOL.to_string());
+            }
+        }
+    }
+    if tokens.len() == 1 {
+        if let Tok::Ident(s) = &tokens[0].tok {
+            if matches!(s.as_str(), TC_STR | TC_NUM | TC_FLOAT) {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Parse a single parenthesized condition group's inner tokens. Three forms,
+/// checked in this order:
+///   1. Type-check: "<expr> သည် <type>", e.g. "x သည် ကိန်း".
+///   2. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
+///   3. Bare boolean-valued expression, e.g. "အလုပ်" (test its truthiness).
+fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
+    if let Some(is_idx) = find_kw_top_level(tokens, KW_ASSIGN) {
+        if is_idx == 0 {
+            return Err(if_condition_syntax_err(line));
+        }
+        let lhs = parse_expr(&tokens[..is_idx], line)?;
+        let type_tokens = &tokens[is_idx + 1..];
+        let type_name = parse_typecheck_name(type_tokens)
+            .ok_or_else(|| if_condition_syntax_err(line))?;
+        return Ok(CondAtom {
+            lhs,
+            op: None,
+            rhs: None,
+            type_check: Some(type_name),
+            line,
+        });
+    }
+
+    let cmp_idx = tokens.iter().position(|t| matches!(t.tok, Tok::Cmp(_)));
+    match cmp_idx {
+        Some(idx) => {
+            if idx == 0 || idx + 1 >= tokens.len() {
+                return Err(if_condition_syntax_err(line));
+            }
+            let lhs = parse_expr(&tokens[..idx], line)?;
+            let op = match &tokens[idx].tok {
+                Tok::Cmp(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let rhs = parse_expr(&tokens[idx + 1..], line)?;
+            Ok(CondAtom {
+                lhs,
+                op: Some(op),
+                rhs: Some(rhs),
+                type_check: None,
+                line,
+            })
+        }
+        None => {
+            // No comparison operator at all: treat the whole group as a
+            // single boolean-valued expression, e.g. "(အလုပ်)".
+            let lhs = parse_expr(tokens, line)?;
+            Ok(CondAtom {
+                lhs,
+                op: None,
+                rhs: None,
+                type_check: None,
+                line,
+            })
+        }
+    }
+}
+
+/// Parse a sequence of parenthesized conditions and parenthesized logical
+/// operators, e.g. "(x == 10) (နှင့်) (y == 20)". `is_while` selects which
+/// set of error messages to use (if/elif vs while wording).
+fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<CondChain, String> {
+    let missing_err = |line| {
+        if is_while {
+            while_missing_condition_err(line)
+        } else {
+            if_missing_condition_err(line)
+        }
+    };
+    let syntax_err = |line| {
+        if is_while {
+            while_condition_syntax_err(line)
+        } else {
+            if_condition_syntax_err(line)
+        }
+    };
+
+    if tokens.is_empty() {
+        return Err(missing_err(line));
+    }
+    let mut idx = 0usize;
+    let mut atoms: Vec<(Option<LogicalOp>, CondAtom)> = Vec::new();
+    let mut pending_op: Option<LogicalOp> = None;
+
+    while idx < tokens.len() {
+        if !matches!(tokens[idx].tok, Tok::LParen) {
+            return Err(syntax_err(line));
+        }
+        let close = find_close(tokens, idx, line)?;
+        let group = &tokens[idx + 1..close];
+
+        let is_and = group.len() == 1 && ident_eq(&group[0].tok, KW_AND);
+        let is_or = group.len() == 1 && ident_eq(&group[0].tok, KW_OR);
+
+        if is_and || is_or {
+            if pending_op.is_some() || atoms.is_empty() {
+                return Err(syntax_err(line));
+            }
+            pending_op = Some(if is_and { LogicalOp::And } else { LogicalOp::Or });
+        } else {
+            if !atoms.is_empty() && pending_op.is_none() {
+                return Err(syntax_err(line));
+            }
+            let atom = parse_cond_atom(group, line)?;
+            atoms.push((pending_op.take(), atom));
+        }
+        idx = close + 1;
+    }
+
+    if pending_op.is_some() || atoms.is_empty() {
+        return Err(syntax_err(line));
+    }
+
+    let first = atoms[0].1.clone();
+    let rest = atoms[1..]
+        .iter()
+        .map(|(op, atom)| (op.clone().unwrap(), atom.clone()))
+        .collect();
+    Ok(CondChain { first, rest })
+}
+
+/// Parse an if/elif/else chain. `inner` is everything between the leading
+/// "အကယ်၍" (already stripped by the caller) and the trailing "ပြီး" (also
+/// already stripped).
+fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    let mut branches: Vec<IfBranch> = Vec::new();
+    let mut cursor = 0usize;
+    let mut seen_else = false;
+
+    loop {
+        if !branches.is_empty() {
+            if cursor >= inner.len() {
+                break;
+            }
+            if seen_else {
+                return Err(if_else_not_last_err(line));
+            }
+            if ident_eq(&inner[cursor].tok, KW_ELSE) {
+                seen_else = true;
+                cursor += 1;
+                let body_stmts = parse_block(&inner[cursor..])?;
+                branches.push(IfBranch {
+                    cond: None,
+                    negate: false,
+                    body: body_stmts,
+                });
+                cursor = inner.len();
+                break;
+            } else if ident_eq(&inner[cursor].tok, KW_ELIF) {
+                cursor += 1;
+            } else {
+                return Err(generic_syntax_err(line));
+            }
+        } else if cursor >= inner.len() {
+            return Err(if_missing_condition_err(line));
+        }
+
+        // Parse condition-chain, terminated by "ဖြစ်လျှင်" (positive) or
+        // "မဖြစ်လျှင်" (negative).
+        let (term_rel, which) =
+            find_first_at_block_level(&inner[cursor..], &[KW_THEN_POS, KW_THEN_NEG])
+                .ok_or_else(|| if_missing_then_err(line))?;
+        let term_abs = cursor + term_rel;
+        let negate = which == 1;
+        let cond_tokens = &inner[cursor..term_abs];
+        let cond = parse_cond_chain(cond_tokens, line, false)?;
+        cursor = term_abs + 1;
+
+        // Body runs until the next branch keyword at this same level, or to
+        // the end of the whole if-statement.
+        let body_end = match find_first_at_block_level(&inner[cursor..], &[KW_ELIF, KW_ELSE]) {
+            Some((rel, _)) => cursor + rel,
+            None => inner.len(),
+        };
+        let body_stmts = parse_block(&inner[cursor..body_end])?;
+        branches.push(IfBranch {
+            cond: Some(cond),
+            negate,
+            body: body_stmts,
+        });
+        cursor = body_end;
+    }
+
+    if branches.is_empty() {
+        return Err(if_missing_condition_err(line));
+    }
+
+    Ok(Stmt::If { branches, line })
+}
+
+/// Parse a while-loop. `inner` is everything between the leading "အခြေအနေ"
+/// (already stripped by the caller) and the trailing "ပြီး" (also already
+/// stripped): "(<condition...>) ဖြစ်နေစဉ်/မဖြစ်နေစဉ် <body...>".
+fn parse_while_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    if inner.is_empty() {
+        return Err(while_missing_condition_err(line));
+    }
+
+    let (term_idx, which) = find_first_at_block_level(inner, &[KW_WHILE_POS, KW_WHILE_NEG])
+        .ok_or_else(|| while_missing_then_err(line))?;
+    let negate = which == 1;
+    let cond_tokens = &inner[..term_idx];
+    let cond = parse_cond_chain(cond_tokens, line, true)?;
+
+    let body_tokens = &inner[term_idx + 1..];
+    let body = parse_block(body_tokens)?;
+
+    Ok(Stmt::While {
+        cond,
+        negate,
+        body,
+        line,
+    })
+}
+
+/// Parse a function definition. `inner` is everything between the leading
+/// "လုပ်ငန်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// already stripped): "<fn name> [အတွက် <param1>, <param2>, ...] ဖြင့် <body...>".
+/// Parse a function definition. `inner` is everything between the leading
+/// "လုပ်ငန်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// already stripped). Two header forms:
+///   - no-argument short form: "<fn name> သည် <body...>"
+///   - with parameters:        "<fn name> [အတွက် <param1>, ...] ဖြင့် <body...>"
+fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    if inner.is_empty() {
+        return Err(func_missing_name_err(line));
+    }
+    let name = match &inner[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => return Err(func_missing_name_err(line)),
+    };
+
+    let rest = &inner[1..];
+
+    // No-argument short form: "<fn name> သည် <body...>"
+    if !rest.is_empty() && ident_eq(&rest[0].tok, KW_ASSIGN) {
+        let body_tokens = &rest[1..];
+        let body = parse_block(body_tokens)?;
+        return Ok(Stmt::FuncDef {
+            name,
+            params: Vec::new(),
+            body,
+            line,
+        });
+    }
+
+    let by_idx = find_kw_top_level(rest, KW_BY).ok_or_else(|| func_missing_by_err(line))?;
+    let header_tokens = &rest[..by_idx];
+
+    let params: Vec<String> = if header_tokens.is_empty() {
+        Vec::new()
+    } else if ident_eq(&header_tokens[0].tok, KW_FOR) {
+        let name_tokens = &header_tokens[1..];
+        if name_tokens.is_empty() {
+            return Err(func_bad_param_err(line));
+        }
+        let parts = split_top_level(name_tokens, |t| matches!(t, Tok::Comma));
+        let mut names = Vec::with_capacity(parts.len());
+        for p in parts {
+            if p.len() != 1 {
+                return Err(func_bad_param_err(line));
+            }
+            match &p[0].tok {
+                Tok::Ident(s) => names.push(s.clone()),
+                _ => return Err(func_bad_param_err(line)),
+            }
+        }
+        names
+    } else {
+        return Err(func_bad_param_err(line));
+    };
+
+    let body_tokens = &rest[by_idx + 1..];
+    let body = parse_block(body_tokens)?;
+
+    Ok(Stmt::FuncDef {
+        name,
+        params,
+        body,
+        line,
+    })
+}
+
+/// Parse a class definition. `inner` is everything between the leading
+/// "နည်းလမ်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// already stripped). Two header forms are accepted:
+///   - "<class name> သည် <method definitions...>"   (current/preferred)
+///   - "<class name>။ <method definitions...>"       (older form)
+fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    if inner.is_empty() {
+        return Err(class_missing_name_err(line));
+    }
+    let name = match &inner[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => return Err(class_missing_name_err(line)),
+    };
+    if inner.len() < 2 {
+        return Err(class_missing_period_err(line));
+    }
+    let body_tokens = if matches!(inner[1].tok, Tok::End) || ident_eq(&inner[1].tok, KW_ASSIGN) {
+        &inner[2..]
+    } else {
+        return Err(class_missing_period_err(line));
+    };
+    let body = parse_block(body_tokens)?;
+
+    for s in &body {
+        if !matches!(s, Stmt::FuncDef { .. }) {
+            return Err(class_body_not_method_err(line));
+        }
+    }
+    if body.is_empty() {
+        return Err(class_missing_constructor_err(line, &name));
+    }
+
+    Ok(Stmt::ClassDef { name, body, line })
+}
+
+pub fn parse(tokens: &[Token]) -> Result<Vec<Stmt>, String> {
+    let mut stmts = Vec::new();
+    for (stmt_tokens, line) in split_statements(tokens) {
+        stmts.push(parse_stmt(&stmt_tokens, line)?);
+    }
+    Ok(stmts)
 }
