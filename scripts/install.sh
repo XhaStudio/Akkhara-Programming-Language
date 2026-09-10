@@ -6,10 +6,14 @@
 #
 # What this does:
 #   1. Detects your OS and CPU architecture.
-#   2. Downloads the matching prebuilt "akk" binary from the latest
-#      GitHub release.
-#   3. Installs it to ~/.local/bin (or $AKK_INSTALL_DIR if set).
-#   4. Tells you how to add that directory to PATH if it isn't already.
+#   2. Checks for any required runtime prerequisites for this platform
+#      (on Windows this would be the VC++ Redistributable; Linux/macOS
+#      builds are statically-ish linked and need nothing extra, so this
+#      step is a no-op here and just confirms that).
+#   3. Downloads the matching prebuilt "akk" binary from the latest
+#      GitHub release, showing a progress bar.
+#   4. Installs it to ~/.local/bin (or $AKK_INSTALL_DIR if set).
+#   5. Tells you how to add that directory to PATH if it isn't already.
 #
 # Env vars you can override:
 #   AKK_INSTALL_DIR   Where to put the binary (default: $HOME/.local/bin)
@@ -62,7 +66,21 @@ detect_platform() {
 }
 
 # ---------------------------------------------------------------------
-# 2. Resolve version + download URL
+# 2. Runtime prerequisite check
+# ---------------------------------------------------------------------
+# On Windows, install.ps1 checks for (and installs if missing) the
+# Visual C++ Redistributable (x64) that akk.exe is linked against before
+# downloading akk itself. There's no equivalent shared-runtime package to
+# check for on Linux/macOS -- the akk release binaries for these targets
+# don't depend on anything beyond what the OS already ships -- so this
+# step just confirms that and moves on to downloading akk.
+check_runtime_prereqs() {
+    info "Checking runtime prerequisites"
+    ok "No additional runtime package is required on $TARGET"
+}
+
+# ---------------------------------------------------------------------
+# 3. Resolve version + download URL
 # ---------------------------------------------------------------------
 resolve_download_url() {
     if [ "$VERSION" = "latest" ]; then
@@ -87,14 +105,17 @@ resolve_download_url() {
 }
 
 # ---------------------------------------------------------------------
-# 3. Download, verify, install
+# 4. Download, verify, install
 # ---------------------------------------------------------------------
 install_binary() {
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
 
     info "Downloading akk ($TARGET) from $REPO"
-    curl -fsSL "$DOWNLOAD_URL" -o "$tmp_dir/$ASSET" \
+    # -f: fail on HTTP errors: -L: follow redirects (releases assets are
+    # served from a redirect); --progress-bar: show a live progress bar
+    # instead of curl's normal noisy transfer stats.
+    curl -fL --progress-bar "$DOWNLOAD_URL" -o "$tmp_dir/$ASSET" \
         || fail "download failed: $DOWNLOAD_URL"
     ok "Downloaded $ASSET"
 
@@ -118,7 +139,7 @@ install_binary() {
 }
 
 # ---------------------------------------------------------------------
-# 4. PATH check
+# 5. PATH check
 # ---------------------------------------------------------------------
 check_path() {
     case ":$PATH:" in
@@ -144,7 +165,7 @@ check_path() {
 }
 
 # ---------------------------------------------------------------------
-# 5. Smoke test
+# 6. Smoke test
 # ---------------------------------------------------------------------
 smoke_test() {
     if "$INSTALL_DIR/$BIN_NAME" --version >/dev/null 2>&1; then
@@ -164,6 +185,7 @@ main() {
     detect_platform
     ok "Detected platform: $TARGET"
 
+    check_runtime_prereqs
     resolve_download_url
     install_binary
     check_path
