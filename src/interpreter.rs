@@ -48,6 +48,8 @@ fn op_name_mm(op: char) -> &'static str {
         '*' => "မြှောက်",
         '/' => "စား",
         '%' => "ကြွင်းကိန်းရှာ",
+        '^' => "ထပ်ကိန်းတင်",
+        '\\' => "အပြည့်ကိန်းစား",
         _ => "?",
     }
 }
@@ -1120,6 +1122,26 @@ fn binary_op(
                     Ok(Value::Int(a.rem_euclid(*b)))
                 }
             }
+            '^' => {
+                if *b >= 0 {
+                    match (*a).checked_pow(*b as u32) {
+                        Some(v) => Ok(Value::Int(v)),
+                        None => Ok(Value::Float((*a as f64).powf(*b as f64))),
+                    }
+                } else {
+                    Ok(Value::Float((*a as f64).powf(*b as f64)))
+                }
+            }
+            '\\' => {
+                if *b == 0 {
+                    Err(format!(
+                        "E073 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
+                        line
+                    ))
+                } else {
+                    Ok(Value::Int((*a as f64 / *b as f64).floor() as i64))
+                }
+            }
             _ => Err(type_err()),
         },
         (Value::Int(a), Value::Float(b)) => numeric_op(*a as f64, *b, op, line),
@@ -1149,6 +1171,17 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
                 ))
             } else {
                 Ok(Value::Float(a.rem_euclid(b)))
+            }
+        }
+        '^' => Ok(Value::Float(a.powf(b))),
+        '\\' => {
+            if b == 0.0 {
+                Err(format!(
+                    "E074 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
+                    line
+                ))
+            } else {
+                Ok(Value::Float((a / b).floor()))
             }
         }
         _ => unreachable!(),
