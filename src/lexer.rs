@@ -10,7 +10,7 @@ pub enum Tok {
     Ident(String), // Myanmar keyword or a variable/identifier name
     Str(String),   // string literal contents (without quotes)
     Num(String),   // normalized ascii numeral text, may contain '.'
-    Op(char),      // + - * /
+    Op(char),      // + - * / % ^ (**, exponent) \ (//, floor division)
     Cmp(String),   // < > == != <= >=
     End,           // ။  (end of sentence)
     LBracket,      // [
@@ -129,6 +129,24 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 tok: Tok::Str(s),
                 line: start_line,
             });
+            continue;
+        }
+
+        if c == '*' && i + 1 < n && chars[i + 1] == '*' {
+            tokens.push(Token {
+                tok: Tok::Op('^'), // ** (exponent)
+                line,
+            });
+            i += 2;
+            continue;
+        }
+
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            tokens.push(Token {
+                tok: Tok::Op('\\'), // // (floor division)
+                line,
+            });
+            i += 2;
             continue;
         }
 
