@@ -863,9 +863,26 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         let mut return_value: Option<Value> = None;
         for (i, s) in body.iter().enumerate() {
             if i + 1 == body.len() {
-                if let Stmt::ExprStmt { value, line: sline } = s {
-                    return_value = Some(self.eval(value, *sline, None)?);
-                    continue;
+                match s {
+                    Stmt::ExprStmt { value, line: sline } => {
+                        return_value = Some(self.eval(value, *sline, None)?);
+                        continue;
+                    }
+                    // A function ending in "<var> သည် <expr> ဖြစ်၏။" -- the
+                    // idiomatic "ရလဒ် သည် ... ဖြစ်၏။" pattern -- also counts
+                    // as an implicit return: the variable still gets
+                    // assigned as normal, and its value is also returned.
+                    Stmt::VarDecl {
+                        name: var_name,
+                        value,
+                        line: sline,
+                    } => {
+                        let v = self.eval(value, *sline, None)?;
+                        self.env.insert(var_name.clone(), v.clone());
+                        return_value = Some(v);
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             self.exec(s)?;
