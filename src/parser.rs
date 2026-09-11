@@ -98,6 +98,14 @@ pub enum Stmt {
         args: Vec<Expr>,
         line: usize,
     },
+    /// `<fn name> အဖြစ် <alias1>, <alias2>, ...`
+    /// Registers one or more alias names for an existing function, so
+    /// calling any alias calls the original function.
+    FuncAlias {
+        original: String,
+        aliases: Vec<String>,
+        line: usize,
+    },
     ClassDef {
         name: String,
         body: Vec<Stmt>,
@@ -232,6 +240,7 @@ const KW_LIBRARIES: &str = "နည်းပညာများ";
 const KW_WAIT: &str = "စောင့်ပါ";
 const KW_RANDOM: &str = "ကျပန်းကိန်း";
 const KW_BETWEEN: &str = "အကြား";
+const KW_AS: &str = "အဖြစ်";
 
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
@@ -467,6 +476,27 @@ fn func_call_missing_arg_err(line: usize) -> String {
 fn library_use_bad_list_err(line: usize) -> String {
     format!(
         "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို အသုံးပြုပါ။",
+        line
+    )
+}
+
+fn func_alias_missing_name_err(line: usize) -> String {
+    format!(
+        "E075 လိုင်း {} တွင် \"အဖြစ်\" ၏ ရှေ့တွင် alias ပေးလိုသော function အမည် တစ်ခုတည်း လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
+        line
+    )
+}
+
+fn func_alias_missing_alias_err(line: usize) -> String {
+    format!(
+        "E076 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
+        line
+    )
+}
+
+fn func_alias_bad_alias_err(line: usize) -> String {
+    format!(
+        "E077 လိုင်း {} တွင် alias အမည်များကို \",\" ဖြင့် ခွဲ၍ တစ်ခုချင်း ရေးပါ။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
         line
     )
 }
@@ -1043,6 +1073,47 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(Stmt::Wait {
             amount,
             unit,
+            line,
+        });
+    }
+
+    // --- Function alias: <fn name> အဖြစ် <alias1>, <alias2>, ... ---
+    if let Some(as_idx) = find_kw(&body, KW_AS) {
+        if as_idx == 0 || !matches!(body[0].tok, Tok::Ident(_)) {
+            return Err(func_alias_missing_name_err(line));
+        }
+        if as_idx != 1 {
+            // Only a single identifier is allowed before "အဖြစ်".
+            return Err(func_alias_missing_name_err(line));
+        }
+        let original = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        let alias_tokens = &body[as_idx + 1..];
+        if alias_tokens.is_empty() {
+            return Err(func_alias_missing_alias_err(line));
+        }
+        let parts = split_top_level(alias_tokens, |t| matches!(t, Tok::Comma));
+        if parts.is_empty() {
+            return Err(func_alias_missing_alias_err(line));
+        }
+        let mut aliases = Vec::with_capacity(parts.len());
+        for p in &parts {
+            match p {
+                [t] => match &t.tok {
+                    Tok::Ident(s) => aliases.push(s.clone()),
+                    _ => return Err(func_alias_bad_alias_err(line)),
+                },
+                _ => return Err(func_alias_bad_alias_err(line)),
+            }
+        }
+        return Ok(Stmt::FuncAlias {
+            original,
+            aliases,
             line,
         });
     }
