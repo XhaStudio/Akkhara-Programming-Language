@@ -318,6 +318,22 @@ impl Interpreter {
                 self.env.insert(name.clone(), value);
                 Ok(())
             }
+            Stmt::FuncAlias {
+                original,
+                aliases,
+                line,
+            } => {
+                let def = self.functions.get(original).cloned().ok_or_else(|| {
+                    format!(
+                        "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                        line, original
+                    )
+                })?;
+                for alias in aliases {
+                    self.functions.insert(alias.clone(), def.clone());
+                }
+                Ok(())
+            }
             Stmt::ClassDef { name, body, line } => {
                 let mut methods: Vec<(String, Vec<String>, Vec<Stmt>)> = Vec::new();
                 for s in body {
