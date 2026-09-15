@@ -16,6 +16,12 @@ mod time_library;
 #[path = "../libraries/ကျပန်း/main.rs"]
 mod random_library;
 
+/// The Akkhara "request" library, compiled in from its own source under
+/// `libraries/request/main.rs`. Programs load it with:
+///     နည်းပညာများ request ကို အသုံးပြုပါ။
+#[path = "../libraries/request/main.rs"]
+mod request_library;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
