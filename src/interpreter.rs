@@ -48,8 +48,6 @@ fn op_name_mm(op: char) -> &'static str {
         '*' => "မြှောက်",
         '/' => "စား",
         '%' => "ကြွင်းကိန်းရှာ",
-        '^' => "ထပ်ကိန်းတင်",
-        '\\' => "အပြည့်ကိန်းစား",
         _ => "?",
     }
 }
@@ -298,39 +296,35 @@ impl Interpreter {
                     .insert(name.clone(), (params.clone(), body.clone()));
                 Ok(())
             }
-            Stmt::FuncCall { name, args, line } => {
-                self.call_function(name, args, *line)?;
-                Ok(())
-            }
-            Stmt::FuncCallAssign {
-                name,
-                fn_name,
-                args,
-                line,
-            } => {
-                let result = self.call_function(fn_name, args, *line)?;
-                let value = result.ok_or_else(|| {
-                    format!(
-                        "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
-                        line, fn_name, name
-                    )
-                })?;
-                self.env.insert(name.clone(), value);
-                Ok(())
-            }
-            Stmt::FuncAlias {
-                original,
-                aliases,
-                line,
-            } => {
-                let def = self.functions.get(original).cloned().ok_or_else(|| {
-                    format!(
-                        "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
-                        line, original
-                    )
-                })?;
-                for alias in aliases {
-                    self.functions.insert(alias.clone(), def.clone());
+            Stmt::FuncCall { name, arg, line } => {
+                let (params, body) = match self.functions.get(name) {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Err(format!(
+                            "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                            line, name
+                        ));
+                    }
+                };
+                let provided: Vec<Expr> = match arg {
+                    Some(e) => vec![e.clone()],
+                    None => vec![],
+                };
+                if provided.len() != params.len() {
+                    return Err(format!(
+                        "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                        line,
+                        name,
+                        params.len(),
+                        provided.len()
+                    ));
+                }
+                for (p, e) in params.iter().zip(provided.iter()) {
+                    let v = self.eval(e, *line, None)?;
+                    self.env.insert(p.clone(), v);
+                }
+                for s in &body {
+                    self.exec(s)?;
                 }
                 Ok(())
             }
@@ -419,45 +413,41 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::UseLibrary { names, line } => {
-                for name in names {
-                    // Built-ins are compiled straight into the akk binary.
-                    if name == "ကျပန်း" || name == "အချိန်" {
-                        self.libraries.mark_loaded(name);
-                        continue;
-                    }
-
-                    // Otherwise, look for a package downloaded with
-                    // `akk install <name>` under the libraries/ folder. Its
-                    // source is plain Akkhara, so loading it just means
-                    // running it -- that registers its function/class
-                    // definitions the same way any top-level definition does.
-                    match self.libraries.find_dynamic_source(name) {
-                        Some(src) => {
-                            let tokens = crate::lexer::lex(&src).map_err(|e| {
-                                format!(
-                                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            let stmts = crate::parser::parse(&tokens).map_err(|e| {
-                                format!(
-                                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            self.run(&stmts)?;
-                            self.libraries.mark_loaded(name);
-                        }
-                        None => {
-                            return Err(format!(
-                                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
-                                line, name, name
-                            ));
-                        }
-                    }
+            Stmt::UseLibrary { name, line } => {
+                // Built-ins are compiled straight into the akk binary.
+                if name == "ကျပန်း" || name == "အချိန်" || name == "request" {
+                    self.libraries.mark_loaded(name);
+                    return Ok(());
                 }
-                Ok(())
+
+                // Otherwise, look for a package downloaded with
+                // `akk install <name>` under the libraries/ folder. Its
+                // source is plain Akkhara, so loading it just means
+                // running it -- that registers its function/class
+                // definitions the same way any top-level definition does.
+                match self.libraries.find_dynamic_source(name) {
+                    Some(src) => {
+                        let tokens = crate::lexer::lex(&src).map_err(|e| {
+                            format!(
+                                "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                line, name, e
+                            )
+                        })?;
+                        let stmts = crate::parser::parse(&tokens).map_err(|e| {
+                            format!(
+                                "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                                line, name, e
+                            )
+                        })?;
+                        self.run(&stmts)?;
+                        self.libraries.mark_loaded(name);
+                        Ok(())
+                    }
+                    None => Err(format!(
+                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
+                        line, name, name
+                    )),
+                }
             }
             Stmt::RandomDecl { name, min, max, line } => {
                 if !self.libraries.is_loaded("ကျပန်း") {
@@ -501,6 +491,31 @@ impl Interpreter {
                 };
                 crate::time_library::wait(secs, unit)
             }
+            Stmt::HttpPost { name, url, body, line } => {
+                self.require_request_lib(*line)?;
+                let url_v = self.eval(url, *line, None)?;
+                let body_v = self.eval(body, *line, None)?;
+                let url_s = expect_text(&url_v, *line, "လိပ်စာ (URL)")?;
+                let body_s = expect_text(&body_v, *line, "ပို့ရန် အချက်အလက်")?;
+                let resp = crate::request_library::post(&url_s, &body_s)
+                    .map_err(|e| with_line(e, *line))?;
+                self.env.insert(name.clone(), response_value(resp));
+                Ok(())
+            }
+        }
+    }
+
+    /// Guard used by every request-library operation: the library has to
+    /// be imported before its syntax can be used, matching how ကျပန်း
+    /// and အချိန် behave.
+    fn require_request_lib(&self, line: usize) -> Result<(), String> {
+        if self.libraries.is_loaded("request") {
+            Ok(())
+        } else {
+            Err(format!(
+                "E068 လိုင်း {} တွင် \"request\" ကို သုံးရန် \"နည်းပညာများ request ကို အသုံးပြုပါ။\" ဖြင့် ကွန်ရက်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                line
+            ))
         }
     }
 
@@ -824,70 +839,70 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Expr::NewObj(class_name, arg_exprs, new_line) => {
                 self.construct_object(class_name, arg_exprs, *new_line)
             }
+            Expr::Member(lhs, rhs, of_line) => self.eval_member(lhs, rhs, *of_line),
         }
     }
 
-    /// Look up a user-defined function, bind its argument(s) to its
-    /// parameter(s) in the shared environment, and run its body. If the
-    /// body's final statement is a bare expression statement (`ExprStmt`),
-    /// that expression's value is returned as the function's "return value";
-    /// otherwise `None` is returned (the function produced no value).
-    fn call_function(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        line: usize,
-    ) -> Result<Option<Value>, String> {
-        let (params, body) = match self.functions.get(name) {
-            Some(v) => v.clone(),
-            None => {
+    /// Evaluates `<lhs> ၏ <rhs>`.
+    ///
+    /// Two forms share the particle:
+    ///   - `request ၏ "<url>"` -- performs an HTTP GET and returns a
+    ///     response object.
+    ///   - `<object> ၏ <field>` -- reads a field off an object value,
+    ///     which is how response fields (အခြေအနေကုဒ်, စာသား, ...) and
+    ///     ordinary class instances' fields are read.
+    fn eval_member(&mut self, lhs: &Expr, rhs: &Expr, line: usize) -> Result<Value, String> {
+        // --- request ၏ <url> : HTTP GET ---
+        if matches!(lhs, Expr::Ident(name) if name == "request") && !self.env.contains_key("request")
+        {
+            self.require_request_lib(line)?;
+            let url_v = self.eval(rhs, line, None)?;
+            let url_s = expect_text(&url_v, line, "လိပ်စာ (URL)")?;
+            let resp = crate::request_library::get(&url_s).map_err(|e| with_line(e, line))?;
+            return Ok(response_value(resp));
+        }
+
+        // --- <object> ၏ <field> : field read ---
+        let base = self.eval(lhs, line, None)?;
+        let field = match rhs {
+            Expr::Ident(name) => name.clone(),
+            // A quoted field name is accepted too, so a field whose name
+            // collides with a keyword is still reachable.
+            Expr::StrLit(s) => s.clone(),
+            _ => {
                 return Err(format!(
-                    "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
-                    line, name
+                    "E074 လိုင်း {} တွင် \"၏\" နောက်တွင် ဖတ်ရန် field အမည် ဖြစ်ရပါမည်။",
+                    line
                 ));
             }
         };
-        if args.len() != params.len() {
-            return Err(format!(
-                "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+
+        match &base {
+            Value::Object(class_name, fields) => fields
+                .iter()
+                .find(|(k, _)| *k == field)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    let available: Vec<&str> =
+                        fields.iter().map(|(k, _)| k.as_str()).collect();
+                    format!(
+                        "E076 လိုင်း {} တွင် \"{}\" ၌ \"{}\" ဆိုသော field မရှိပါ။ ရရှိနိုင်သော field များ - {}",
+                        line,
+                        class_name,
+                        field,
+                        if available.is_empty() {
+                            "(မရှိပါ)".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    )
+                }),
+            other => Err(format!(
+                "E077 လိုင်း {} တွင် {} ၌ \"၏\" ဖြင့် field ဖတ်၍ မရပါ။ object သာ ဖြစ်ရပါမည်။",
                 line,
-                name,
-                params.len(),
-                args.len()
-            ));
+                type_name_mm(other)
+            )),
         }
-        for (p, e) in params.iter().zip(args.iter()) {
-            let v = self.eval(e, line, None)?;
-            self.env.insert(p.clone(), v);
-        }
-        let mut return_value: Option<Value> = None;
-        for (i, s) in body.iter().enumerate() {
-            if i + 1 == body.len() {
-                match s {
-                    Stmt::ExprStmt { value, line: sline } => {
-                        return_value = Some(self.eval(value, *sline, None)?);
-                        continue;
-                    }
-                    // A function ending in "<var> သည် <expr> ဖြစ်၏။" -- the
-                    // idiomatic "ရလဒ် သည် ... ဖြစ်၏။" pattern -- also counts
-                    // as an implicit return: the variable still gets
-                    // assigned as normal, and its value is also returned.
-                    Stmt::VarDecl {
-                        name: var_name,
-                        value,
-                        line: sline,
-                    } => {
-                        let v = self.eval(value, *sline, None)?;
-                        self.env.insert(var_name.clone(), v.clone());
-                        return_value = Some(v);
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            self.exec(s)?;
-        }
-        Ok(return_value)
     }
 
     /// Instantiate an object: evaluate the constructor arguments, bind them
@@ -1037,6 +1052,61 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
     }
 }
 
+/// Wraps a request-library response into an Akkhara object value, whose
+/// fields are then read with the `၏` particle.
+fn response_value(resp: crate::request_library::HttpResponse) -> Value {
+    let ok = resp.ok();
+    Value::Object(
+        crate::request_library::RESPONSE_CLASS.to_string(),
+        vec![
+            (
+                crate::request_library::FIELD_STATUS.to_string(),
+                Value::Int(resp.status),
+            ),
+            (
+                crate::request_library::FIELD_BODY.to_string(),
+                Value::Str(resp.body),
+            ),
+            (
+                crate::request_library::FIELD_OK.to_string(),
+                Value::Bool(ok),
+            ),
+            (
+                crate::request_library::FIELD_URL.to_string(),
+                Value::Str(resp.url),
+            ),
+        ],
+    )
+}
+
+/// Coerces a value used as a URL or request body into text, rejecting
+/// collections and objects (which would stringify into something that
+/// is never a sensible URL or payload) with a clear message.
+fn expect_text(v: &Value, line: usize, what: &str) -> Result<String, String> {
+    match v {
+        Value::Str(s) => Ok(s.clone()),
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) => Ok(display(v)),
+        other => Err(format!(
+            "E078 လိုင်း {} တွင် {} သည် စာသား ဖြစ်ရပါမည်၊ {} ကို ပေးထားပါသည်။",
+            line,
+            what,
+            type_name_mm(other)
+        )),
+    }
+}
+
+/// Prefixes a library-level error (which has no line context of its own)
+/// with the source line it happened on, matching the rest of the
+/// interpreter's error format.
+fn with_line(err: String, line: usize) -> String {
+    match err.split_once(' ') {
+        Some((code, rest)) if code.starts_with('E') && code.len() == 4 => {
+            format!("{} လိုင်း {} တွင် {}", code, line, rest)
+        }
+        _ => format!("လိုင်း {} တွင် {}", line, err),
+    }
+}
+
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
@@ -1155,26 +1225,6 @@ fn binary_op(
                     Ok(Value::Int(a.rem_euclid(*b)))
                 }
             }
-            '^' => {
-                if *b >= 0 {
-                    match (*a).checked_pow(*b as u32) {
-                        Some(v) => Ok(Value::Int(v)),
-                        None => Ok(Value::Float((*a as f64).powf(*b as f64))),
-                    }
-                } else {
-                    Ok(Value::Float((*a as f64).powf(*b as f64)))
-                }
-            }
-            '\\' => {
-                if *b == 0 {
-                    Err(format!(
-                        "E073 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                        line
-                    ))
-                } else {
-                    Ok(Value::Int((*a as f64 / *b as f64).floor() as i64))
-                }
-            }
             _ => Err(type_err()),
         },
         (Value::Int(a), Value::Float(b)) => numeric_op(*a as f64, *b, op, line),
@@ -1204,17 +1254,6 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
                 ))
             } else {
                 Ok(Value::Float(a.rem_euclid(b)))
-            }
-        }
-        '^' => Ok(Value::Float(a.powf(b))),
-        '\\' => {
-            if b == 0.0 {
-                Err(format!(
-                    "E074 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                    line
-                ))
-            } else {
-                Ok(Value::Float((a / b).floor()))
             }
         }
         _ => unreachable!(),
