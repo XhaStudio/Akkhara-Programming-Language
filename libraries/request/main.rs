@@ -1,194 +1,124 @@
-// Akkhara HTTP library: request
+// Akkhara HTTP Request library ("request")
 //
 // Usage (from an .akk program):
 //     နည်းပညာများ request ကို အသုံးပြုပါ။
 //
-// This module is Akkhara's equivalent of Python's `requests`. It is
-// compiled into the akk binary as a Rust module (see the `#[path]`
-// include in src/main.rs) and registered by the interpreter when a
-// program imports the request library, exactly like ကျပန်း (random)
-// and အချိန် (time).
+// This module provides simple HTTP GET/POST support, similar in spirit to
+// Python's `requests` library. It is backed by the `ureq` crate, which is
+// already a dependency of this binary (used elsewhere for package
+// downloads -- see src/main.rs). It is compiled into the `akk` binary as a
+// Rust module and registered by the interpreter when a program imports the
+// "request" library.
 //
 // Akkhara-level syntax powered by this module:
 //
-//   GET  -- member syntax, `<lib> ၏ <mod>`:
-//       response သည် request ၏ "https://api.example.com/data" ဖြစ်၏။
+//     response သည် request ၏ "https://api.example.com/data" ဖြစ်၏။
+//     response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
 //
-//   POST -- send syntax:
-//       y အတွက် request ၏ "https://api.example.com/submit" သို့ "a=1&b=2" ကို ပို့ပါ။
+//     y အတွက် request ၏ "https://api.example.com/submit" သို့ "a=1&b=2" ကို ပို့ပါ။
 //
-// Both produce a *response object* whose fields are read with the same
-// `၏` member syntax:
-//       response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။   # status code (int)
-//       response ၏ စာသား ကို ဖော်ပြပါ။         # body text (string)
-//       response ၏ အောင်မြင် ကို ဖော်ပြပါ။      # True when status is 2xx
+// A response is represented as an Akkhara object tagged "request-response"
+// (see RESP_CLASS in src/interpreter.rs) with three readable fields,
+// accessed with the generic "<expr> ၏ <field>" syntax:
+//
+//     အခြေအနေကုဒ်   -- HTTP status code (integer), e.g. 200, 404
+//     အကြောင်းအရာ   -- response body text
+//     အောင်မြင်မှု    -- true when the status code is below 400
 
-use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
-/// Class name reported for response objects, so a script that prints a
-/// whole response (or checks its type) sees something meaningful.
-pub const RESPONSE_CLASS: &str = "တုံ့ပြန်ချက်";
-
-/// Field name: the numeric HTTP status code.
-pub const FIELD_STATUS: &str = "အခြေအနေကုဒ်";
-/// Field name: the response body as text.
-pub const FIELD_BODY: &str = "စာသား";
-/// Field name: True when the status code is in the 2xx range.
-pub const FIELD_OK: &str = "အောင်မြင်";
-/// Field name: the URL that was actually requested (after redirects).
-pub const FIELD_URL: &str = "လိပ်စာ";
-
-/// Maximum response body size read into memory (10 MB), so a runaway
-/// server can't exhaust memory or hang the interpreter.
-const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
-
-/// Whole-request timeout. Generous but finite, so a hung connection
-/// can't freeze a running Akkhara program forever.
-const TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The outcome of an HTTP request, before the interpreter wraps it into
-/// an Akkhara object value.
+/// A single HTTP response, translated into plain data that the
+/// interpreter wraps into an Akkhara response object.
 pub struct HttpResponse {
+    pub status_code: i64,
     pub body: String,
-    pub status: i64,
-    pub url: String,
+    pub ok: bool,
 }
 
-impl HttpResponse {
-    /// True when the status code is a 2xx success.
-    pub fn ok(&self) -> bool {
-        (200..300).contains(&self.status)
+/// How long to wait for a request before giving up. Kept generous since
+/// Akkhara programs have no way to configure this themselves yet.
+const REQUEST_TIMEOUT_SECS: u64 = 20;
+
+/// Builds an agent using the OS's native TLS stack (via the `native-tls`
+/// crate/feature) rather than ureq's default rustls backend. ureq treats
+/// native-tls as an opt-in that must be wired up explicitly through
+/// `tls_connector` -- it is never picked automatically, even with the
+/// feature enabled -- so we do that here once per request.
+fn agent() -> ureq::Agent {
+    let tls_connector = native_tls::TlsConnector::new()
+        .expect("failed to initialize the system TLS backend");
+    ureq::AgentBuilder::new()
+        .tls_connector(Arc::new(tls_connector))
+        .timeout_connect(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .build()
+}
+
+/// Turns a `ureq::Response` into our plain `HttpResponse`, reading the body
+/// as text. Any non-UTF8 body is lossily converted rather than failing the
+/// whole request, since a network response is exactly the kind of thing an
+/// Akkhara program should be able to inspect even when something about it
+/// is unexpected.
+fn to_http_response(status: u16, resp: ureq::Response) -> HttpResponse {
+    let body = resp.into_string().unwrap_or_default();
+    HttpResponse {
+        status_code: status as i64,
+        ok: status < 400,
+        body,
     }
 }
 
-/// Rejects obviously malformed URLs before we hand them to the HTTP
-/// stack, so a typo produces a clear Akkhara error rather than an
-/// opaque transport message.
-fn validate_url(url: &str) -> Result<(), String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Err("E072 တောင်းဆိုရန် လိပ်စာ (URL) သည် ဗလာ ဖြစ်နေပါသည်။".to_string());
+fn check_url(url: &str) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err(
+            "E079 request ၏ url တန်ဖိုးသည် ဗလာ ဖြစ်နေပါသည်။ URL တစ်ခု ပေးပါ။".to_string(),
+        );
     }
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
-            "E072 လိပ်စာ \"{}\" သည် မှန်ကန်ခြင်းမရှိပါ။ \"http://\" (သို့) \"https://\" ဖြင့် စရပါမည်။",
-            trimmed
-        ));
-    }
-    // Reject a bare scheme with no host, e.g. "https://".
-    let rest = trimmed
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    if rest.is_empty() || rest.starts_with('/') {
-        return Err(format!(
-            "E072 လိပ်စာ \"{}\" တွင် host (ဆိုဒ်အမည်) ပါဝင်ခြင်း မရှိပါ။",
-            trimmed
+            "E079 request ၏ url \"{}\" သည် \"http://\" သို့မဟုတ် \"https://\" ဖြင့် မစပါ။",
+            url
         ));
     }
     Ok(())
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(TIMEOUT)
-        .user_agent(concat!("akk/", env!("CARGO_PKG_VERSION")))
-        .build()
-}
-
-/// Performs an HTTP GET request against `url`.
+/// Perform an HTTP GET request against `url`.
+///
+/// Network failures (DNS, connection refused, timeout, TLS errors, etc.)
+/// are surfaced as a Result::Err with a Burmese error message, matching the
+/// rest of the interpreter's error style. HTTP-level error statuses (404,
+/// 500, ...) are NOT treated as failures -- they come back as a normal
+/// response object with `အောင်မြင်မှု` set to false, so a program can
+/// inspect `အခြေအနေကုဒ်` itself instead of the interpreter aborting.
 pub fn get(url: &str) -> Result<HttpResponse, String> {
-    let url = url.trim();
-    validate_url(url)?;
-    read_response(agent().get(url).call(), url)
-}
-
-/// Performs an HTTP POST request against `url`, sending `body` as the
-/// request body. A body that looks like JSON (starts with `{` or `[`)
-/// is sent as `application/json`; a body that looks like form data
-/// (contains `=` and no spaces) is sent as
-/// `application/x-www-form-urlencoded`; anything else as `text/plain`.
-pub fn post(url: &str, body: &str) -> Result<HttpResponse, String> {
-    let url = url.trim();
-    validate_url(url)?;
-    read_response(
-        agent()
-            .post(url)
-            .set("Content-Type", guess_content_type(body))
-            .send_string(body),
-        url,
-    )
-}
-
-/// Picks a sensible Content-Type so scripts don't have to think about
-/// headers for the two common cases (JSON payloads and form posts).
-fn guess_content_type(body: &str) -> &'static str {
-    let t = body.trim_start();
-    if t.starts_with('{') || t.starts_with('[') {
-        "application/json"
-    } else if body.contains('=') && !body.contains(' ') {
-        "application/x-www-form-urlencoded"
-    } else {
-        "text/plain; charset=utf-8"
-    }
-}
-
-/// Shared response handling for GET/POST: reads the body (success and
-/// HTTP-error responses alike) into a capped-size string, and turns
-/// only genuine transport failures (DNS, connection refused, timeout,
-/// TLS, ...) into an `Err`.
-fn read_response(
-    result: Result<ureq::Response, ureq::Error>,
-    requested_url: &str,
-) -> Result<HttpResponse, String> {
-    match result {
-        Ok(resp) => {
-            let status = resp.status() as i64;
-            let url = resp.get_url().to_string();
-            let body = read_body(resp.into_reader())?;
-            Ok(HttpResponse { body, status, url })
-        }
-        // ureq reports 4xx/5xx as `Err(Status(..))`, but an Akkhara
-        // script still wants to read the body (e.g. an API's JSON error
-        // message) and branch on the status itself, so this is a normal
-        // response here -- not a script-level error.
-        Err(ureq::Error::Status(code, resp)) => {
-            let url = resp.get_url().to_string();
-            let body = read_body(resp.into_reader())?;
-            Ok(HttpResponse {
-                body,
-                status: code as i64,
-                url,
-            })
-        }
+    check_url(url)?;
+    match agent().get(url).call() {
+        Ok(resp) => Ok(to_http_response(resp.status(), resp)),
+        Err(ureq::Error::Status(code, resp)) => Ok(to_http_response(code, resp)),
         Err(ureq::Error::Transport(t)) => Err(format!(
-            "E070 \"{}\" သို့ ကွန်ရက်တောင်းဆိုမှု မအောင်မြင်ပါ။ အင်တာနက်ချိတ်ဆက်မှု (သို့) လိပ်စာကို စစ်ဆေးပါ - {}",
-            requested_url, t
+            "E080 request ၏ GET \"{}\" တောင်းဆိုမှု မအောင်မြင်ပါ - {}",
+            url, t
         )),
     }
 }
 
-fn read_body(reader: impl Read) -> Result<String, String> {
-    let mut buf = Vec::new();
-    reader
-        .take(MAX_BODY_BYTES + 1)
-        .read_to_end(&mut buf)
-        .map_err(|e| {
-            format!(
-                "E071 တောင်းဆိုချက်၏ အဖြေကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                e
-            )
-        })?;
-
-    if buf.len() as u64 > MAX_BODY_BYTES {
-        return Err(format!(
-            "E073 တောင်းဆိုချက်၏ အဖြေသည် ကြီးလွန်းပါသည်။ အများဆုံး {} MB သာ လက်ခံပါသည်။",
-            MAX_BODY_BYTES / (1024 * 1024)
-        ));
+/// Perform an HTTP POST request against `url` with an
+/// `application/x-www-form-urlencoded` body (e.g. `"a=1&b=2"`), the same
+/// encoding Python's `requests.post(url, data="...")` sends by default.
+pub fn post(url: &str, data: &str) -> Result<HttpResponse, String> {
+    check_url(url)?;
+    match agent()
+        .post(url)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(data)
+    {
+        Ok(resp) => Ok(to_http_response(resp.status(), resp)),
+        Err(ureq::Error::Status(code, resp)) => Ok(to_http_response(code, resp)),
+        Err(ureq::Error::Transport(t)) => Err(format!(
+            "E081 request ၏ POST \"{}\" တောင်းဆိုမှု မအောင်မြင်ပါ - {}",
+            url, t
+        )),
     }
-
-    // Binary or otherwise non-UTF-8 payloads shouldn't crash a script;
-    // replace invalid sequences rather than erroring out, matching what
-    // a script author expects when printing a response.
-    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
