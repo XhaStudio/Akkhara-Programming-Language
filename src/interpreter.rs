@@ -156,6 +156,44 @@ fn http_response_to_value(r: crate::request_library::HttpResponse) -> Value {
     )
 }
 
+// --- Errors for the `<lib> ၏ <fn>(...) ကို လုပ်ပါ။` library-call syntax. ---
+
+fn lib_unknown_err(lib: &str, line: usize) -> String {
+    format!(
+        "E085 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
+        line, lib
+    )
+}
+
+fn lib_fn_unknown_err(lib: &str, fn_name: &str, line: usize) -> String {
+    format!(
+        "E086 လိုင်း {} တွင် \"{}\" နည်းပညာများတွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+        line, lib, fn_name
+    )
+}
+
+fn lib_fn_argc(lib: &str, fn_name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), String> {
+    if args.len() == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            line,
+            lib,
+            fn_name,
+            want,
+            args.len()
+        ))
+    }
+}
+
+fn lib_fn_argtype_err(lib: &str, fn_name: &str, line: usize) -> String {
+    format!(
+        "E090 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် ကိန်းဂဏန်း argument များ လိုအပ်ပါသည်။",
+        line, lib, fn_name
+    )
+}
+
 pub struct Interpreter {
     env: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
@@ -338,6 +376,32 @@ impl Interpreter {
                     format!(
                         "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
                         line, fn_name, name
+                    )
+                })?;
+                self.env.insert(name.clone(), value);
+                Ok(())
+            }
+            Stmt::LibCall {
+                lib,
+                fn_name,
+                args,
+                line,
+            } => {
+                self.eval_lib_call(lib, fn_name, args, *line)?;
+                Ok(())
+            }
+            Stmt::LibCallAssign {
+                name,
+                lib,
+                fn_name,
+                args,
+                line,
+            } => {
+                let result = self.eval_lib_call(lib, fn_name, args, *line)?;
+                let value = result.ok_or_else(|| {
+                    format!(
+                        "E088 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။",
+                        line, lib, fn_name, name
                     )
                 })?;
                 self.env.insert(name.clone(), value);
@@ -784,6 +848,111 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     other => Err(loop_not_iterable_err(line, type_name_mm(&other))),
                 }
             }
+        }
+    }
+
+    /// Call a built-in library function reached through the
+    /// `<lib> ၏ <fn>(<args>) ကို လုပ်ပါ။` family of forms
+    /// (`Stmt::LibCall` / `Stmt::LibCallAssign`).
+    ///
+    /// The library must already have been imported with
+    /// `နည်းပညာများ <lib> ကို အသုံးပြုပါ။`, and `<fn>` must be one of the
+    /// native functions that library exposes:
+    ///
+    ///   request   get(<url>) -> response, post(<url>, <data>) -> response
+    ///   ကျပန်း     ကိန်း(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float
+    ///   အချိန်     စောင့်(<seconds>) -> no value
+    ///
+    /// Returns the function's value, or `None` for the ones (like စောင့်)
+    /// that only carry out an action.
+    fn eval_lib_call(
+        &mut self,
+        lib: &str,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        match lib {
+            "request" => {
+                self.require_library_loaded(LIB_REQUEST_NAME, line)?;
+                match fn_name {
+                    "get" => {
+                        lib_fn_argc(lib, fn_name, args, 1, line)?;
+                        let url_v = self.eval(&args[0], line, None)?;
+                        let resp = crate::request_library::get(&display(&url_v))
+                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
+                        Ok(Some(http_response_to_value(resp)))
+                    }
+                    "post" => {
+                        lib_fn_argc(lib, fn_name, args, 2, line)?;
+                        let url_v = self.eval(&args[0], line, None)?;
+                        let data_v = self.eval(&args[1], line, None)?;
+                        let resp = crate::request_library::post(&display(&url_v), &display(&data_v))
+                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
+                        Ok(Some(http_response_to_value(resp)))
+                    }
+                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+                }
+            }
+            "ကျပန်း" => {
+                self.require_library_loaded("ကျပန်း", line)?;
+                match fn_name {
+                    "ကိန်း" | "random_int" => {
+                        lib_fn_argc(lib, fn_name, args, 2, line)?;
+                        let min_v = self.eval(&args[0], line, None)?;
+                        let max_v = self.eval(&args[1], line, None)?;
+                        let min_i = as_i64(&min_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_i = as_i64(&max_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        Ok(Some(Value::Int(crate::random_library::random_int(
+                            min_i, max_i,
+                        )?)))
+                    }
+                    "ဒဿမ" | "random_float" => {
+                        lib_fn_argc(lib, fn_name, args, 2, line)?;
+                        let min_v = self.eval(&args[0], line, None)?;
+                        let max_v = self.eval(&args[1], line, None)?;
+                        let min_f = as_f64(&min_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_f = as_f64(&max_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        Ok(Some(Value::Float(crate::random_library::random_float(
+                            min_f, max_f,
+                        )?)))
+                    }
+                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+                }
+            }
+            "အချိန်" => {
+                self.require_library_loaded("အချိန်", line)?;
+                match fn_name {
+                    "စောင့်" | "wait" => {
+                        lib_fn_argc(lib, fn_name, args, 1, line)?;
+                        let amount_v = self.eval(&args[0], line, None)?;
+                        let secs = as_f64(&amount_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        crate::time_library::wait(secs, crate::time_library::WaitUnit::Seconds)?;
+                        Ok(None)
+                    }
+                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+                }
+            }
+            _ => Err(lib_unknown_err(lib, line)),
+        }
+    }
+
+    /// Guard for library functions reached through the `<lib> ၏ <fn>`
+    /// syntax: the library has to have been imported first, exactly like
+    /// the keyword forms (`စောင့်ပါ`, `ကျပန်းကိန်း`, ...) require.
+    fn require_library_loaded(&self, lib: &str, line: usize) -> Result<(), String> {
+        if self.libraries.is_loaded(lib) {
+            Ok(())
+        } else {
+            Err(format!(
+                "E089 လိုင်း {} တွင် \"{}\" ကို သုံးရန် \"နည်းပညာများ {} ကို အသုံးပြုပါ။\" ဖြင့် နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                line, lib, lib
+            ))
         }
     }
 
