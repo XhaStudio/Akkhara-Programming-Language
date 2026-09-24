@@ -57,6 +57,38 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 ### Type keywords
 `စာသား`(str) `ကိန်းပြည့်`(int) `ဒဿမ`/`ဒဿမကိန်း`(float) `မှန်/မှား`(bool) `စာရင်း`(list) `အစု`(tuple) `အုပ်စု`(set) `အဘိဓာန်`(dict) `ဇယား`(table)
 
+### Libraries
+
+Import a library, then reach its functions with the `၏` particle.
+
+- Import: `နည်းပညာများ <lib>[, <lib>] ကို အသုံးပြုပါ။`
+- Call (no arguments): `<lib> ၏ <fn> ကို လုပ်ပါ။`
+- Call with arguments in parens: `<lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။`
+- Call with `လုပ်ရန်`/`ဖြင့်`: `<lib> ၏ <fn> ကို လုပ်ရန် <arg> ဖြင့်။`
+  (the argument(s) may also be parenthesized: `<lib> ၏ <fn> ကို လုပ်ရန် (<arg>) ဖြင့်။`)
+- Store the result in a variable: `<var> အတွက် <lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။`
+  or `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် <arg> ဖြင့်။`
+
+Multiple arguments are comma-separated; each form accepts either spelling of
+the argument list (`<a>, <b>` or `(<a>, <b>)`).
+
+Built-in libraries and the functions they expose:
+
+| Library | Function | Arguments | Result |
+|---|---|---|---|
+| `request` | `get` | `(url)` | response object |
+| `request` | `post` | `(url, data)` | response object |
+| `ကျပန်း` | `ကိန်း` / `random_int` | `(min, max)` | integer |
+| `ကျပန်း` | `ဒဿမ` / `random_float` | `(min, max)` | float |
+| `အချိန်` | `စောင့်` / `wait` | `(seconds)` | none |
+
+```
+နည်းပညာများ request ကို အသုံးပြုပါ။
+
+response အတွက် request ၏ get("https://api.example.com/data") ကို လုပ်ပါ။
+response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
+```
+
 All error messages are in Myanmar, formatted as `လိုင်း <N> ...`.
 
 ### Known limitations
