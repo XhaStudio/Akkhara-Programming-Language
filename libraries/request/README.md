@@ -31,17 +31,33 @@ response သည် request ၏ "https://api.example.com/data" ဖြစ်၏။
 y အတွက် request ၏ "https://api.example.com/submit" သို့ "a=1&b=2" ကို ပို့ပါ။
 ```
 
+### Named functions
+
+The same GET/POST calls are also available through the general library
+function-call syntax, which spells out the function name:
+
+```
+response အတွက် request ၏ get("https://api.example.com/data") ကို လုပ်ပါ။
+y အတွက် request ၏ post("https://api.example.com/submit", "a=1&b=2") ကို လုပ်ပါ။
+
+request ၏ get("https://api.example.com/data") ကို လုပ်ရန် "..." ဖြင့်။
+```
+
+Either spelling of the argument list works: `(<arg>)` or a bare `<arg>`
+with `ကို လုပ်ရန် ... ဖြင့်`; multiple arguments are comma-separated.
+`get` takes one URL argument, `post` takes a URL and a body.
+
 ## The response object
 
 Both GET and POST produce a response object (`တုံ့ပြန်ချက်`). Read its
 fields with the same `၏` particle:
 
-| Field | Type | Meaning |
-|---|---|---|
-| `အခြေအနေကုဒ်` | ကိန်းပြည့် | HTTP status code, e.g. `200` |
-| `စာသား` | စာသား | response body as text |
-| `အောင်မြင်` | မှန်/မှား | `မှန်` when the status is 2xx |
-| `လိပ်စာ` | စာသား | the final URL (after redirects) |
+| Field         | Type       | Meaning                         |
+| ------------- | ---------- | ------------------------------- |
+| `အခြေအနေကုဒ်` | ကိန်းပြည့် | HTTP status code, e.g. `200`    |
+| `စာသား`       | စာသား      | response body as text           |
+| `အောင်မြင်`   | မှန်/မှား  | `မှန်` when the status is 2xx   |
+| `လိပ်စာ`      | စာသား      | the final URL (after redirects) |
 
 ```
 response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
@@ -77,18 +93,18 @@ object so you can inspect `အခြေအနေကုဒ်` and `စာသာ�
 JSON error message is often the useful part). Only the problems below
 raise a catchable Akkhara error:
 
-| Code | Cause |
-|---|---|
-| `E068` | the library was used without `နည်းပညာများ request ကို အသုံးပြုပါ။` |
+| Code   | Cause                                                                                |
+| ------ | ------------------------------------------------------------------------------------ |
+| `E068` | the library was used without `နည်းပညာများ request ကို အသုံးပြုပါ။`                   |
 | `E070` | transport failure — no internet, DNS failure, connection refused, TLS error, timeout |
-| `E071` | the response body couldn't be read |
-| `E072` | invalid URL — empty, missing `http://`/`https://`, or missing host |
-| `E073` | response larger than the 10 MB limit |
-| `E074` | nothing readable after `၏` |
-| `E075` | malformed `ပို့ပါ` statement |
-| `E076` | that field doesn't exist on the object (the message lists the ones that do) |
-| `E077` | `၏` used on a non-object value |
-| `E078` | URL or POST body wasn't text |
+| `E071` | the response body couldn't be read                                                   |
+| `E072` | invalid URL — empty, missing `http://`/`https://`, or missing host                   |
+| `E073` | response larger than the 10 MB limit                                                 |
+| `E074` | nothing readable after `၏`                                                           |
+| `E075` | malformed `ပို့ပါ` statement                                                         |
+| `E076` | that field doesn't exist on the object (the message lists the ones that do)          |
+| `E077` | `၏` used on a non-object value                                                       |
+| `E078` | URL or POST body wasn't text                                                         |
 
 All of them work with `စမ်းရန် / ဖမ်းပါ`:
 
