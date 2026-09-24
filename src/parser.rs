@@ -107,6 +107,29 @@ pub enum Stmt {
         args: Vec<Expr>,
         line: usize,
     },
+    /// Library function call (result discarded):
+    ///   `<lib> ၏ <fn>(<arg>, ...) ကို လုပ်ပါ။`
+    ///   `<lib> ၏ <fn> ကို လုပ်ရန် <arg>, ... ဖြင့်။`
+    ///   `<lib> ၏ <fn> ကို လုပ်ရန် (<arg>, ...) ဖြင့်။`
+    ///   `<lib> ၏ <fn> ကို လုပ်ပါ။`  (no arguments)
+    LibCall {
+        lib: String,
+        fn_name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
+    /// Library function call whose result is stored in `name`:
+    ///   `<var> အတွက် <lib> ၏ <fn>(<arg>, ...) ကို လုပ်ပါ။`
+    ///   `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် <arg>, ... ဖြင့်။`
+    ///   `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် (<arg>, ...) ဖြင့်။`
+    ///   `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ပါ။`  (no arguments)
+    LibCallAssign {
+        name: String,
+        lib: String,
+        fn_name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
     /// `<fn name> အဖြစ် <alias1>, <alias2>, ...`
     /// Registers one or more alias names for an existing function, so
     /// calling any alias calls the original function.
@@ -547,6 +570,13 @@ fn func_call_assign_missing_particle_err(line: usize) -> String {
     )
 }
 
+fn lib_call_syntax_err(line: usize) -> String {
+    format!(
+        "E084 လိုင်း {} တွင် library function ခေါ်ရန် ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <lib> ၏ <fn>(<argument>) ကို လုပ်ပါ။ သို့မဟုတ် <lib> ၏ <fn> ကို လုပ်ရန် <argument> ဖြင့်",
+        line
+    )
+}
+
 fn class_missing_name_err(line: usize) -> String {
     format!(
         "E025 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
@@ -718,6 +748,190 @@ fn parse_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, String> {
         args.push(parse_expr(p, line)?);
     }
     Ok(args)
+}
+
+/// True if `tokens` is a single balanced `( ... )` group spanning the whole
+/// slice (i.e. the opening paren's matching close is the very last token).
+fn is_single_paren_group(tokens: &[Token]) -> bool {
+    if tokens.len() < 2 || !matches!(tokens[0].tok, Tok::LParen) {
+        return false;
+    }
+    if !matches!(tokens.last().unwrap().tok, Tok::RParen) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+            if depth == 0 {
+                return i == tokens.len() - 1;
+            }
+        }
+    }
+    false
+}
+
+/// Parse the argument list of a library function call. Accepts a bare
+/// comma-separated list (`<arg1>, <arg2>`), a single plain argument
+/// (`<arg>`), or the same wrapped in one pair of parens
+/// (`(<arg>)`, `(<arg1>, <arg2>)`) -- the two spellings are documented
+/// interchangeably. A single paren group is unwrapped first, so
+/// `(a, b)` means two arguments rather than one tuple argument. An empty
+/// list (`()`) means the call takes no arguments.
+fn parse_lib_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inner: &[Token] = if is_single_paren_group(tokens) {
+        &tokens[1..tokens.len() - 1]
+    } else {
+        tokens
+    };
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+    let mut args = Vec::with_capacity(parts.len());
+    for p in parts {
+        if p.is_empty() {
+            return Err(func_call_missing_arg_err(line));
+        }
+        args.push(parse_expr(p, line)?);
+    }
+    Ok(args)
+}
+
+/// Build either the plain or the assigning library-call statement,
+/// depending on whether the tokens started with `<var> အတွက်`.
+fn lib_call_stmt(
+    assign_name: Option<String>,
+    lib: String,
+    fn_name: String,
+    args: Vec<Expr>,
+    line: usize,
+) -> Stmt {
+    match assign_name {
+        Some(name) => Stmt::LibCallAssign {
+            name,
+            lib,
+            fn_name,
+            args,
+            line,
+        },
+        None => Stmt::LibCall {
+            lib,
+            fn_name,
+            args,
+            line,
+        },
+    }
+}
+
+/// Try to parse a library function-call statement. Handles all of:
+///
+///   `<lib> ၏ <fn>(<args>) ကို လုပ်ပါ။`
+///   `<var> အတွက် <lib> ၏ <fn>(<args>) ကို လုပ်ပါ။`
+///   `<lib> ၏ <fn> ကို လုပ်ရန် <args> ဖြင့်။`
+///   `<lib> ၏ <fn> ကို လုပ်ရန် (<args>) ဖြင့်။`
+///   `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် <args> ဖြင့်။`
+///   `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် (<args>) ဖြင့်။`
+///   plus the zero-argument `<lib> ၏ <fn> ကို လုပ်ပါ။` family.
+///
+/// Returns `Ok(None)` when `body` doesn't match this shape at all, so the
+/// caller can keep trying other statement forms.
+fn try_parse_lib_call(
+    body: &[Token],
+    line: usize,
+    end_present: bool,
+) -> Result<Option<Stmt>, String> {
+    // Optional leading "<var> အတွက်" for the assigning form.
+    let (assign_name, rest) = if body.len() >= 2
+        && matches!(body[0].tok, Tok::Ident(_))
+        && ident_eq(&body[1].tok, KW_FOR)
+    {
+        let name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        (Some(name), &body[2..])
+    } else {
+        (None, body)
+    };
+
+    // "<lib> ၏ <fn>"
+    if rest.len() < 3 {
+        return Ok(None);
+    }
+    let lib = match &rest[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => return Ok(None),
+    };
+    if !ident_eq(&rest[1].tok, KW_OF) {
+        return Ok(None);
+    }
+    let fn_name = match &rest[2].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => return Ok(None),
+    };
+    let tail = &rest[3..];
+
+    // `<fn>(<args>) ကို လုပ်ပါ။`
+    if !tail.is_empty() && matches!(tail[0].tok, Tok::LParen) {
+        let close = find_close(tail, 0, line)?;
+        let after = &tail[close + 1..];
+        if after.len() != 2
+            || !ident_eq(&after[0].tok, KW_PARTICLE)
+            || !ident_eq(&after[1].tok, KW_CALL)
+        {
+            return Err(lib_call_syntax_err(line));
+        }
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        let args = parse_lib_call_args(&tail[1..close], line)?;
+        return Ok(Some(lib_call_stmt(assign_name, lib, fn_name, args, line)));
+    }
+
+    if tail.len() >= 2 && ident_eq(&tail[0].tok, KW_PARTICLE) {
+        // `<fn> ကို လုပ်ပါ။` (no arguments)
+        if ident_eq(&tail[1].tok, KW_CALL) {
+            if tail.len() != 2 {
+                return Err(lib_call_syntax_err(line));
+            }
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            return Ok(Some(lib_call_stmt(
+                assign_name,
+                lib,
+                fn_name,
+                Vec::new(),
+                line,
+            )));
+        }
+        // `<fn> ကို လုပ်ရန် <args> ဖြင့်။`
+        if ident_eq(&tail[1].tok, KW_CALL_WITH) {
+            let after_call = &tail[2..];
+            let by_idx = find_kw_top_level(after_call, KW_BY)
+                .ok_or_else(|| func_call_missing_by_err(line))?;
+            if by_idx + 1 != after_call.len() {
+                return Err(lib_call_syntax_err(line));
+            }
+            let arg_tokens = &after_call[..by_idx];
+            if arg_tokens.is_empty() {
+                return Err(func_call_missing_arg_err(line));
+            }
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            let args = parse_lib_call_args(arg_tokens, line)?;
+            return Ok(Some(lib_call_stmt(assign_name, lib, fn_name, args, line)));
+        }
+    }
+
+    Ok(None)
 }
 
 fn has_end(tokens: &[Token]) -> bool {
@@ -1225,6 +1439,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             data,
             line,
         });
+    }
+
+    // --- Library function call: <lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။ and its
+    //     `လုပ်ရန် ... ဖြင့်` / `<var> အတွက် ...` variants. Detected by the
+    //     "၏" between the library and function names, so it must be tried
+    //     before the generic function-call branches below. ---
+    if let Some(stmt) = try_parse_lib_call(&body, line, end_present)? {
+        return Ok(stmt);
     }
 
     // --- Function call with argument(s): <fn name> ကို လုပ်ရန် <argument> ဖြင့်။
