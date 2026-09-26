@@ -1,0 +1,19 @@
+# lib_alias.akk -- the three library-alias forms.
+# Syntax1: alias at import time
+နည်းပညာများ ကျပန်း အဖြစ် r ကို အသုံးပြုပါ။
+a အတွက် r ၏ တန်ဖိုး(["A"]) ကို လုပ်ပါ။
+"Syntax1:" ကို ဖော်ပြပါ။
+a ကို ဖော်ပြပါ။
+
+# Syntax2: alias an already-named library
+ကျပန်း အဖြစ် r2။
+b အတွက် r2 ၏ တန်ဖိုး(["B"]) ကို လုပ်ပါ။
+"Syntax2:" ကို ဖော်ပြပါ။
+b ကို ဖော်ပြပါ။
+
+# Form1: import, then pick from a list
+နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+Passwords မှာ ["C"] ဖြစ်၏။
+Password အတွက် ကျပန်း ၏ တန်ဖိုး(Passwords) ကို လုပ်ပါ။
+"Form1:" ကို ဖော်ပြပါ။
+Password ကို ဖော်ပြပါ။

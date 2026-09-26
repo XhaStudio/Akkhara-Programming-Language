@@ -1,0 +1,30 @@
+# lib_call_forms.akk -- every spelling of the "<lib> ၏ <fn>" call syntax.
+နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+
+xs မှာ ["A"] ဖြစ်၏။
+
+# 1. stored, parenthesized argument list
+r1 အတွက် ကျပန်း ၏ တန်ဖိုး(xs) ကို လုပ်ပါ။
+r1 ကို ဖော်ပြပါ။
+
+# 2. discarded, parenthesized
+ကျပန်း ၏ တန်ဖိုး(xs) ကို လုပ်ပါ။
+
+# 3. stored, လုပ်ရန် ... ဖြင့်
+r2 အတွက် ကျပန်း ၏ တန်ဖိုး ကို လုပ်ရန် xs ဖြင့်။
+r2 ကို ဖော်ပြပါ။
+
+# 4. discarded, လုပ်ရန် ... ဖြင့်
+ကျပန်း ၏ တန်ဖိုး ကို လုပ်ရန် xs ဖြင့်။
+
+# 5. stored, parenthesized after လုပ်ရန်
+r3 အတွက် ကျပန်း ၏ တန်ဖိုး ကို လုပ်ရန် (xs) ဖြင့်။
+r3 ကို ဖော်ပြပါ။
+
+# 6. two arguments -- min 5, max 6 is end-exclusive, so always 5
+n အတွက် ကျပန်း ၏ ကိန်း ကို လုပ်ရန် 5, 6 ဖြင့်။
+n ကို ဖော်ပြပါ။
+
+# 7. the English function aliases work too
+m အတွက် ကျပန်း ၏ random_int(5, 6) ကို လုပ်ပါ။
+m ကို ဖော်ပြပါ။

@@ -1,0 +1,21 @@
+# request_not_imported.akk -- both not-imported paths, offline (no network).
+# E078 -- the keyword GET form without importing request
+စမ်းရန်
+    r သည် request ၏ "https://example.com" ဖြစ်၏။
+E078 ကို ဖမ်းပါ။
+    "E078 get ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E078 -- the keyword POST form without importing request
+စမ်းရန်
+    p အတွက် request ၏ "https://example.com" သို့ "a=1" ကို ပို့ပါ။
+E078 ကို ဖမ်းပါ။
+    "E078 post ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E089 -- the named-call form without importing request
+စမ်းရန်
+    q အတွက် request ၏ get("https://example.com") ကို လုပ်ပါ။
+E089 ကို ဖမ်းပါ။
+    "E089 ok" ကို ဖော်ပြပါ။
+ပြီး။
