@@ -194,6 +194,16 @@ fn lib_fn_argtype_err(lib: &str, fn_name: &str, line: usize) -> String {
     )
 }
 
+/// "this function wants a collection, not that scalar" -- raised when a
+/// value-taking library function (e.g. `ကျပန်း ၏ တန်ဖိုး`) is handed
+/// something like an int.
+fn lib_fn_collection_err(lib: &str, fn_name: &str, line: usize) -> String {
+    format!(
+        "E092 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် စာရင်း (list), အစု (tuple), အုပ်စု (set) သို့ စာသား (str) argument တစ်ခု လိုအပ်ပါသည်။",
+        line, lib, fn_name
+    )
+}
+
 pub struct Interpreter {
     env: HashMap<String, Value>,
     functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
@@ -206,6 +216,11 @@ pub struct Interpreter {
     /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။`. Only loaded libraries may use
     /// their builtins (e.g. စောင့်ပါ).
     libraries: LibraryLoader,
+    /// Aliases registered by `<lib> အဖြစ် <alias>။` (and by the
+    /// `နည်းပညာများ <lib> အဖြစ် <alias> ကို အသုံးပြုပါ။` import form):
+    /// alias -> canonical library name. Every `<lib> ၏ ...` reference is
+    /// resolved through this before dispatch.
+    lib_aliases: HashMap<String, String>,
 }
 
 impl Interpreter {
@@ -220,6 +235,7 @@ impl Interpreter {
             classes: HashMap::new(),
             self_stack: Vec::new(),
             libraries: LibraryLoader::new(libraries_dir),
+            lib_aliases: HashMap::new(),
         }
     }
 
@@ -412,6 +428,18 @@ impl Interpreter {
                 aliases,
                 line,
             } => {
+                // `<lib> အဖြစ် <alias>။` -- aliasing a library rather than a
+                // function. It also imports the library, so the alias is
+                // usable on the very next line.
+                if !self.functions.contains_key(original) && self.is_known_library(original) {
+                    for alias in aliases {
+                        self.lib_aliases.insert(alias.clone(), original.clone());
+                    }
+                    if !self.libraries.is_loaded(original) {
+                        self.import_library(original, *line)?;
+                    }
+                    return Ok(());
+                }
                 let def = self.functions.get(original).cloned().ok_or_else(|| {
                     format!(
                         "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
@@ -508,42 +536,11 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::UseLibrary { names, line } => {
-                for name in names {
-                    // Built-ins are compiled straight into the akk binary.
-                    if name == "ကျပန်း" || name == "အချိန်" || name == "request" {
-                        self.libraries.mark_loaded(name);
-                        continue;
-                    }
-
-                    // Otherwise, look for a package downloaded with
-                    // `akk install <name>` under the libraries/ folder. Its
-                    // source is plain Akkhara, so loading it just means
-                    // running it -- that registers its function/class
-                    // definitions the same way any top-level definition does.
-                    match self.libraries.find_dynamic_source(name) {
-                        Some(src) => {
-                            let tokens = crate::lexer::lex(&src).map_err(|e| {
-                                format!(
-                                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            let stmts = crate::parser::parse(&tokens).map_err(|e| {
-                                format!(
-                                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                                    line, name, e
-                                )
-                            })?;
-                            self.run(&stmts)?;
-                            self.libraries.mark_loaded(name);
-                        }
-                        None => {
-                            return Err(format!(
-                                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
-                                line, name, name
-                            ));
-                        }
+            Stmt::UseLibrary { libs, line } => {
+                for (name, alias) in libs {
+                    self.import_library(name, *line)?;
+                    if let Some(alias) = alias {
+                        self.lib_aliases.insert(alias.clone(), name.clone());
                     }
                 }
                 Ok(())
@@ -597,10 +594,11 @@ impl Interpreter {
                 data,
                 line,
             } => {
-                if lib != "request" {
+                let resolved = self.resolve_lib(lib);
+                if resolved != "request" {
                     return Err(format!(
                         "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
-                        line, lib
+                        line, resolved
                     ));
                 }
                 if !self.libraries.is_loaded("request") {
@@ -860,8 +858,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// native functions that library exposes:
     ///
     ///   request   get(<url>) -> response, post(<url>, <data>) -> response
-    ///   ကျပန်း     ကိန်း(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float
+    ///   ကျပန်း     ကိန်း(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float,
+    ///             တန်ဖိုး(<collection>) -> a random element of it
     ///   အချိန်     စောင့်(<seconds>) -> no value
+    ///
+    /// `lib` may be an alias registered with `<lib> အဖြစ် <alias>။`.
     ///
     /// Returns the function's value, or `None` for the ones (like စောင့်)
     /// that only carry out an action.
@@ -872,6 +873,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         args: &[Expr],
         line: usize,
     ) -> Result<Option<Value>, String> {
+        let resolved = self.resolve_lib(lib);
+        let lib = resolved.as_str();
         match lib {
             "request" => {
                 self.require_library_loaded(LIB_REQUEST_NAME, line)?;
@@ -921,6 +924,22 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             min_f, max_f,
                         )?)))
                     }
+                    // တန်ဖိုး(<collection>) -- pick one element at random from a
+                    // list / tuple / set / string.
+                    "တန်ဖိုး" | "value" => {
+                        lib_fn_argc(lib, fn_name, args, 1, line)?;
+                        let v = self.eval(&args[0], line, None)?;
+                        let items: Vec<Value> = match &v {
+                            Value::List(items) => items.clone(),
+                            Value::Tuple(items) => items.clone(),
+                            Value::Set(items) => items.clone(),
+                            Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
+                            _ => return Err(lib_fn_collection_err(lib, fn_name, line)),
+                        };
+                        let picked = crate::random_library::random_value(&items)
+                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
+                        Ok(Some(picked))
+                    }
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
                 }
             }
@@ -954,6 +973,60 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 line, lib, lib
             ))
         }
+    }
+
+    /// Imports one library by name: built-ins are compiled straight into
+    /// the akk binary, anything else must be a package downloaded with
+    /// `akk install <name>` under the libraries/ folder. Its source is
+    /// plain Akkhara, so loading it just means running it -- that
+    /// registers its function/class definitions the same way any top-level
+    /// definition does.
+    fn import_library(&mut self, name: &str, line: usize) -> Result<(), String> {
+        if name == "ကျပန်း" || name == "အချိန်" || name == "request" {
+            self.libraries.mark_loaded(name);
+            return Ok(());
+        }
+        match self.libraries.find_dynamic_source(name) {
+            Some(src) => {
+                let tokens = crate::lexer::lex(&src).map_err(|e| {
+                    format!(
+                        "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                        line, name, e
+                    )
+                })?;
+                let stmts = crate::parser::parse(&tokens).map_err(|e| {
+                    format!(
+                        "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                        line, name, e
+                    )
+                })?;
+                self.run(&stmts)?;
+                self.libraries.mark_loaded(name);
+                Ok(())
+            }
+            None => Err(format!(
+                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
+                line, name, name
+            )),
+        }
+    }
+
+    /// Is `name` a library this binary knows about? Used to tell
+    /// `<lib> အဖြစ် <alias>။` (a library alias) apart from the older
+    /// `<fn> အဖြစ် <alias>` function alias.
+    fn is_known_library(&self, name: &str) -> bool {
+        name == "request" || name == "ကျပန်း" || name == "အချိန်"
+            || self.libraries.find_dynamic_source(name).is_some()
+    }
+
+    /// Rewrites a `<lib>` written in source through any registered alias,
+    /// so `r ကိန်း(1, 10) ကို လုပ်ပါ။` dispatches to `ကျပန်း`. Names with
+    /// no alias pass through unchanged.
+    fn resolve_lib(&self, name: &str) -> String {
+        self.lib_aliases
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 
     fn eval(&mut self, expr: &Expr, line: usize, var_ctx: Option<&str>) -> Result<Value, String> {
@@ -1047,10 +1120,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.construct_object(class_name, arg_exprs, *new_line)
             }
             Expr::HttpGet(lib, url_expr, gline) => {
-                if lib != LIB_REQUEST_NAME {
+                let resolved = self.resolve_lib(lib);
+                if resolved != LIB_REQUEST_NAME {
                     return Err(format!(
                         "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
-                        gline, lib
+                        gline, resolved
                     ));
                 }
                 if !self.libraries.is_loaded(LIB_REQUEST_NAME) {
