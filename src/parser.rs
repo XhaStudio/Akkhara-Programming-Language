@@ -156,9 +156,13 @@ pub enum Stmt {
         finally_body: Option<Vec<Stmt>>,
         line: usize,
     },
-    /// Library import: `နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။`
+    /// Library import:
+    /// `နည်းပညာများ <lib name>[, <lib name>, ...][ အဖြစ် <alias>] ကို အသုံးပြုပါ။`
     UseLibrary {
-        names: Vec<String>,
+        /// `(library name, optional alias)` pairs, in source order. The
+        /// alias (from `... အဖြစ် <alias>`) lets later statements reach the
+        /// library under a shorter name: `r ၏ ...` for `ကျပန်း ၏ ...`.
+        libs: Vec<(String, Option<String>)>,
         line: usize,
     },
     /// Wait (sleep): `10s ကို စောင့်ပါ။` (also `10m` / `10h`, or a bare
@@ -524,6 +528,13 @@ fn func_call_missing_arg_err(line: usize) -> String {
 fn library_use_bad_list_err(line: usize) -> String {
     format!(
         "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို အသုံးပြုပါ။",
+        line
+    )
+}
+
+fn library_use_alias_err(line: usize) -> String {
+    format!(
+        "E093 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းပညာများ <lib> အဖြစ် <alias> ကို အသုံးပြုပါ။",
         line
     )
 }
@@ -1008,6 +1019,18 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
                     i = ni;
                     continue;
                 }
+                // Any other library name reaches here too when what
+                // follows is not a field name -- that keeps
+                // `<lib> ၏ <url>` working under an alias registered with
+                // `<lib> အဖြစ် <alias>။` (e.g. `req ၏ "https://..."`),
+                // while `<var> ၏ <field>` stays a field access. The
+                // interpreter resolves the name and rejects non-libraries.
+                if !(i + 1 < tokens.len() && matches!(tokens[i + 1].tok, Tok::Ident(_))) {
+                    let (arg, ni) = parse_primary_at(tokens, i + 1, line)?;
+                    expr = Expr::HttpGet(name.clone(), Box::new(arg), of_line);
+                    i = ni;
+                    continue;
+                }
             }
             if i + 1 < tokens.len() {
                 if let Tok::Ident(field_name) = &tokens[i + 1].tok {
@@ -1283,20 +1306,35 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
         {
             let names_tokens = &body[1..body.len() - 2];
-            let mut names = Vec::new();
+            let mut libs: Vec<(String, Option<String>)> = Vec::new();
             for part in names_tokens.split(|t| matches!(t.tok, Tok::Comma)) {
                 match part {
+                    // <lib name>
                     [t] => match &t.tok {
-                        Tok::Ident(s) => names.push(s.clone()),
+                        Tok::Ident(s) => libs.push((s.clone(), None)),
                         _ => return Err(library_use_bad_list_err(line)),
                     },
+                    // <lib name> အဖြစ် <alias>
+                    [name_t, as_t, alias_t] if ident_eq(&as_t.tok, KW_AS) => {
+                        match (&name_t.tok, &alias_t.tok) {
+                            (Tok::Ident(lib), Tok::Ident(alias)) => {
+                                libs.push((lib.clone(), Some(alias.clone())));
+                            }
+                            _ => return Err(library_use_alias_err(line)),
+                        }
+                    }
+                    // "... အဖြစ်" with the alias swallowed by the statement's
+                    // own "ကို": the alias name is missing.
+                    [_, as_t] if ident_eq(&as_t.tok, KW_AS) => {
+                        return Err(library_use_alias_err(line));
+                    }
                     _ => return Err(library_use_bad_list_err(line)),
                 }
             }
-            if names.is_empty() {
+            if libs.is_empty() {
                 return Err(library_use_bad_list_err(line));
             }
-            return Ok(Stmt::UseLibrary { names, line });
+            return Ok(Stmt::UseLibrary { libs, line });
         }
         return Err(generic_syntax_err(line));
     }
