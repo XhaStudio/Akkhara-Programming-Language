@@ -342,6 +342,28 @@ pub fn is_type_keyword(s: &str) -> bool {
         || s == "ဘူလ်"
 }
 
+/// Splits a token slice on `,` tokens, but only at paren-nesting depth 0, so
+/// a parenthesized group like `(r, random)` stays intact as one part instead
+/// of being torn apart by its own inner comma.
+fn split_top_level_commas(tokens: &[Token]) -> Vec<&[Token]> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        match t.tok {
+            Tok::LParen => depth += 1,
+            Tok::RParen => depth -= 1,
+            Tok::Comma if depth == 0 => {
+                parts.push(&tokens[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&tokens[start..]);
+    parts
+}
+
 fn ident_eq(tok: &Tok, s: &str) -> bool {
     matches!(tok, Tok::Ident(v) if v == s)
 }
@@ -1307,7 +1329,9 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         {
             let names_tokens = &body[1..body.len() - 2];
             let mut libs: Vec<(String, Option<String>)> = Vec::new();
-            for part in names_tokens.split(|t| matches!(t.tok, Tok::Comma)) {
+            // Split on top-level commas only, so a parenthesized alias list
+            // like "(r, random)" isn't torn apart by its own inner comma.
+            for part in split_top_level_commas(names_tokens) {
                 match part {
                     // <lib name>
                     [t] => match &t.tok {
@@ -1321,6 +1345,33 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                                 libs.push((lib.clone(), Some(alias.clone())));
                             }
                             _ => return Err(library_use_alias_err(line)),
+                        }
+                    }
+                    // <lib name> အဖြစ် (<alias1>, <alias2>, ...) -- one
+                    // library registered under several aliases at once.
+                    [name_t, as_t, paren_open, rest @ ..]
+                        if ident_eq(&as_t.tok, KW_AS)
+                            && matches!(paren_open.tok, Tok::LParen)
+                            && matches!(rest.last().map(|t| &t.tok), Some(Tok::RParen)) =>
+                    {
+                        let lib = match &name_t.tok {
+                            Tok::Ident(lib) => lib.clone(),
+                            _ => return Err(library_use_alias_err(line)),
+                        };
+                        let inner = &rest[..rest.len() - 1];
+                        if inner.is_empty() {
+                            return Err(library_use_alias_err(line));
+                        }
+                        for alias_part in inner.split(|t| matches!(t.tok, Tok::Comma)) {
+                            match alias_part {
+                                [alias_t] => match &alias_t.tok {
+                                    Tok::Ident(alias) => {
+                                        libs.push((lib.clone(), Some(alias.clone())));
+                                    }
+                                    _ => return Err(library_use_alias_err(line)),
+                                },
+                                _ => return Err(library_use_alias_err(line)),
+                            }
                         }
                     }
                     // "... အဖြစ်" with the alias swallowed by the statement's
