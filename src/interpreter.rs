@@ -858,7 +858,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// native functions that library exposes:
     ///
     ///   request   get(<url>) -> response, post(<url>, <data>) -> response
-    ///   ကျပန်း     ကိန်း(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float,
+    ///   ကျပန်း     ကိန်း/ကိန်ပြည့်(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float,
     ///             တန်ဖိုး(<collection>) -> a random element of it
     ///   အချိန်     စောင့်(<seconds>) -> no value
     ///
@@ -900,7 +900,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "ကျပန်း" => {
                 self.require_library_loaded("ကျပန်း", line)?;
                 match fn_name {
-                    "ကိန်း" | "random_int" => {
+                    "ကိန်း" | "ကိန်ပြည့်" | "random_int" => {
                         lib_fn_argc(lib, fn_name, args, 2, line)?;
                         let min_v = self.eval(&args[0], line, None)?;
                         let max_v = self.eval(&args[1], line, None)?;
