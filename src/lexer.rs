@@ -28,6 +28,24 @@ pub struct Token {
     pub line: usize,
 }
 
+/// Resolves a single backslash escape (the character right after the `\`)
+/// into the string being built. Recognizes \n \t \" \' \\; anything else is
+/// kept literally as `\<c>` so unrecognized sequences don't silently lose
+/// the backslash.
+fn push_escaped(s: &mut String, c: char) {
+    match c {
+        'n' => s.push('\n'),
+        't' => s.push('\t'),
+        '"' => s.push('"'),
+        '\'' => s.push('\''),
+        '\\' => s.push('\\'),
+        other => {
+            s.push('\\');
+            s.push(other);
+        }
+    }
+}
+
 fn myanmar_digit_to_ascii(c: char) -> Option<char> {
     match c {
         '၀' => Some('0'),
@@ -108,12 +126,58 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         }
 
         if c == '"' {
+            // Triple-quoted string: """ ... """ -- spans multiple physical
+            // lines verbatim (only closes on another triple-quote).
+            if i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                let mut s = String::new();
+                let start_line = line;
+                i += 3;
+                loop {
+                    if i + 2 < n && chars[i] == '"' && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                        i += 3;
+                        break;
+                    }
+                    if i >= n {
+                        return Err(format!(
+                            "E003 လိုင်း {} တွင် string တန်ဖိုးအတွက် ပိတ် '\"\"\"' မရှိပါ။",
+                            start_line
+                        ));
+                    }
+                    if chars[i] == '\n' {
+                        line += 1;
+                        s.push('\n');
+                        i += 1;
+                        continue;
+                    }
+                    if chars[i] == '\\' && i + 1 < n {
+                        push_escaped(&mut s, chars[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    s.push(chars[i]);
+                    i += 1;
+                }
+                tokens.push(Token {
+                    tok: Tok::Str(s),
+                    line: start_line,
+                });
+                continue;
+            }
+
             let mut s = String::new();
             let start_line = line;
             i += 1;
             while i < n && chars[i] != '"' {
                 if chars[i] == '\n' {
                     line += 1;
+                    s.push('\n');
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '\\' && i + 1 < n {
+                    push_escaped(&mut s, chars[i + 1]);
+                    i += 2;
+                    continue;
                 }
                 s.push(chars[i]);
                 i += 1;
