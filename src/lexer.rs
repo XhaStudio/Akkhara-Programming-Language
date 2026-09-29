@@ -12,6 +12,14 @@ pub enum Tok {
     Num(String),   // normalized ascii numeral text, may contain '.'
     Op(char),      // + - * / % ^ (**, exponent) \ (//, floor division)
     Cmp(String),   // < > == != <= >=
+    And,           // && (eng library logical and)
+    Or,            // || (eng library logical or)
+    Not,           // !  (eng library logical not)
+    Dot,           // .  (eng library library-call separator: `lib.fn(args);`)
+    Bool(bool),    // true / false (eng library bool literals)
+    Assign,        // =  (eng library declaration assignment)
+    Colon,         // :  (eng library type annotation)
+    Semicolon,     // ;  (eng library statement terminator)
     End,           // ။  (end of sentence)
     LBracket,      // [
     RBracket,      // ]
@@ -86,6 +94,11 @@ fn is_word_delim(c: char) -> bool {
         || c == '>'
         || c == '='
         || c == '!'
+        || c == ':'
+        || c == ';'
+        || c == '&'
+        || c == '|'
+        || c == '.'
 }
 
 /// Lex the whole source file into a flat Vec<Token>.
@@ -259,6 +272,43 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
+        if c == '&' && i + 1 < n && chars[i + 1] == '&' {
+            // eng library logical-and: `if (a > 0 && b > 0) { ... }`
+            tokens.push(Token { tok: Tok::And, line });
+            i += 2;
+            continue;
+        }
+
+        if c == '|' && i + 1 < n && chars[i + 1] == '|' {
+            // eng library logical-or: `if (a > 0 || b > 0) { ... }`
+            tokens.push(Token { tok: Tok::Or, line });
+            i += 2;
+            continue;
+        }
+
+        if c == ':' {
+            // eng library type annotation: `name :int = 5;`
+            tokens.push(Token { tok: Tok::Colon, line });
+            i += 1;
+            continue;
+        }
+
+        if c == '.' {
+            // eng library library-call separator: `ကျပန်း.ကိန်း(1, 10);`
+            // (a '.' between digits is consumed as part of a number literal
+            // above, so only a "free" dot reaches here)
+            tokens.push(Token { tok: Tok::Dot, line });
+            i += 1;
+            continue;
+        }
+
+        if c == ';' {
+            // eng library statement terminator ( Myanmar uses '။' instead).
+            tokens.push(Token { tok: Tok::Semicolon, line });
+            i += 1;
+            continue;
+        }
+
         if c == '<' || c == '>' {
             if i + 1 < n && chars[i + 1] == '=' {
                 tokens.push(Token {
@@ -284,9 +334,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 });
                 i += 2;
             } else {
-                // A lone '=' isn't meaningful in Akkhara syntax; skip it so
-                // the parser reports a clear syntax error at the statement
-                // level rather than the lexer choking on it.
+                // A lone '=' is the eng library's declaration assignment
+                // (`name :int = 5;`). Myanmar syntax never uses a lone '='
+                // outside '==', so emitting it here can't affect existing
+                // programs; the parser only accepts it in eng declarations.
+                tokens.push(Token { tok: Tok::Assign, line });
                 i += 1;
             }
             continue;
@@ -300,6 +352,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 });
                 i += 2;
             } else {
+                // eng library logical-not: `if (!flag) { ... }`.
+                tokens.push(Token { tok: Tok::Not, line });
                 i += 1;
             }
             continue;
@@ -351,6 +405,20 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         } else {
             (w, false)
         };
+
+        // eng library bool literals: lowercase `true` / `false`. (The mixed-
+        // case `True` / `False` spellings are handled as Ident keywords in
+        // the parser, exactly as before.)
+        if core == "true" || core == "false" {
+            tokens.push(Token {
+                tok: Tok::Bool(core == "true"),
+                line,
+            });
+            if end_tok {
+                tokens.push(Token { tok: Tok::End, line });
+            }
+            continue;
+        }
 
         // Keywords are sometimes fused directly onto a preceding word with
         // no space, e.g. "ကိန်းပြည့်သို့ ပြောင်းပါ" written as one run
