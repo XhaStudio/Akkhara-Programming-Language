@@ -206,6 +206,10 @@ fn lib_fn_collection_err(lib: &str, fn_name: &str, line: usize) -> String {
 
 pub struct Interpreter {
     env: HashMap<String, Value>,
+    /// Names declared with the eng library's `pin` form (`pin name :bool =
+    /// true;`). Assigning to a name here -- through either syntax family --
+    /// is an error; `pin` values are immutable for the rest of the program.
+    consts: std::collections::HashSet<String>,
     functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
     classes: HashMap<String, Vec<(String, Vec<String>, Vec<Stmt>)>>,
     /// Stack of in-progress object constructions. While non-empty, a
@@ -221,6 +225,20 @@ pub struct Interpreter {
     /// alias -> canonical library name. Every `<lib> ၏ ...` reference is
     /// resolved through this before dispatch.
     lib_aliases: HashMap<String, String>,
+    /// Pending `return` from inside a function body: `Some(None)` is a bare
+    /// `return;`, `Some(Some(v))` returns `v`, and `None` means no return is
+    /// in flight. Set by `Stmt::EngReturn`, consumed by `call_function`.
+    return_signal: Option<Option<Value>>,
+    /// How many function bodies are currently executing. A `return` while
+    /// this is 0 escaped to the top level (E108).
+    call_depth: usize,
+    /// Pending `break` from inside a loop body, with the same shape as
+    /// `return_signal`: `Some(None)` is a bare `break`, `Some(Some(v))` is
+    /// `break <value>`. Consumed by the innermost enclosing loop.
+    break_signal: Option<Option<Value>>,
+    /// How many loops are currently running (eng `loop`, `while`, `for`). A
+    /// `break` while this is 0 has no loop to stop (E116).
+    loop_depth: usize,
 }
 
 impl Interpreter {
@@ -231,26 +249,228 @@ impl Interpreter {
     pub fn new(libraries_dir: std::path::PathBuf) -> Self {
         Interpreter {
             env: HashMap::new(),
+            consts: std::collections::HashSet::new(),
             functions: HashMap::new(),
             classes: HashMap::new(),
             self_stack: Vec::new(),
             libraries: LibraryLoader::new(libraries_dir),
             lib_aliases: HashMap::new(),
+            return_signal: None,
+            call_depth: 0,
+            break_signal: None,
+            loop_depth: 0,
         }
     }
 
     pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
         for stmt in stmts {
+            // A `return` is unwinding out of the enclosing function (and a
+            // `break` is heading for the innermost loop): stop running
+            // statements here -- the try/catch and library bodies use this
+            // same entry point.
+            if self.return_signal.is_some() || self.break_signal.is_some() {
+                break;
+            }
             self.exec(stmt)?;
         }
         Ok(())
     }
 
+    /// Run one loop body. Returns `Some(v)` when a `break` ended the
+    /// iteration -- `v` being the break's value (`None` for a bare `break`) --
+    /// and `None` when the body ran to completion. A pending `return` is left
+    /// in place so the enclosing function call can unwind.
+    fn run_loop_body(&mut self, body: &[Stmt]) -> Result<Option<Option<Value>>, String> {
+        for s in body {
+            self.exec(s)?;
+            if self.return_signal.is_some() || self.break_signal.is_some() {
+                break;
+            }
+        }
+        Ok(self.break_signal.take())
+    }
+
     fn exec(&mut self, stmt: &Stmt) -> Result<(), String> {
+        // Once a `return` or `break` is in flight nothing else runs until the
+        // enclosing function/loop consumes it -- this keeps `return` inside
+        // if/while/for and try bodies from executing the statements that
+        // follow it.
+        if self.return_signal.is_some() || self.break_signal.is_some() {
+            return Ok(());
+        }
         match stmt {
             Stmt::VarDecl { name, value, line } => {
+                if self.consts.contains(name) {
+                    return Err(eng_const_reassign_err(name, *line));
+                }
                 let v = self.eval(value, *line, Some(name))?;
                 self.env.insert(name.clone(), v);
+                Ok(())
+            }
+            Stmt::EngDecl {
+                name,
+                type_name,
+                value,
+                is_const,
+                line,
+            } => {
+                let v = self.eval(value, *line, Some(name))?;
+                let v = check_eng_value(name, type_name, v, *line)?;
+                if *is_const {
+                    if self.env.contains_key(name) {
+                        return Err(eng_pin_redeclare_err(name, *line));
+                    }
+                    self.consts.insert(name.clone());
+                }
+                self.env.insert(name.clone(), v);
+                Ok(())
+            }
+            Stmt::EngPrint { value, line } => {
+                let v = self.eval(value, *line, None)?;
+                println!("{}", display(&v));
+                Ok(())
+            }
+            Stmt::EngInput { prompt, line } => {
+                let p = self.eval(prompt, *line, None)?;
+                print!("{}", display(&p));
+                io::stdout().flush().ok();
+                let mut buf = String::new();
+                io::stdin().read_line(&mut buf).ok();
+                Ok(())
+            }
+            Stmt::EngInputAssign {
+                name,
+                type_name,
+                prompt,
+                line,
+            } => {
+                let p = self.eval(prompt, *line, None)?;
+                print!("{}", display(&p));
+                io::stdout().flush().ok();
+                let mut buf = String::new();
+                io::stdin().read_line(&mut buf).ok();
+                let trimmed = buf.trim().to_string();
+                let v = coerce_eng_input(&trimmed, type_name, *line)?;
+                self.env.insert(name.clone(), v);
+                Ok(())
+            }
+            Stmt::EngReturn { value, line } => {
+                if self.call_depth == 0 {
+                    return Err(eng_return_outside_fn_err(*line));
+                }
+                let v = match value {
+                    Some(e) => Some(self.eval(e, *line, None)?),
+                    None => None,
+                };
+                self.return_signal = Some(v);
+                Ok(())
+            }
+            Stmt::EngExprCall { name, args, line } => {
+                self.call_named(name, args, *line)?;
+                Ok(())
+            }
+            Stmt::EngAssign { name, value, line } => {
+                if self.consts.contains(name) {
+                    return Err(eng_const_reassign_err(name, *line));
+                }
+                // A first `name = <value>;` declares the variable, so an eng
+                // assignment needs no separate typed declaration.
+                let v = self.eval(value, *line, Some(name))?;
+                self.env.insert(name.clone(), v);
+                Ok(())
+            }
+            Stmt::EngMathAssign {
+                name,
+                op,
+                amount,
+                line,
+            } => {
+                if self.consts.contains(name) {
+                    return Err(eng_const_reassign_err(name, *line));
+                }
+                // An undeclared name starts from 0, the way the Myanmar
+                // `... ကို <n> တိုးပါ။` form does.
+                let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
+                let amt = self.eval(amount, *line, Some(name))?;
+                let result = binary_op(&current, &amt, *op, *line, Some(name))?;
+                self.env.insert(name.clone(), result);
+                Ok(())
+            }
+            Stmt::EngBreak { value, line } => {
+                if self.loop_depth == 0 {
+                    return Err(eng_break_outside_loop_err(*line));
+                }
+                let v = match value {
+                    Some(e) => Some(self.eval(e, *line, None)?),
+                    None => None,
+                };
+                self.break_signal = Some(v);
+                Ok(())
+            }
+            Stmt::EngLoop { body } => {
+                self.loop_depth += 1;
+                let result = (|| -> Result<(), String> {
+                    loop {
+                        let broke = self.run_loop_body(body)?;
+                        if broke.is_some() || self.return_signal.is_some() {
+                            return Ok(());
+                        }
+                    }
+                })();
+                self.loop_depth -= 1;
+                result
+            }
+            Stmt::EngLoopAssign {
+                name,
+                type_name,
+                is_const,
+                body,
+                line,
+            } => {
+                // `<name> :<type> = loop { ... }` / `<name> = loop { ... }`.
+                if self.consts.contains(name) {
+                    return Err(eng_const_reassign_err(name, *line));
+                }
+                if *is_const && self.env.contains_key(name) {
+                    return Err(eng_pin_redeclare_err(name, *line));
+                }
+                // The declared name is seeded with its type's default before
+                // the loop runs, so the body can accumulate into it
+                // (`x :int = loop { x += 1; ... }` starts at 0).
+                if let Some(t) = type_name {
+                    self.env.insert(name.clone(), eng_type_default(t));
+                }
+                self.loop_depth += 1;
+                let outcome = (|| -> Result<Option<Option<Value>>, String> {
+                    loop {
+                        let broke = self.run_loop_body(body)?;
+                        if broke.is_some() {
+                            return Ok(broke);
+                        }
+                        if self.return_signal.is_some() {
+                            // A `return` inside the loop abandons the
+                            // declaration and unwinds to the caller.
+                            return Ok(None);
+                        }
+                    }
+                })();
+                self.loop_depth -= 1;
+                if self.return_signal.is_some() {
+                    return Ok(());
+                }
+                let value = match outcome? {
+                    Some(Some(v)) => v,
+                    Some(None) => return Err(eng_loop_no_value_err(*line)),
+                    None => return Ok(()),
+                };
+                let value = match type_name {
+                    Some(t) => check_eng_value(name, t, value, *line)?,
+                    None => value,
+                };
+                if *is_const {
+                    self.consts.insert(name.clone());
+                }
+                self.env.insert(name.clone(), value);
                 Ok(())
             }
             Stmt::Print { value, line } => {
@@ -299,6 +519,9 @@ impl Interpreter {
                 let amt = self.eval(amount, *line, None)?;
                 match target {
                     Expr::Ident(name) => {
+                        if self.consts.contains(name) {
+                            return Err(eng_const_reassign_err(name, *line));
+                        }
                         // Undeclared variables default to 0 in math-assignment context.
                         let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
                         let result = binary_op(&current, &amt, *op, *line, Some(name))?;
@@ -334,6 +557,9 @@ impl Interpreter {
                     if take {
                         for s in &branch.body {
                             self.exec(s)?;
+                            if self.return_signal.is_some() || self.break_signal.is_some() {
+                                break;
+                            }
                         }
                         break;
                     }
@@ -347,25 +573,34 @@ impl Interpreter {
                 line,
             } => {
                 const MAX_ITERS: u64 = 5_000_000;
-                let mut iterations: u64 = 0;
-                loop {
-                    let c = self.eval_cond_chain(cond)?;
-                    let should_run = if *negate { !c } else { c };
-                    if !should_run {
-                        break;
+                // `loop_depth` gates `break`: a `break` in here must find this
+                // loop, and must be consumed on the way out (so an outer loop
+                // keeps running).
+                self.loop_depth += 1;
+                let result = (|| -> Result<(), String> {
+                    let mut iterations: u64 = 0;
+                    loop {
+                        let c = self.eval_cond_chain(cond)?;
+                        let should_run = if *negate { !c } else { c };
+                        if !should_run {
+                            break;
+                        }
+                        iterations += 1;
+                        if iterations > MAX_ITERS {
+                            return Err(format!(
+                                "E046 လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
+                                line
+                            ));
+                        }
+                        let broke = self.run_loop_body(body)?;
+                        if broke.is_some() || self.return_signal.is_some() {
+                            break;
+                        }
                     }
-                    iterations += 1;
-                    if iterations > MAX_ITERS {
-                        return Err(format!(
-                            "E046 လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
-                            line
-                        ));
-                    }
-                    for s in body {
-                        self.exec(s)?;
-                    }
-                }
-                Ok(())
+                    Ok(())
+                })();
+                self.loop_depth -= 1;
+                result
             }
             Stmt::FuncDef {
                 name,
@@ -726,23 +961,29 @@ fn check_type(v: &Value, type_name: &str) -> bool {
 
     fn eval_cond_atom(&mut self, atom: &CondAtom) -> Result<bool, String> {
         let lv = self.eval(&atom.lhs, atom.line, None)?;
-        if let Some(type_name) = &atom.type_check {
-            return Ok(Self::check_type(&lv, type_name));
-        }
-        match (&atom.op, &atom.rhs) {
-            (Some(op), Some(rhs_expr)) => {
-                let rv = self.eval(rhs_expr, atom.line, None)?;
-                compare_values(&lv, &rv, op, atom.line)
+        let result = if let Some(type_name) = &atom.type_check {
+            Self::check_type(&lv, type_name)
+        } else {
+            match (&atom.op, &atom.rhs) {
+                (Some(op), Some(rhs_expr)) => {
+                    let rv = self.eval(rhs_expr, atom.line, None)?;
+                    compare_values(&lv, &rv, op, atom.line)?
+                }
+                _ => match lv {
+                    Value::Bool(b) => b,
+                    other => {
+                        return Err(format!(
+                            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+                            atom.line,
+                            type_name_mm(&other)
+                        ))
+                    }
+                },
             }
-            _ => match lv {
-                Value::Bool(b) => Ok(b),
-                other => Err(format!(
-                    "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
-                    atom.line,
-                    type_name_mm(&other)
-                )),
-            },
-        }
+        };
+        // The eng library's `!` (and any negative-form condition) flips the
+        // atom's truth value.
+        Ok(if atom.negate { !result } else { result })
     }
 
     fn eval_cond_chain(&mut self, chain: &CondChain) -> Result<bool, String> {
@@ -760,7 +1001,23 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         Ok(result)
     }
 
+    /// Run a `for` loop. The loop wrapper exists so `loop_depth` (which gates
+    /// `break`) is restored even when the body errors out and the error is
+    /// caught by an enclosing try/catch.
     fn exec_for_loop(
+        &mut self,
+        var_name: &str,
+        source: &ForSource,
+        body: &[Stmt],
+        line: usize,
+    ) -> Result<(), String> {
+        self.loop_depth += 1;
+        let result = self.exec_for_loop_inner(var_name, source, body, line);
+        self.loop_depth -= 1;
+        result
+    }
+
+    fn exec_for_loop_inner(
         &mut self,
         var_name: &str,
         source: &ForSource,
@@ -794,8 +1051,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         break;
                     }
                     self.env.insert(var_name.to_string(), current.clone());
-                    for s in body {
-                        self.exec(s)?;
+                    let broke = self.run_loop_body(body)?;
+                    if broke.is_some() || self.return_signal.is_some() {
+                        break;
                     }
                     current = binary_op(&current, &step_v, *op, line, Some(var_name))?;
                 }
@@ -817,8 +1075,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                                 break;
                             }
                             self.env.insert(var_name.to_string(), current.clone());
-                            for s in body {
-                                self.exec(s)?;
+                            let broke = self.run_loop_body(body)?;
+                            if broke.is_some() || self.return_signal.is_some() {
+                                break;
                             }
                             current =
                                 binary_op(&current, &Value::Int(1), '+', line, Some(var_name))?;
@@ -828,8 +1087,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
                         for item in items {
                             self.env.insert(var_name.to_string(), item);
-                            for s in body {
-                                self.exec(s)?;
+                            let broke = self.run_loop_body(body)?;
+                            if broke.is_some() || self.return_signal.is_some() {
+                                break;
                             }
                         }
                         Ok(())
@@ -837,8 +1097,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     Value::Dict(pairs) => {
                         for (k, _) in pairs {
                             self.env.insert(var_name.to_string(), k);
-                            for s in body {
-                                self.exec(s)?;
+                            let broke = self.run_loop_body(body)?;
+                            if broke.is_some() || self.return_signal.is_some() {
+                                break;
                             }
                         }
                         Ok(())
@@ -1116,7 +1377,28 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
                 index_value(&base_v, &keys, line)
             }
+            Expr::LibCall(lib, fn_name, arg_exprs, call_line) => {
+                // `<lib>.<fn>(args)` -- the English spelling of
+                // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`. The library still has to
+                // be imported, and `lib` may be a registered alias.
+                self.eval_lib_call(lib, fn_name, arg_exprs, *call_line)?
+                    .ok_or_else(|| eng_lib_no_value_err(lib, fn_name, *call_line))
+            }
             Expr::NewObj(class_name, arg_exprs, new_line) => {
+                // `name(args)` in an expression reaches here (the parser uses
+                // this node for any call-shaped `<name>(...)`): a user class
+                // wins, then a user function, then an eng builtin. Anything
+                // else falls through to the class-not-found error.
+                if !self.classes.contains_key(class_name) {
+                    if self.functions.contains_key(class_name) {
+                        let result = self.call_function(class_name, arg_exprs, *new_line)?;
+                        return result
+                            .ok_or_else(|| eng_no_return_err(class_name, *new_line));
+                    }
+                    if is_eng_builtin(class_name) {
+                        return self.call_builtin(class_name, arg_exprs, *new_line);
+                    }
+                }
                 self.construct_object(class_name, arg_exprs, *new_line)
             }
             Expr::HttpGet(lib, url_expr, gline) => {
@@ -1191,17 +1473,46 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 args.len()
             ));
         }
-        for (p, e) in params.iter().zip(args.iter()) {
-            let v = self.eval(e, line, None)?;
+        // Evaluate every argument in the caller's environment first, then
+        // bind the parameters -- remembering any globals they shadow so the
+        // bindings can be pushed back when the call returns. Without that,
+        // a call would clobber same-named globals, and recursion would see a
+        // sibling frame's parameters.
+        let mut arg_values = Vec::with_capacity(args.len());
+        for e in args {
+            arg_values.push(self.eval(e, line, None)?);
+        }
+        // A function body is its own loop context: a `break` inside it belongs
+        // to a loop written inside it, never to the caller's enclosing loop.
+        let outer_loop_depth = self.loop_depth;
+        self.loop_depth = 0;
+        let mut saved: Vec<(String, Option<Value>)> = Vec::with_capacity(params.len());
+        for (p, v) in params.iter().zip(arg_values.into_iter()) {
+            if !saved.iter().any(|(saved_name, _)| saved_name == p) {
+                saved.push((p.clone(), self.env.get(p).cloned()));
+            }
             self.env.insert(p.clone(), v);
         }
         let mut return_value: Option<Value> = None;
+        let mut failure: Option<String> = None;
+        self.call_depth += 1;
         for (i, s) in body.iter().enumerate() {
+            if self.return_signal.is_some() {
+                break;
+            }
             if i + 1 == body.len() {
                 match s {
                     Stmt::ExprStmt { value, line: sline } => {
-                        return_value = Some(self.eval(value, *sline, None)?);
-                        continue;
+                        match self.eval(value, *sline, None) {
+                            Ok(v) => {
+                                return_value = Some(v);
+                                continue;
+                            }
+                            Err(e) => {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
                     }
                     // A function ending in "<var> သည် <expr> ဖြစ်၏။" -- the
                     // idiomatic "ရလဒ် သည် ... ဖြစ်၏။" pattern -- also counts
@@ -1211,16 +1522,46 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         name: var_name,
                         value,
                         line: sline,
-                    } => {
-                        let v = self.eval(value, *sline, None)?;
-                        self.env.insert(var_name.clone(), v.clone());
-                        return_value = Some(v);
-                        continue;
-                    }
+                    } => match self.eval(value, *sline, None) {
+                        Ok(v) => {
+                            self.env.insert(var_name.clone(), v.clone());
+                            return_value = Some(v);
+                            continue;
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    },
                     _ => {}
                 }
             }
-            self.exec(s)?;
+            if let Err(e) = self.exec(s) {
+                failure = Some(e);
+                break;
+            }
+        }
+        self.call_depth -= 1;
+        self.loop_depth = outer_loop_depth;
+        // An explicit `return` overrides whatever the last statement yielded,
+        // and a `break` that couldn't find a loop in here must not leak out to
+        // the caller's.
+        self.break_signal = None;
+        if let Some(signal) = self.return_signal.take() {
+            return_value = signal;
+        }
+        for (p, old) in saved {
+            match old {
+                Some(v) => {
+                    self.env.insert(p, v);
+                }
+                None => {
+                    self.env.remove(&p);
+                }
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
         }
         Ok(return_value)
     }
@@ -1261,22 +1602,228 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         for e in arg_exprs {
             arg_values.push(self.eval(e, line, None)?);
         }
+        // Constructor parameters shadow globals only for the duration of the
+        // construction, same as function parameters.
+        let mut saved: Vec<(String, Option<Value>)> = Vec::with_capacity(params.len());
         for (p, v) in params.iter().zip(arg_values.into_iter()) {
+            if !saved.iter().any(|(saved_name, _)| saved_name == p) {
+                saved.push((p.clone(), self.env.get(p).cloned()));
+            }
             self.env.insert(p.clone(), v);
         }
 
         self.self_stack.push(Vec::new());
         let body = body.clone();
+        // The constructor body counts as a function body, so a `return`
+        // inside a method doesn't escape to the top level (E108), and a
+        // `break` in it can't reach a caller's loop.
+        self.call_depth += 1;
+        let outer_signal = self.return_signal.take();
+        let outer_loop_depth = self.loop_depth;
+        self.loop_depth = 0;
         let run_result = (|| -> Result<(), String> {
             for s in &body {
+                if self.return_signal.is_some() {
+                    break;
+                }
                 self.exec(s)?;
             }
             Ok(())
         })();
+        // A method-level `return` only ends construction: the object itself
+        // is still the result, and any outer pending return is preserved.
+        self.return_signal = outer_signal;
+        self.loop_depth = outer_loop_depth;
+        self.break_signal = None;
+        self.call_depth -= 1;
+        for (p, old) in saved {
+            match old {
+                Some(v) => {
+                    self.env.insert(p, v);
+                }
+                None => {
+                    self.env.remove(&p);
+                }
+            }
+        }
         let fields = self.self_stack.pop().unwrap_or_default();
         run_result?;
 
         Ok(Value::Object(class_name.to_string(), fields))
+    }
+
+    /// Call a named callee as a statement (`name(args);`): a user-defined
+    /// function wins, then an eng builtin. Returns the callee's value when it
+    /// produced one (statement callers may discard it).
+    fn call_named(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        if self.functions.contains_key(name) {
+            return self.call_function(name, args, line);
+        }
+        if is_eng_builtin(name) {
+            return Ok(Some(self.call_builtin(name, args, line)?));
+        }
+        Err(eng_unknown_fn_err(line, name))
+    }
+
+    /// Run one eng builtin: `len`, `abs`, `min`, `max`, `sqrt`, `floor`,
+    /// `ceil`, `round`, `upper`, `lower`, `trim`, `contains`. Builtins are
+    /// core eng syntax -- no `နည်းပညာများ ... ကို အသုံးပြုပါ။` needed -- and
+    /// work both as statements (`len(xs);`) and inside expressions
+    /// (`n :int = len(xs);`).
+    fn call_builtin(
+        &mut self,
+        name: &str,
+        arg_exprs: &[Expr],
+        line: usize,
+    ) -> Result<Value, String> {
+        let mut args: Vec<Value> = Vec::with_capacity(arg_exprs.len());
+        for e in arg_exprs {
+            args.push(self.eval(e, line, None)?);
+        }
+
+        let one_arg = || -> Result<(), String> {
+            if args.len() == 1 {
+                Ok(())
+            } else {
+                Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!("takes exactly one argument, got {}", args.len()),
+                ))
+            }
+        };
+        let bad_arg = |detail: String| eng_builtin_err(line, name, &detail);
+
+        match name {
+            "len" => {
+                one_arg()?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                        Ok(Value::Int(items.len() as i64))
+                    }
+                    Value::Dict(pairs) => Ok(Value::Int(pairs.len() as i64)),
+                    other => Err(bad_arg(format!(
+                        "needs a string or collection, got {}",
+                        type_name_mm(other)
+                    ))),
+                }
+            }
+            "abs" => {
+                one_arg()?;
+                match &args[0] {
+                    Value::Int(i) => Ok(Value::Int(i.abs())),
+                    Value::Float(f) => Ok(Value::Float(f.abs())),
+                    other => Err(bad_arg(format!(
+                        "needs a number, got {}",
+                        type_name_mm(other)
+                    ))),
+                }
+            }
+            "min" | "max" => {
+                // Either a spread of values (`min(3, 1, 2)`) or one
+                // collection to pick the smallest/largest element of.
+                let candidates: Vec<Value> = if args.len() == 1 {
+                    match &args[0] {
+                        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                            items.clone()
+                        }
+                        other => vec![other.clone()],
+                    }
+                } else {
+                    args.clone()
+                };
+                if candidates.is_empty() {
+                    return Err(bad_arg("needs at least one value".to_string()));
+                }
+                let mut best = candidates[0].clone();
+                for c in &candidates[1..] {
+                    let ord = value_ordering(&best, c, line, name)?;
+                    let replace = if name == "min" {
+                        ord == std::cmp::Ordering::Greater
+                    } else {
+                        ord == std::cmp::Ordering::Less
+                    };
+                    if replace {
+                        best = c.clone();
+                    }
+                }
+                Ok(best)
+            }
+            "sqrt" => {
+                one_arg()?;
+                let f = as_f64(&args[0]).ok_or_else(|| {
+                    bad_arg(format!("needs a number, got {}", type_name_mm(&args[0])))
+                })?;
+                if f < 0.0 {
+                    return Err(eng_sqrt_negative_err(line, &args[0]));
+                }
+                Ok(Value::Float(f.sqrt()))
+            }
+            "floor" | "ceil" | "round" => {
+                one_arg()?;
+                let f = as_f64(&args[0]).ok_or_else(|| {
+                    bad_arg(format!("needs a number, got {}", type_name_mm(&args[0])))
+                })?;
+                let rounded = match name {
+                    "floor" => f.floor(),
+                    "ceil" => f.ceil(),
+                    _ => f.round(),
+                };
+                Ok(Value::Int(rounded as i64))
+            }
+            "upper" | "lower" | "trim" => {
+                one_arg()?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::Str(match name {
+                        "upper" => s.to_uppercase(),
+                        "lower" => s.to_lowercase(),
+                        _ => s.trim().to_string(),
+                    })),
+                    other => Err(bad_arg(format!(
+                        "needs a string, got {}",
+                        type_name_mm(other)
+                    ))),
+                }
+            }
+            "contains" => {
+                if args.len() != 2 {
+                    return Err(bad_arg(format!(
+                        "takes exactly two arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let needle = &args[1];
+                let found = match &args[0] {
+                    Value::Str(s) => match needle {
+                        Value::Str(n) => s.contains(n.as_str()),
+                        other => {
+                            return Err(bad_arg(format!(
+                                "needs a string to search for, got {}",
+                                type_name_mm(other)
+                            )))
+                        }
+                    },
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                        items.iter().any(|v| value_eq(v, needle))
+                    }
+                    Value::Dict(pairs) => pairs.iter().any(|(k, _)| value_eq(k, needle)),
+                    other => {
+                        return Err(bad_arg(format!(
+                            "needs a string or collection first, got {}",
+                            type_name_mm(other)
+                        )))
+                    }
+                };
+                Ok(Value::Bool(found))
+            }
+            _ => Err(eng_unknown_fn_err(line, name)),
+        }
     }
 }
 
@@ -1554,6 +2101,219 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
         }
         _ => unreachable!(),
     }
+}
+
+// --- eng library (English-spelled declarations) helpers ---
+
+/// Human-readable type family name for eng error messages: `int` and
+/// `float` both accept any number, so they share one phrasing.
+fn eng_type_expectation(type_name: &str) -> &'static str {
+    match type_name {
+        "int" | "float" => "a number",
+        "str" => "a string",
+        "bool" => "true or false",
+        _ => "a value of the declared type",
+    }
+}
+
+/// Error for assigning (or redeclaring) a name that was declared with the
+/// eng `pin` form. Raised from any assignment path -- Myanmar sentence
+/// forms included -- so `pin` really is immutable for the whole program.
+fn eng_const_reassign_err(name: &str, line: usize) -> String {
+    format!(
+        "E104 line {}: \"{}\" was declared with 'pin' and cannot be reassigned",
+        line, name
+    )
+}
+
+/// Error for console input that doesn't parse as the declared type.
+fn eng_input_convert_err(line: usize, text: &str, type_name: &str) -> String {
+    format!(
+        "E107 line {}: cannot convert input \"{}\" to {}",
+        line,
+        text,
+        eng_type_expectation(type_name)
+    )
+}
+
+/// Coerce one line of console input to an eng-declared type. `str` keeps
+/// the raw text; `int`/`float` parse numbers; `bool` accepts true/false
+/// (any casing) plus the 1/0 spellings.
+fn coerce_eng_input(
+    text: &str,
+    type_name: &str,
+    line: usize,
+) -> Result<Value, String> {
+    match type_name {
+        "str" => Ok(Value::Str(text.to_string())),
+        "int" => text
+            .parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| eng_input_convert_err(line, text, type_name)),
+        "float" => text
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| eng_input_convert_err(line, text, type_name)),
+        "bool" => match text {
+            "true" | "True" | "1" => Ok(Value::Bool(true)),
+            "false" | "False" | "0" => Ok(Value::Bool(false)),
+            _ => Err(eng_input_convert_err(line, text, type_name)),
+        },
+        _ => Err(eng_input_convert_err(line, text, type_name)),
+    }
+}
+
+/// The eng library's built-in helpers. They're core syntax, so they work
+/// without importing anything.
+fn is_eng_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "len"
+            | "abs"
+            | "min"
+            | "max"
+            | "sqrt"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "upper"
+            | "lower"
+            | "trim"
+            | "contains"
+    )
+}
+
+/// Enforce an eng declaration's type rule on a value and coerce an int to
+/// float for a `:float` annotation (`pi :float = 3;` holds 3.0). Shared by
+/// every eng declaration form, loop-value declarations included.
+fn check_eng_value(name: &str, type_name: &str, v: Value, line: usize) -> Result<Value, String> {
+    // int accepts floats the way the rest of Akkhara does: int/float are one
+    // numeric family.
+    let type_ok = match type_name {
+        "int" | "float" => matches!(v, Value::Int(_) | Value::Float(_)),
+        "str" => matches!(v, Value::Str(_)),
+        "bool" => matches!(v, Value::Bool(_)),
+        _ => false,
+    };
+    if !type_ok {
+        return Err(format!(
+            "E103 line {}: cannot assign {} to \"{}\" (declared :{}; value must be {})",
+            line,
+            type_name_mm(&v),
+            name,
+            type_name,
+            eng_type_expectation(type_name)
+        ));
+    }
+    Ok(if type_name == "float" {
+        match v {
+            Value::Int(i) => Value::Float(i as f64),
+            other => other,
+        }
+    } else {
+        v
+    })
+}
+
+/// The value an eng declaration seeds before its `loop { ... }` runs, so the
+/// body has something to accumulate into.
+fn eng_type_default(type_name: &str) -> Value {
+    match type_name {
+        "int" => Value::Int(0),
+        "float" => Value::Float(0.0),
+        "str" => Value::Str(String::new()),
+        _ => Value::Bool(false),
+    }
+}
+
+/// Error for a `pin` name that would redeclare an existing variable.
+fn eng_pin_redeclare_err(name: &str, line: usize) -> String {
+    format!(
+        "E105 line {}: pin \"{}\" cannot redeclare an existing variable",
+        line, name
+    )
+}
+
+/// `break` (eng or `ရပ်ပါ`) used where there is no loop to stop.
+fn eng_break_outside_loop_err(line: usize) -> String {
+    format!("E116 line {}: 'break' outside a loop", line)
+}
+
+/// A `loop { ... }` used as a value ended with a bare `break`, so it has
+/// nothing to assign.
+fn eng_loop_no_value_err(line: usize) -> String {
+    format!(
+        "E115 line {}: loop used as a value ended with a bare 'break' -- use `break <value>;`",
+        line
+    )
+}
+
+/// Error for a builtin called with the wrong number or kind of arguments.
+fn eng_builtin_err(line: usize, name: &str, detail: &str) -> String {
+    format!("E110 line {}: {}() {}", line, name, detail)
+}
+
+fn eng_sqrt_negative_err(line: usize, v: &Value) -> String {
+    format!(
+        "E111 line {}: sqrt() needs a non-negative number, got {}",
+        line,
+        display(v)
+    )
+}
+
+/// Order two `min`/`max` candidates: numbers compare numerically (ints and
+/// floats mix freely), strings lexicographically.
+fn value_ordering(
+    a: &Value,
+    b: &Value,
+    line: usize,
+    name: &str,
+) -> Result<std::cmp::Ordering, String> {
+    if let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) {
+        return Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    if let (Value::Str(x), Value::Str(y)) = (a, b) {
+        return Ok(x.cmp(y));
+    }
+    Err(eng_builtin_err(
+        line,
+        name,
+        &format!(
+            "can only compare numbers or strings, got {} and {}",
+            type_name_mm(a),
+            type_name_mm(b)
+        ),
+    ))
+}
+
+/// `return` used where there is no enclosing function to return from.
+fn eng_return_outside_fn_err(line: usize) -> String {
+    format!("E108 line {}: 'return' outside a function", line)
+}
+
+/// A library function used as a value didn't produce one (e.g. the `အချိန်`
+/// library's `စောင့်`/wait, which only carries out an action).
+fn eng_lib_no_value_err(lib: &str, fn_name: &str, line: usize) -> String {
+    format!(
+        "E117 line {}: {}.{}() did not return a value",
+        line, lib, fn_name
+    )
+}
+
+/// A `name(...)` call naming something that is neither a function nor a builtin.
+fn eng_unknown_fn_err(line: usize, name: &str) -> String {
+    format!(
+        "E113 line {}: \"{}\" is not a function or builtin",
+        line, name
+    )
+}
+
+/// A user function used as a value didn't return anything.
+fn eng_no_return_err(name: &str, line: usize) -> String {
+    format!(
+        "E114 line {}: function \"{}\" did not return a value",
+        line, name
+    )
 }
 
 fn infer_value(s: &str) -> Value {
