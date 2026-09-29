@@ -22,6 +22,8 @@ struct Case {
     stdout: &'static [&'static str],
     /// An error code that must appear in stderr, if the program should fail.
     stderr_code: Option<&'static str>,
+    /// Lines piped to the program's stdin, one per line (default: empty).
+    stdin: &'static [&'static str],
 }
 
 const CASES: &[Case] = &[
@@ -31,36 +33,132 @@ const CASES: &[Case] = &[
         exit: 0,
         stdout: &["Hello, World!"],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "control_flow",
         exit: 0,
         stdout: &["two", "0", "2", "4", "7", "8", "1", "2", "3"],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "functions",
         exit: 0,
         stdout: &["Hello, World!", "42"],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "collections",
         exit: 0,
         stdout: &["20", "2", "{1, 2, 3}", "7", "f=", "7.5"],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "lib_call_forms",
         exit: 0,
         stdout: &["A", "A", "A", "5", "5"],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "lib_alias",
         exit: 0,
         stdout: &["Syntax1:", "A", "Syntax2:", "B", "Form1:", "C"],
         stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: English-spelled typed declarations alongside Myanmar ones
+    Case {
+        name: "eng_declare",
+        exit: 0,
+        stdout: &["John", "25", "5.9", "True", "100", "adult", "မင်္ဂလာပါ", "30"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_catch",
+        exit: 0,
+        stdout: &["E104 reassign ok", "E103 type ok", "E105 redeclare ok", "10"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: English-spelled if / while blocks and fn definitions
+    Case {
+        name: "eng_control",
+        exit: 0,
+        stdout: &[
+            "adult",
+            "0",
+            "1",
+            "2",
+            "and ok",
+            "or ok",
+            "mm saw three",
+            "eng saw three",
+            "nested ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_fn",
+        exit: 0,
+        stdout: &[
+            "Hello, David!",
+            "5",
+            "negative",
+            "zero",
+            "55",
+            "42",
+            "John",
+            "Hello, မြန်မာ!",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: loop { ... } with break / break <value> / ရပ်ပါ
+    Case {
+        name: "eng_loop",
+        exit: 0,
+        stdout: &["12", "4", "5", "2", "6", "3"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_loop_catch",
+        exit: 0,
+        stdout: &["E116 ok", "E115 ok", "E103 ok", "1"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: `use <lib>;` imports and `<lib>.<fn>(args);` calls
+    Case {
+        name: "eng_lib",
+        exit: 0,
+        stdout: &["5", "7", "A", "1", "True"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_lib_catch",
+        exit: 0,
+        stdout: &["E089 ok", "E085 ok", "E117 ok", "done"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: the core builtin helpers (len / abs / min / ... / contains)
+    Case {
+        name: "eng_builtin",
+        exit: 0,
+        stdout: &[
+            "3", "5", "7", "2.5", "2", "9", "1", "3", "4.0", "2.5", "3", "4", "4", "ENG",
+            "english", "Akkhara", "True", "True", "4", "sqrt ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
     },
     // --- programs that catch their own errors ------------------------------
     Case {
@@ -70,12 +168,14 @@ const CASES: &[Case] = &[
             "E091 ok", "E092 ok", "E085 ok", "E086 ok", "E087 ok", "E064 ok", "E031 ok",
         ],
         stderr_code: None,
+        stdin: &[],
     },
     Case {
         name: "request_not_imported",
         exit: 0,
         stdout: &["E078 get ok", "E078 post ok", "E089 ok"],
         stderr_code: None,
+        stdin: &[],
     },
     // --- programs that fail ------------------------------------------------
     Case {
@@ -83,24 +183,95 @@ const CASES: &[Case] = &[
         exit: 1,
         stdout: &[],
         stderr_code: Some("E093"),
+        stdin: &[],
     },
     Case {
         name: "parse_missing_period",
         exit: 1,
         stdout: &[],
         stderr_code: Some("E002"),
+        stdin: &[],
     },
     Case {
         name: "parse_syntax_error",
         exit: 1,
         stdout: &[],
         stderr_code: Some("E001"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_parse_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E100"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_type_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E101"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_return_error",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E108"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_break_error",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E116"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_use_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E118"),
+        stdin: &[],
     },
     Case {
         name: "runtime_uncaught",
         exit: 1,
         stdout: &["before"],
         stderr_code: Some("E031"),
+        stdin: &[],
+    },
+    // eng library: print()/input()
+    Case {
+        name: "eng_print",
+        exit: 0,
+        stdout: &[
+            "Hello, world!",
+            "David",
+            "30",
+            "1.75",
+            "True",
+            "42",
+            "Hi, David!",
+            "David",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_input",
+        exit: 0,
+        // Prompts are printed without a trailing newline, so each prompt
+        // shares its line with the (echoed by the terminal) typed input.
+        stdout: &[
+            ">> What is your name?: David",
+            "Give a number: 50",
+            "Ratio: 3.5",
+            "Ready? (true/false): False",
+        ],
+        stderr_code: None,
+        // The first line is consumed by the prompt-only `input(">> ")`.
+        stdin: &["skip me", "David", "42", "3.5", "false"],
     },
 ];
 
@@ -117,9 +288,31 @@ fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
     cmd.output().expect("failed to spawn the akk binary")
 }
 
-/// Run the binary on a fixture file.
-fn run_fixture(name: &str) -> Output {
-    run(&[fixtures_dir().join(format!("{name}.akk"))])
+/// Run the binary on a fixture file. `stdin_lines`, when non-empty, is
+/// piped to the program's stdin one line at a time (the pipe is closed
+/// afterward, so reads hit EOF); otherwise stdin is /dev/null.
+fn run_fixture(name: &str, stdin_lines: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_akk"));
+    cmd.arg(fixtures_dir().join(format!("{name}.akk")));
+    if stdin_lines.is_empty() {
+        cmd.stdin(std::process::Stdio::null());
+        return cmd.output().expect("failed to spawn the akk binary");
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    // Unlike output(), spawn() leaves stdout/stderr inherited by default,
+    // so pipe them explicitly or wait_with_output() would collect nothing.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn the akk binary");
+    use std::io::Write;
+    let mut stdin = child.stdin.take().expect("stdin");
+    for line in stdin_lines {
+        writeln!(stdin, "{line}").expect("failed to write to stdin");
+    }
+    stdin.flush().expect("failed to flush stdin");
+    drop(stdin); // close the pipe so the child's reads see EOF
+    let output = child.wait_with_output().expect("failed to wait for the akk binary");
+    output
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -140,7 +333,7 @@ fn fixtures_match_expected_behavior() {
     let mut failures = Vec::new();
 
     for case in CASES {
-        let output = run_fixture(case.name);
+        let output = run_fixture(case.name, case.stdin);
         let exit = output.status.code().unwrap_or(-1);
         let stdout = text(&output.stdout);
         let stderr = text(&output.stderr);
