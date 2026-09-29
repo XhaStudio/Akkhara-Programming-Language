@@ -89,7 +89,123 @@ response အတွက် request ၏ get("https://api.example.com/data") ကိ�
 response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
 ```
 
-All error messages are in Myanmar, formatted as `လိုင်း <N> ...`.
+All error messages are in Myanmar, formatted as `လိုင်း <N> ...` (the `eng`
+syntax below reports its own errors in English instead).
+
+### eng — English (C-style) syntax
+
+The `eng` spelling is built into the core of `akk` — **no import line is
+needed** — and can be mixed freely with the Myanmar forms in the same file.
+Its types are `int`, `float`, `str` and `bool`.
+
+```
+name :str = "John";           # typed declaration
+age :int = 25;
+pin max_users :int = 100;     # constant — cannot be reassigned
+print(name);                  # print
+input("Press enter: ");       # read a line, discard it
+answer :int = input("n? ");   # read a line, coerced to :int
+name = "Jane";                # assignment (a first one declares the variable)
+
+if (age >= 20) {              # the parentheses around a condition are optional
+    print("adult");
+} else if (age >= 13) {
+    print("teen");
+} else {
+    print("child");
+}
+
+count :int = 0;
+while (count < 3) {
+    count += 1;                # compound assignment: += -= *= /= %= ^=
+}
+
+loop {                         # infinite loop until a `break`
+    count += 1;
+    if (count == 10) {
+        break count;           # `break <value>` also works
+    }
+}
+
+fn add(a, b) -> int {          # parameter/return type annotations are optional
+    return a + b;
+}
+fn fib(n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+print(add(2, 3));
+```
+
+A `loop` can also be the value of a declaration: the variable is seeded with
+its type's default (`0` / `0.0` / `""` / `false`) before the loop runs, so the
+body can accumulate into it, and it takes the value passed to `break`.
+
+```
+total :int = loop{
+    total += 3;
+    if (total > 10){
+        break total
+    }
+}
+print(total);        # 12
+```
+
+`break` is spelled `ရပ်ပါ။` in the Myanmar syntax (`<value> ကို ရပ်ပါ။`
+breaks with a value), and it stops the innermost loop — `while`, `for` and
+`loop` alike. A `break` (or a `return` / a `break`) written as the last
+statement of a block may drop its `;`, e.g. `if (i == 3) { break }`.
+
+Conditions compare with `== != < <= > >=` and combine with `&&`, `||` and `!`,
+e.g. `if (flag && !done) { ... }`.
+
+Builtin helpers (core syntax — usable as statements or inside expressions):
+
+| Builtin | Arguments | Result |
+|---|---|---|
+| `len(x)` | string or collection | length (characters / items) |
+| `abs(x)` | number | absolute value |
+| `min(...)` / `max(...)` | several numbers/strings, or one collection | smallest / largest |
+| `sqrt(x)` | number `>= 0` | square root (float) |
+| `floor(x)` / `ceil(x)` / `round(x)` | number | integer |
+| `upper(s)` / `lower(s)` / `trim(s)` | string | new string |
+| `contains(hay, needle)` | string or collection, and a value | `True` / `False` |
+
+### eng — library calls
+
+Libraries keep their Myanmar import statement, but there is an English
+spelling of it: `use <lib>;` (and `use <lib> as <alias>;` for an alias,
+`use a, b;` for several at once). Calls are then written `<lib>.<fn>(args);`
+— the same call as `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
+
+```
+use ကျပန်း;                      # = နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+
+time = ကျပန်း.ကိန်း(1, 100);     # = ကျပန်း ၏ ကိန်း(1, 100) ကို လုပ်ပါ။
+print(time);
+
+n :int = ကျပန်း.ကိန်း(1, 10);   # in a typed declaration
+pick = r.တန်ဖိုး(["A"]);         # through an alias: `use ကျပန်း as r;`
+အချိန်.စောင့်(0);               # as a statement: the value is discarded
+```
+
+A library function that produces no value (like `အချိန်`'s `စောင့်`) may be
+called as a statement, but using it as a value is `E117`.
+
+Both spellings share one namespace: `pin` constants are immutable everywhere,
+eng values work inside Myanmar statements (and vice versa), and an eng `fn` is
+an ordinary Akkhara function — Myanmar statements can call it with
+`<fn> ကို လုပ်ရန် <args> ဖြင့်။`.
+
+eng error codes (English messages, catchable with the usual try/catch form):
+`E100` bad declaration form, `E101` unknown type, `E102` missing value,
+`E103` declaration type mismatch, `E104` `pin` reassignment, `E105` `pin`
+redeclaration, `E106` bad call form, `E107` input couldn't convert, `E108`
+`return` outside a function, `E109` bad block form, `E110` bad builtin
+arguments, `E111` `sqrt` of a negative number, `E113` unknown function,
+`E114` function returned no value, `E115` loop used as a value ended without
+one, `E116` `break` outside a loop, `E117` library call used as a value but
+returned nothing, `E118` bad `use` import form.
 
 ### Known limitations
 - One statement per physical line (no multi-line statements).
