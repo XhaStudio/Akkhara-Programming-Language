@@ -1,5 +1,39 @@
 use crate::lexer::{Tok, Token};
 
+// --- eng library (English-spelled declarations) ---
+//
+// The "eng" library lets the same program declare variables with either the
+// Myanmar sentence forms or these English spellings:
+//
+//   variable:  <name> :<type> = <value>;        e.g.  name :str = "John";
+//   constant:  pin <name> :<type> = <value>;    e.g.  pin control :bool = true;
+//
+// Types: int, float, str, bool.
+const ENG_PIN: &str = "pin";
+const ENG_TYPE_INT: &str = "int";
+const ENG_TYPE_FLOAT: &str = "float";
+const ENG_TYPE_STR: &str = "str";
+const ENG_TYPE_BOOL: &str = "bool";
+const ENG_PRINT: &str = "print";
+const ENG_INPUT: &str = "input";
+const ENG_IF: &str = "if";
+const ENG_ELSE: &str = "else";
+const ENG_WHILE: &str = "while";
+const ENG_FN: &str = "fn";
+const ENG_RETURN: &str = "return";
+const ENG_LOOP: &str = "loop";
+const ENG_BREAK: &str = "break";
+const ENG_USE: &str = "use";
+const ENG_AS: &str = "as";
+
+/// The eng library's four supported type keywords.
+fn is_eng_type(s: &str) -> bool {
+    matches!(
+        s,
+        ENG_TYPE_INT | ENG_TYPE_FLOAT | ENG_TYPE_STR | ENG_TYPE_BOOL
+    )
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     NumLit(String),
@@ -17,6 +51,9 @@ pub enum Expr {
     Index(Box<Expr>, Vec<Expr>),
     /// Object instantiation: `<ClassName> [အသစ်] (arg1, arg2, ...)`.
     NewObj(String, Vec<Expr>, usize),
+    /// Library call in the eng spelling: `<lib>.<fn>(arg1, arg2, ...)` --
+    /// the same call as the Myanmar `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
+    LibCall(String, String, Vec<Expr>, usize),
     /// Member/field access: `<expr> ၏ <field>` -- reads a named field off
     /// an Akkhara object (e.g. `response ၏ အခြေအနေကုဒ်` reads the status
     /// code field off a "request" library response object).
@@ -183,6 +220,94 @@ pub enum Stmt {
         data: Expr,
         line: usize,
     },
+    /// eng library declaration, written in the C-style spelling (a lone '='
+    /// assignment, ':' type annotation, ';' terminator) instead of the
+    /// Myanmar sentence forms:
+    ///
+    ///   `name :int = 5;`        -- mutable typed declaration
+    ///   `pin name :bool = true;` -- constant typed declaration
+    ///
+    /// `is_const` is set for the `pin` form. The interpreter enforces the
+    /// declared type and refuses reassignment of `pin` values.
+    EngDecl {
+        name: String,
+        type_name: String,
+        value: Expr,
+        is_const: bool,
+        line: usize,
+    },
+    /// eng library print: `print(<value>);` -- same behavior as the
+    /// Myanmar `... ကို ဖော်ပြပါ။` statement.
+    EngPrint {
+        value: Expr,
+        line: usize,
+    },
+    /// eng library input (prompt only, input discarded):
+    /// `input("... ");`
+    EngInput {
+        prompt: Expr,
+        line: usize,
+    },
+    /// eng library input (result stored): `<name> :<type> = input("...");`
+    /// -- shows the prompt, reads a line, coerces it to the declared type.
+    EngInputAssign {
+        name: String,
+        type_name: String,
+        prompt: Expr,
+        line: usize,
+    },
+    /// eng library return: `return;` / `return <value>;` -- unwinds the
+    /// enclosing function call (Myanmar functions may use it too).
+    EngReturn {
+        value: Option<Expr>,
+        line: usize,
+    },
+    /// eng library function-call statement: `name(arg1, arg2);` -- calls a
+    /// user-defined function (Myanmar- or eng-defined) or a eng builtin,
+    /// discarding any result.
+    EngExprCall {
+        name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
+    /// eng library assignment: `name = <value>;` -- reassigns an existing
+    /// variable (eng `pin` constants are protected).
+    EngAssign {
+        name: String,
+        value: Expr,
+        line: usize,
+    },
+    /// eng compound assignment: `name += <value>;` (also `-=`, `*=`, `/=`,
+    /// `%=`, `^=`) -- applies the operator to the existing value and stores
+    /// the result back into the same variable.
+    EngMathAssign {
+        name: String,
+        op: char,
+        amount: Expr,
+        line: usize,
+    },
+    /// eng/Myanmar break: `break;` / `break <value>;` / `ရပ်ပါ။` /
+    /// `<value> ကို ရပ်ပါ။` -- stops the innermost enclosing loop. The
+    /// optional value becomes the value of a `loop { ... }` expression.
+    EngBreak {
+        value: Option<Expr>,
+        line: usize,
+    },
+    /// eng infinite loop statement: `loop { ... }` -- runs until a `break`
+    /// (or a `return` unwinds out of the enclosing function).
+    EngLoop { body: Vec<Stmt> },
+    /// eng loop-as-value: `<name> :<type> = loop { ... };` (or the plain
+    /// assignment spelling `<name> = loop { ... };`). The variable is seeded
+    /// with its type's default before the loop runs (so the body can
+    /// accumulate into it) and takes the value passed to `break <value>`.
+    EngLoopAssign {
+        name: String,
+        /// None for the assignment spelling (the name must already exist).
+        type_name: Option<String>,
+        is_const: bool,
+        body: Vec<Stmt>,
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +334,10 @@ pub struct CondAtom {
     /// truthiness. Some(op) for a full comparison "lhs op rhs".
     pub op: Option<String>, // "<" ">" "==" "!=" "<=" ">="
     pub rhs: Option<Expr>,
+    /// True when this atom was introduced by the eng library's logical-not
+    /// token `!` (e.g. `if (!flag) { ... }`) -- the interpreter negates the
+    /// atom's truth value.
+    pub negate: bool,
     /// Some(type_name) for a type-check condition "lhs သည် <type>", e.g.
     /// "(x သည် ကိန်း)". Mutually exclusive with `op`/`rhs`.
     pub type_check: Option<String>,
@@ -256,6 +385,8 @@ const TC_NUM: &str = "ကိန်း";
 const TC_FLOAT: &str = "ဒဿမကိန်း";
 const TC_BOOL: &str = "မှန်/မှား";
 const KW_LOOP_END: &str = "ပြီး";
+/// eng `break`, spelled as a Myanmar keyword: `ရပ်ပါ။`.
+const KW_BREAK: &str = "ရပ်ပါ";
 const KW_TRY: &str = "စမ်းရန်";
 const KW_CATCH: &str = "ဖမ်းပါ";
 const KW_FINALLY: &str = "နောက်ဆုံးတွင်";
@@ -366,6 +497,11 @@ fn split_top_level_commas(tokens: &[Token]) -> Vec<&[Token]> {
 
 fn ident_eq(tok: &Tok, s: &str) -> bool {
     matches!(tok, Tok::Ident(v) if v == s)
+}
+
+/// `ident_eq` for an optional token, for lookahead checks.
+fn ident_eq_opt(tok: Option<&Token>, s: &str) -> bool {
+    matches!(tok, Some(t) if ident_eq(&t.tok, s))
 }
 
 fn is_open(tok: &Tok) -> bool {
@@ -1025,6 +1161,37 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
             continue;
         }
 
+        // eng library call: `<lib>.<fn>(args)` -- the English spelling of
+        // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
+        if i + 2 < tokens.len()
+            && matches!(tokens[i].tok, Tok::Dot)
+            && matches!(tokens[i + 1].tok, Tok::Ident(_))
+            && matches!(tokens[i + 2].tok, Tok::LParen)
+        {
+            let lib = match &expr {
+                Expr::Ident(name) => name.clone(),
+                _ => return Err(generic_syntax_err(line)),
+            };
+            let fn_name = match &tokens[i + 1].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let dot_line = tokens[i].line;
+            let close = find_close(tokens, i + 2, tokens[i + 2].line)?;
+            let inner = &tokens[i + 3..close];
+            let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+            let mut args = Vec::with_capacity(parts.len());
+            for p in parts {
+                let arg = parse_expr(p, line).map_err(|_| {
+                    eng_call_bad_form_err(line, &format!("{}.{}", lib, fn_name))
+                })?;
+                args.push(arg);
+            }
+            expr = Expr::LibCall(lib, fn_name, args, dot_line);
+            i = close + 1;
+            continue;
+        }
+
         // "၏" ("of"/possessive marker) doubles as a postfix operator here:
         //   <lib name> ၏ <url expr>   -- a call into a network library
         //                                (currently just "request"), e.g.
@@ -1081,6 +1248,7 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
         }
         Tok::Num(s) => Ok((Expr::NumLit(s.clone()), pos + 1)),
         Tok::Str(s) => Ok((Expr::StrLit(s.clone()), pos + 1)),
+        Tok::Bool(b) => Ok((Expr::BoolLit(*b), pos + 1)),
         Tok::Ident(s) => match s.as_str() {
             "True" => Ok((Expr::BoolLit(true), pos + 1)),
             "False" => Ok((Expr::BoolLit(false), pos + 1)),
@@ -1220,6 +1388,23 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
             depth += 1;
         } else if is_close(&t.tok) {
             depth -= 1;
+            // An eng block statement (`if (...) { ... }`, `while (...) {...}`,
+            // `fn ... {...}`, `loop {...}`) or a `= loop { ... }` value has no
+            // ';' / '။' of its own, so its closing '}' ends the chunk. `else`
+            // keeps the same chunk (an if/else chain), and a following ';' is
+            // handled by the semicolon rule below.
+            if depth == 0
+                && matches!(t.tok, Tok::RBrace)
+                && (tokens.get(start).map(|t| is_eng_block_keyword(&t.tok)) == Some(true)
+                    || chunk_has_loop_block(tokens, start, i))
+                && !ident_eq_opt(tokens.get(i + 1), ENG_ELSE)
+                && !matches!(tokens.get(i + 1).map(|t| &t.tok), Some(Tok::Semicolon))
+            {
+                let slice = &tokens[start..=i];
+                let line = slice[0].line;
+                stmts.push((slice.to_vec(), line));
+                start = i + 1;
+            }
         } else if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
             // Opens a for-loop, if/else, while, or function-definition block:
             // its header has no terminating '။' of its own, so treat it as a
@@ -1234,6 +1419,14 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
             let line = slice[0].line;
             stmts.push((slice.to_vec(), line));
             start = i + 1;
+        } else if depth == 0 && matches!(t.tok, Tok::Semicolon) {
+            // The eng library's ';' terminator: ends a statement just like
+            // '။' does, so several eng declarations can sit on consecutive
+            // lines without merging into one statement chunk.
+            let slice = &tokens[start..=i];
+            let line = slice[0].line;
+            stmts.push((slice.to_vec(), line));
+            start = i + 1;
         }
     }
     if start < tokens.len() {
@@ -1242,6 +1435,26 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
         stmts.push((slice.to_vec(), line));
     }
     stmts
+}
+
+/// True when `tokens[start..=end]` contains an eng `loop {` at bracket depth
+/// 0 -- the signature of a `<var> [:<type>] = loop { ... }` declaration, whose
+/// closing '}' ends the statement even without a trailing ';'.
+fn chunk_has_loop_block(tokens: &[Token], start: usize, end: usize) -> bool {
+    let mut depth = 0i32;
+    for i in start..=end {
+        if is_open(&tokens[i].tok) {
+            depth += 1;
+        } else if is_close(&tokens[i].tok) {
+            depth -= 1;
+        } else if depth == 0
+            && ident_eq(&tokens[i].tok, ENG_LOOP)
+            && matches!(tokens.get(i + 1).map(|t| &t.tok), Some(Tok::LBrace))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Same nesting rules as `split_statements` (brackets + for/if block
@@ -1280,6 +1493,676 @@ fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, u
     None
 }
 
+// ---------------------------------------------------------------------
+// eng library: English-spelled typed declarations
+// ---------------------------------------------------------------------
+
+fn eng_bad_form_err(line: usize) -> String {
+    format!(
+        "E100 line {}: expected `<name> :<type> = <value>;` or `pin <name> :<type> = <value>;` (types: int, float, str, bool)",
+        line
+    )
+}
+
+fn eng_bad_type_err(line: usize, type_name: &str) -> String {
+    format!(
+        "E101 line {}: unknown type \"{}\" (types: int, float, str, bool)",
+        line, type_name
+    )
+}
+
+fn eng_missing_value_err(line: usize) -> String {
+    format!(
+        "E102 line {}: declaration is missing a value after '='",
+        line
+    )
+}
+
+fn eng_call_bad_form_err(line: usize, fn_name: &str) -> String {
+    format!("E106 line {}: expected {}(...);", line, fn_name)
+}
+
+/// Parse the single argument of `print(...)` / `input(...)`: exactly one
+/// parenthesized expression, nothing after the closing paren.
+fn parse_eng_call_arg(tokens: &[Token], fn_name: &str, line: usize) -> Result<Expr, String> {
+    if tokens.len() < 2
+        || !matches!(tokens[0].tok, Tok::LParen)
+        || !matches!(tokens[tokens.len() - 1].tok, Tok::RParen)
+    {
+        return Err(eng_call_bad_form_err(line, fn_name));
+    }
+    parse_expr(&tokens[1..tokens.len() - 1], line)
+        .map_err(|_| eng_call_bad_form_err(line, fn_name))
+}
+
+/// Parse an eng declaration (the trailing ';' has already been stripped by
+/// the caller). Accepted shapes:
+///   <name> :<type> = <value>
+///   pin <name> :<type> = <value>
+/// The declared type is enforced at runtime by the interpreter.
+fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
+    // --- eng calls: print(<value>); / input(<prompt>); ---
+    if !body.is_empty() && matches!(&body[0].tok, Tok::Ident(s) if s == ENG_PRINT || s == ENG_INPUT) {
+        let fn_name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let value = parse_eng_call_arg(&body[1..], &fn_name, line)?;
+        return Ok(if fn_name == ENG_PRINT {
+            Stmt::EngPrint { value, line }
+        } else {
+            Stmt::EngInput { prompt: value, line }
+        });
+    }
+    // --- eng break: `break;` / `break <value>;` ---
+    if !body.is_empty() && ident_eq(&body[0].tok, ENG_BREAK) {
+        let value_tokens = &body[1..];
+        if value_tokens.is_empty() {
+            return Ok(Stmt::EngBreak { value: None, line });
+        }
+        let value = parse_expr(value_tokens, line).map_err(|_| eng_block_form_err(line))?;
+        return Ok(Stmt::EngBreak {
+            value: Some(value),
+            line,
+        });
+    }
+
+    // --- eng return: `return;` / `return <value>;` ---
+    if !body.is_empty() && ident_eq(&body[0].tok, ENG_RETURN) {
+        let value_tokens = &body[1..];
+        if value_tokens.is_empty() {
+            return Ok(Stmt::EngReturn { value: None, line });
+        }
+        let value = parse_expr(value_tokens, line)
+            .map_err(|_| eng_return_bad_form_err(line))?;
+        return Ok(Stmt::EngReturn {
+            value: Some(value),
+            line,
+        });
+    }
+
+    let (is_const, rest) = if !body.is_empty() && ident_eq(&body[0].tok, ENG_PIN) {
+        (true, &body[1..])
+    } else {
+        (false, body)
+    };
+
+    // --- eng compound assignment: `name += <value>;` (also -= *= /= %= ^=) ---
+    if !is_const
+        && rest.len() >= 4
+        && matches!(rest[0].tok, Tok::Ident(_))
+        && matches!(rest[1].tok, Tok::Op(_))
+        && matches!(rest[2].tok, Tok::Assign)
+    {
+        let name = match &rest[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let op = match rest[1].tok {
+            Tok::Op(c) => c,
+            _ => unreachable!(),
+        };
+        let amount = parse_expr(&rest[3..], line).map_err(|_| eng_bad_form_err(line))?;
+        return Ok(Stmt::EngMathAssign {
+            name,
+            op,
+            amount,
+            line,
+        });
+    }
+
+    // --- eng assignment: `name = <value>;` (no type annotation) ---
+    if !is_const
+        && rest.len() >= 3
+        && matches!(rest[0].tok, Tok::Ident(_))
+        && matches!(rest[1].tok, Tok::Assign)
+    {
+        let name = match &rest[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let value = parse_expr(&rest[2..], line).map_err(|_| eng_bad_form_err(line))?;
+        return Ok(Stmt::EngAssign { name, value, line });
+    }
+
+    // --- eng function-call statement: `name(arg1, arg2);` / `name();` ---
+    if !is_const
+        && rest.len() >= 2
+        && matches!(rest[0].tok, Tok::Ident(_))
+        && matches!(rest[1].tok, Tok::LParen)
+    {
+        let name = match &rest[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        if !matches!(rest.last().map(|t| &t.tok), Some(Tok::RParen)) {
+            return Err(eng_call_bad_form_err(line, &name));
+        }
+        let inner = &rest[2..rest.len() - 1];
+        let mut args = Vec::new();
+        if !inner.is_empty() {
+            for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
+                let arg = parse_expr(part, line)
+                    .map_err(|_| eng_call_bad_form_err(line, &name))?;
+                args.push(arg);
+            }
+        }
+        return Ok(Stmt::EngExprCall { name, args, line });
+    }
+
+    // --- eng expression statement: a bare expression whose value is
+    //     discarded. `<lib>.<fn>(args);` maps onto the ordinary library-call
+    //     statement, so calling a function that returns nothing is fine. ---
+    if let Ok(expr) = parse_expr(body, line) {
+        return Ok(match expr {
+            Expr::LibCall(lib, fn_name, args, call_line) => Stmt::LibCall {
+                lib,
+                fn_name,
+                args,
+                line: call_line,
+            },
+            other => Stmt::ExprStmt { value: other, line },
+        });
+    }
+
+    // <name>
+    if rest.len() < 2 || !matches!(rest[0].tok, Tok::Ident(_)) {
+        return Err(eng_bad_form_err(line));
+    }
+    let name = match &rest[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+
+    // :<type>
+    if !matches!(rest[1].tok, Tok::Colon) {
+        return Err(eng_bad_form_err(line));
+    }
+    if rest.len() < 4 || !matches!(rest[2].tok, Tok::Ident(_)) {
+        return Err(eng_bad_form_err(line));
+    }
+    let type_name = match &rest[2].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    if !is_eng_type(&type_name) {
+        return Err(eng_bad_type_err(line, &type_name));
+    }
+
+    // = <value>
+    if !matches!(rest[3].tok, Tok::Assign) {
+        return Err(eng_bad_form_err(line));
+    }
+    let value_tokens = &rest[4..];
+    if value_tokens.is_empty() {
+        return Err(eng_missing_value_err(line));
+    }
+
+    // Special case: `= input(<prompt>)` -- reading console input into the
+    // declared variable, with the value coerced to the declared type.
+    if value_tokens.len() >= 2 && ident_eq(&value_tokens[0].tok, ENG_INPUT) {
+        let prompt = parse_eng_call_arg(&value_tokens[1..], ENG_INPUT, line)?;
+        return Ok(Stmt::EngInputAssign {
+            name,
+            type_name,
+            prompt,
+            line,
+        });
+    }
+
+    let value = parse_expr(value_tokens, line)?;
+
+    Ok(Stmt::EngDecl {
+        name,
+        type_name,
+        value,
+        is_const,
+        line,
+    })
+}
+
+// ---------------------------------------------------------------------
+// eng library: English-spelled block statements (if / while / fn)
+//
+// These are C-style, so they end with '}' instead of '။' / ';':
+//
+//   if (<cond>) { ... } [else if (<cond>) { ... }] [else { ... }]
+//   while (<cond>) { ... }
+//   fn <name>([<param> [:<type>], ...]) [-> <type>] { ... }
+//
+// The parentheses around a condition are optional; `&&`, `||` and `!` work
+// inside it, and a condition may also be a sequence of parenthesized groups
+// the way the Myanmar forms are written.
+// ---------------------------------------------------------------------
+
+/// True for the keywords that open an eng block statement.
+fn is_eng_block_keyword(tok: &Tok) -> bool {
+    matches!(
+        tok,
+        Tok::Ident(s) if s == ENG_IF || s == ENG_WHILE || s == ENG_FN || s == ENG_LOOP
+    )
+}
+
+fn eng_block_form_err(line: usize) -> String {
+    format!(
+        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `loop {{ ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        line
+    )
+}
+
+fn eng_return_bad_form_err(line: usize) -> String {
+    format!("E109 line {}: expected `return;` or `return <value>;`", line)
+}
+
+/// Index of the first `{` at paren/bracket depth 0 -- the brace that opens a
+/// block statement's body, as opposed to a literal nested in its condition.
+fn find_block_lbrace(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        match t.tok {
+            Tok::LParen | Tok::LBracket => depth += 1,
+            Tok::RParen | Tok::RBracket => depth -= 1,
+            Tok::LBrace if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One `{ ... }` body starting at `tokens[open_idx]`; returns the tokens
+/// between the braces plus the index just past the closing `}`.
+fn take_brace_block(
+    tokens: &[Token],
+    open_idx: usize,
+    line: usize,
+) -> Result<(&[Token], usize), String> {
+    let close = find_close(tokens, open_idx, line).map_err(|_| eng_block_form_err(line))?;
+    Ok((&tokens[open_idx + 1..close], close + 1))
+}
+
+/// Parse one eng condition atom: an optional `!`, an optional wrapping pair
+/// of parentheses, then a comparison / type-check / bare boolean.
+fn parse_eng_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
+    let mut toks = tokens;
+    let negate = !toks.is_empty() && matches!(toks[0].tok, Tok::Not);
+    if negate {
+        toks = &toks[1..];
+    }
+    if toks.len() >= 2 && matches!(toks[0].tok, Tok::LParen) {
+        if let Ok(close) = find_close(toks, 0, line) {
+            if close == toks.len() - 1 {
+                toks = &toks[1..toks.len() - 1];
+            }
+        }
+    }
+    let mut atom = parse_cond_atom(toks, line).map_err(|_| eng_block_form_err(line))?;
+    atom.negate ^= negate;
+    Ok(atom)
+}
+
+/// Parse an eng condition: `<atom> [&&|\|\| <atom> ...]`, where one optional
+/// outer pair of parentheses wraps the whole thing.
+fn parse_eng_cond(tokens: &[Token], line: usize) -> Result<CondChain, String> {
+    if tokens.is_empty() {
+        return Err(eng_block_form_err(line));
+    }
+    let mut inner: &[Token] = tokens;
+    if matches!(tokens[0].tok, Tok::LParen) {
+        if let Ok(close) = find_close(tokens, 0, line) {
+            if close == tokens.len() - 1 {
+                inner = &tokens[1..tokens.len() - 1];
+            }
+        }
+    }
+    if inner.is_empty() {
+        return Err(eng_block_form_err(line));
+    }
+
+    let mut parts: Vec<(Option<LogicalOp>, &[Token])> = Vec::new();
+    let mut pending: Option<LogicalOp> = None;
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in inner.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+            continue;
+        }
+        if is_close(&t.tok) {
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 && matches!(t.tok, Tok::And | Tok::Or) {
+            if i == start {
+                return Err(eng_block_form_err(line));
+            }
+            parts.push((pending.take(), &inner[start..i]));
+            pending = Some(if matches!(t.tok, Tok::And) {
+                LogicalOp::And
+            } else {
+                LogicalOp::Or
+            });
+            start = i + 1;
+        }
+    }
+    if start == inner.len() {
+        return Err(eng_block_form_err(line));
+    }
+    parts.push((pending.take(), &inner[start..]));
+
+    let mut atoms: Vec<(Option<LogicalOp>, CondAtom)> = Vec::with_capacity(parts.len());
+    for (op, toks) in parts {
+        atoms.push((op, parse_eng_cond_atom(toks, line)?));
+    }
+    let first = atoms[0].1.clone();
+    let rest = atoms[1..]
+        .iter()
+        .map(|(op, atom)| (op.clone().unwrap(), atom.clone()))
+        .collect();
+    Ok(CondChain { first, rest })
+}
+
+/// Parse a whole eng block statement chunk (no trailing ';' / '။').
+fn parse_eng_block_statement(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    if tokens.is_empty() {
+        return Err(eng_block_form_err(line));
+    }
+    if ident_eq(&tokens[0].tok, ENG_IF) {
+        return parse_eng_if(tokens, line);
+    }
+    if ident_eq(&tokens[0].tok, ENG_WHILE) {
+        return parse_eng_while(tokens, line);
+    }
+    if ident_eq(&tokens[0].tok, ENG_FN) {
+        return parse_eng_fn(tokens, line);
+    }
+    if ident_eq(&tokens[0].tok, ENG_LOOP) {
+        return parse_eng_loop(tokens, line);
+    }
+    Err(eng_block_form_err(line))
+}
+
+/// `loop { ... }` used as a statement.
+fn parse_eng_loop(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    Ok(Stmt::EngLoop {
+        body: parse_eng_loop_block(tokens, line)?,
+    })
+}
+
+/// The `{ ... }` body of a `loop` starting at `tokens[0]` (the `loop`
+/// keyword); anything after the closing `}` is an error.
+fn parse_eng_loop_block(tokens: &[Token], line: usize) -> Result<Vec<Stmt>, String> {
+    if tokens.len() < 2
+        || !ident_eq(&tokens[0].tok, ENG_LOOP)
+        || !matches!(tokens[1].tok, Tok::LBrace)
+    {
+        return Err(eng_block_form_err(line));
+    }
+    let (body_tokens, after) = take_brace_block(tokens, 1, line)?;
+    if after != tokens.len() {
+        return Err(eng_block_form_err(line));
+    }
+    parse_block(body_tokens)
+}
+
+fn eng_use_bad_form_err(line: usize) -> String {
+    format!(
+        "E118 line {}: expected `use <library> [as <alias>] [, ...];`",
+        line
+    )
+}
+
+/// Parse an eng library import: `use <lib> [as <alias>] [, ...]` (the
+/// trailing ';' has already been stripped by the caller).
+fn parse_eng_use(body: &[Token], line: usize) -> Result<Stmt, String> {
+    let rest = &body[1..];
+    if rest.is_empty() {
+        return Err(eng_use_bad_form_err(line));
+    }
+    let mut libs: Vec<(String, Option<String>)> = Vec::new();
+    for part in split_top_level(rest, |t| matches!(t, Tok::Comma)) {
+        match part {
+            // <lib>
+            [name] => match &name.tok {
+                Tok::Ident(s) => libs.push((s.clone(), None)),
+                _ => return Err(eng_use_bad_form_err(line)),
+            },
+            // <lib> as <alias>
+            [name, as_t, alias] if ident_eq(&as_t.tok, ENG_AS) => {
+                match (&name.tok, &alias.tok) {
+                    (Tok::Ident(lib), Tok::Ident(a)) => {
+                        libs.push((lib.clone(), Some(a.clone())))
+                    }
+                    _ => return Err(eng_use_bad_form_err(line)),
+                }
+            }
+            _ => return Err(eng_use_bad_form_err(line)),
+        }
+    }
+    if libs.is_empty() {
+        return Err(eng_use_bad_form_err(line));
+    }
+    Ok(Stmt::UseLibrary { libs, line })
+}
+
+/// Recognize `<name> [:<type>] = loop { ... }` -- the eng loop-value
+/// declaration/assignment (the trailing ';', if any, is already stripped by
+/// the caller). Returns `Ok(None)` when the statement is shaped like anything
+/// else, so ordinary declarations and Myanmar statements fall through
+/// untouched.
+fn try_parse_eng_loop_assign(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    let (is_const, rest) = if !body.is_empty() && ident_eq(&body[0].tok, ENG_PIN) {
+        (true, &body[1..])
+    } else {
+        (false, body)
+    };
+    if rest.len() < 4 || !matches!(rest[0].tok, Tok::Ident(_)) {
+        return Ok(None);
+    }
+    let name = match &rest[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    let (type_name, eq_idx) = match &rest[1].tok {
+        Tok::Colon => match rest.get(2).map(|t| &t.tok) {
+            Some(Tok::Ident(t)) => {
+                if !is_eng_type(t) {
+                    return Err(eng_bad_type_err(line, t));
+                }
+                (Some(t.clone()), 3usize)
+            }
+            _ => return Ok(None),
+        },
+        // `<name> = loop { ... }`: the '=' is at index 1, so the value starts
+        // at index 2.
+        Tok::Assign => (None, 1usize),
+        _ => return Ok(None),
+    };
+    if !matches!(rest.get(eq_idx).map(|t| &t.tok), Some(Tok::Assign)) {
+        return Ok(None);
+    }
+    let value_tokens = &rest[eq_idx + 1..];
+    if value_tokens.first().map(|t| ident_eq(&t.tok, ENG_LOOP)) != Some(true) {
+        return Ok(None);
+    }
+    Ok(Some(Stmt::EngLoopAssign {
+        name,
+        type_name,
+        is_const,
+        body: parse_eng_loop_block(value_tokens, line)?,
+        line,
+    }))
+}
+
+/// eng `break` / `break <value>` / `return` / `return <value>` written
+/// without a trailing ';', which is allowed when the statement ends a block
+/// (e.g. `if (...) { break }`). Returns `Ok(None)` for anything else.
+fn parse_eng_bare_keyword_stmt(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    let is_break = body.first().map(|t| ident_eq(&t.tok, ENG_BREAK)) == Some(true);
+    let is_return = body.first().map(|t| ident_eq(&t.tok, ENG_RETURN)) == Some(true);
+    if !is_break && !is_return {
+        return Ok(None);
+    }
+    let value_tokens = &body[1..];
+    let value = if value_tokens.is_empty() {
+        None
+    } else {
+        Some(parse_expr(value_tokens, line).map_err(|_| eng_block_form_err(line))?)
+    };
+    Ok(Some(if is_break {
+        Stmt::EngBreak { value, line }
+    } else {
+        Stmt::EngReturn { value, line }
+    }))
+}
+
+/// `if (<cond>) { ... } [else if (<cond>) { ... }] [else { ... }]`
+fn parse_eng_if(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    let mut branches: Vec<IfBranch> = Vec::new();
+    let mut cursor = 0usize; // points at the "if" that starts the branch
+    loop {
+        let rest = &tokens[cursor + 1..];
+        let brace_rel = find_block_lbrace(rest).ok_or_else(|| eng_block_form_err(line))?;
+        let brace_abs = cursor + 1 + brace_rel;
+        let cond = parse_eng_cond(&tokens[cursor + 1..brace_abs], line)?;
+        let (body_tokens, after) = take_brace_block(tokens, brace_abs, line)?;
+        branches.push(IfBranch {
+            cond: Some(cond),
+            negate: false,
+            body: parse_block(body_tokens)?,
+        });
+        cursor = after;
+        if cursor >= tokens.len() {
+            break;
+        }
+        if !ident_eq(&tokens[cursor].tok, ENG_ELSE) {
+            return Err(eng_block_form_err(line));
+        }
+        cursor += 1;
+        if cursor >= tokens.len() {
+            return Err(eng_block_form_err(line));
+        }
+        if ident_eq(&tokens[cursor].tok, ENG_IF) {
+            continue; // `else if (...) { ... }` -- another conditional branch
+        }
+        if !matches!(tokens[cursor].tok, Tok::LBrace) {
+            return Err(eng_block_form_err(line));
+        }
+        let (body_tokens, after) = take_brace_block(tokens, cursor, line)?;
+        branches.push(IfBranch {
+            cond: None,
+            negate: false,
+            body: parse_block(body_tokens)?,
+        });
+        cursor = after;
+        break;
+    }
+    if cursor != tokens.len() {
+        return Err(eng_block_form_err(line));
+    }
+    Ok(Stmt::If { branches, line })
+}
+
+/// `while (<cond>) { ... }`
+fn parse_eng_while(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    let rest = &tokens[1..];
+    let brace_rel = find_block_lbrace(rest).ok_or_else(|| eng_block_form_err(line))?;
+    let cond = parse_eng_cond(&rest[..brace_rel], line)?;
+    let (body_tokens, after) = take_brace_block(tokens, 1 + brace_rel, line)?;
+    if after != tokens.len() {
+        return Err(eng_block_form_err(line));
+    }
+    Ok(Stmt::While {
+        cond,
+        negate: false,
+        body: parse_block(body_tokens)?,
+        line,
+    })
+}
+
+/// `fn <name>([<param> [:<type>], ...]) [-> <type> | : <type>] { ... }`
+fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    if tokens.len() < 3 || !matches!(tokens[1].tok, Tok::Ident(_)) {
+        return Err(eng_block_form_err(line));
+    }
+    let name = match &tokens[1].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    if !matches!(tokens[2].tok, Tok::LParen) {
+        return Err(eng_block_form_err(line));
+    }
+    let params_close = find_close(tokens, 2, line).map_err(|_| eng_block_form_err(line))?;
+    let params = parse_eng_fn_params(&tokens[3..params_close], line)?;
+
+    let mut cursor = params_close + 1;
+    // Optional return-type annotation, spelled `-> int` or `: int`. It is
+    // validated but not enforced (Akkhara functions are dynamically typed).
+    let has_ret_annotation = if cursor < tokens.len() {
+        let arrow = matches!(tokens[cursor].tok, Tok::Op('-'))
+            && matches!(tokens.get(cursor + 1).map(|t| &t.tok), Some(Tok::Cmp(s)) if s == ">");
+        if arrow {
+            cursor += 2;
+            true
+        } else if matches!(tokens[cursor].tok, Tok::Colon) {
+            cursor += 1;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if has_ret_annotation {
+        match tokens.get(cursor).map(|t| &t.tok) {
+            Some(Tok::Ident(t)) if is_eng_type(t) => cursor += 1,
+            Some(Tok::Ident(t)) => return Err(eng_bad_type_err(line, t)),
+            _ => return Err(eng_block_form_err(line)),
+        }
+    }
+
+    if !matches!(tokens.get(cursor).map(|t| &t.tok), Some(Tok::LBrace)) {
+        return Err(eng_block_form_err(line));
+    }
+    let (body_tokens, after) = take_brace_block(tokens, cursor, line)?;
+    if after != tokens.len() {
+        return Err(eng_block_form_err(line));
+    }
+    Ok(Stmt::FuncDef {
+        name,
+        params,
+        body: parse_block(body_tokens)?,
+        line,
+    })
+}
+
+/// Parse an eng `fn` parameter list: `p1, p2`, each optionally annotated
+/// `p :int`. The annotations are validated but otherwise ignored.
+fn parse_eng_fn_params(tokens: &[Token], line: usize) -> Result<Vec<String>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for part in split_top_level(tokens, |t| matches!(t, Tok::Comma)) {
+        match part {
+            [p] => match &p.tok {
+                Tok::Ident(s) => names.push(s.clone()),
+                _ => return Err(eng_block_form_err(line)),
+            },
+            [p, colon, ty] => match (&p.tok, &colon.tok, &ty.tok) {
+                (Tok::Ident(s), Tok::Colon, Tok::Ident(t)) => {
+                    if !is_eng_type(t) {
+                        return Err(eng_bad_type_err(line, t));
+                    }
+                    names.push(s.clone());
+                }
+                _ => return Err(eng_block_form_err(line)),
+            },
+            _ => return Err(eng_block_form_err(line)),
+        }
+    }
+    Ok(names)
+}
+
 fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     let end_present = has_end(tokens);
     let mut body: Vec<Token> = if end_present {
@@ -1287,6 +2170,66 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     } else {
         tokens.to_vec()
     };
+
+    let terminated = matches!(body.last().map(|t| &t.tok), Some(Tok::Semicolon));
+    let decl_body: &[Token] = if terminated {
+        &body[..body.len() - 1]
+    } else {
+        &body[..]
+    };
+
+    // --- eng library import: `use <lib> [as <alias>] [, ...];` -- the
+    //     English spelling of `နည်းပညာများ <lib> ကို အသုံးပြုပါ။`. ---
+    if body.first().map(|t| ident_eq(&t.tok, ENG_USE)) == Some(true) {
+        return parse_eng_use(decl_body, line);
+    }
+
+    // --- eng library block statements (brace-terminated, C-style spelling):
+    //     if (<cond>) { ... } [else if ...] [else { ... }]
+    //     while (<cond>) { ... }
+    //     loop { ... }
+    //     fn <name>(<params>) { ... }
+    // These carry no ';' / '။' of their own, so they're recognized by their
+    // leading keyword. A stray trailing ';' after the closing '}' is fine.
+    if body.first().map(|t| is_eng_block_keyword(&t.tok)) == Some(true) {
+        return parse_eng_block_statement(decl_body, line);
+    }
+
+    // --- eng `break` / `return` without their ';', as the last statement of a
+    //     block: `if (...) { break }` ---
+    if !end_present && !terminated {
+        if let Some(stmt) = parse_eng_bare_keyword_stmt(decl_body, line)? {
+            return Ok(stmt);
+        }
+    }
+
+    // --- eng loop as a value: `<name> [:<type>] = loop { ... }`, with or
+    //     without the trailing ';'. ---
+    if let Some(stmt) = try_parse_eng_loop_assign(decl_body, line)? {
+        return Ok(stmt);
+    }
+
+    // --- eng library declarations (semicolon-terminated, C-style spelling):
+    //     <name> :<type> = <value>;
+    //     pin <name> :<type> = <value>;
+    // Detected by a ';' terminator, which no Myanmar sentence form uses.
+    if terminated {
+        return parse_eng_decl(decl_body, line);
+    }
+
+    // --- break, spelled with the Myanmar keyword: `ရပ်ပါ။` stops the
+    //     innermost loop; `<value> ကို ရပ်ပါ။` stops it with that value. ---
+    if !body.is_empty() && ident_eq(&body.last().unwrap().tok, KW_BREAK) {
+        let fn_idx = body.len() - 1;
+        if fn_idx == 0 {
+            return Ok(Stmt::EngBreak { value: None, line });
+        }
+        let value = parse_particle_call(&body, fn_idx, KW_BREAK, line)?;
+        return Ok(Stmt::EngBreak {
+            value: Some(value),
+            line,
+        });
+    }
 
     // --- For-loop / if-else / while block: header (no '။' of its own) ... body ... ပြီး။ ---
     if end_present {
@@ -2130,6 +3073,13 @@ fn parse_typecheck_name(tokens: &[Token]) -> Option<String> {
 ///   2. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
 ///   3. Bare boolean-valued expression, e.g. "အလုပ်" (test its truthiness).
 fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
+    // eng library logical-not: an atom may be introduced by `!`, negating
+    // its truth value. The rest of the atom parses normally.
+    let negate = !tokens.is_empty() && matches!(tokens[0].tok, Tok::Not);
+    let tokens = if negate { &tokens[1..] } else { tokens };
+    if tokens.is_empty() {
+        return Err(if_condition_syntax_err(line));
+    }
     if let Some(is_idx) = find_kw_top_level(tokens, KW_ASSIGN) {
         if is_idx == 0 {
             return Err(if_condition_syntax_err(line));
@@ -2142,6 +3092,7 @@ fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
             lhs,
             op: None,
             rhs: None,
+            negate,
             type_check: Some(type_name),
             line,
         });
@@ -2163,6 +3114,7 @@ fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
                 lhs,
                 op: Some(op),
                 rhs: Some(rhs),
+                negate,
                 type_check: None,
                 line,
             })
@@ -2175,6 +3127,7 @@ fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
                 lhs,
                 op: None,
                 rhs: None,
+                negate,
                 type_check: None,
                 line,
             })
@@ -2209,6 +3162,20 @@ fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<Con
     let mut pending_op: Option<LogicalOp> = None;
 
     while idx < tokens.len() {
+        // eng library logical operators: bare `&&` / `||` tokens between
+        // condition groups, e.g. `if (a > 1) && (b < 5) { ... }`.
+        if matches!(tokens[idx].tok, Tok::And | Tok::Or) {
+            if pending_op.is_some() || atoms.is_empty() {
+                return Err(syntax_err(line));
+            }
+            pending_op = Some(if matches!(tokens[idx].tok, Tok::And) {
+                LogicalOp::And
+            } else {
+                LogicalOp::Or
+            });
+            idx += 1;
+            continue;
+        }
         if !matches!(tokens[idx].tok, Tok::LParen) {
             return Err(syntax_err(line));
         }
