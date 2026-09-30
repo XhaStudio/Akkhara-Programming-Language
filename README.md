@@ -43,6 +43,10 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 - Type conversion: `<value> ကို <type> သို့ ပြောင်းပါ။` (types: `ကိန်းပြည့်`, `ဒဿမကိန်း`, `စာသား`)
 - Math assignment: `<var or value> ကို <amount> <fn>ပါ။` or `<var> အတွက် <amount> <fn>ပါ။`
   (fn: `တိုး` increase, `လျော့` reduce, `မြှောက်` multiply, `စား` divide — the `အတွက်` form defaults an undeclared variable to `0` before applying the operation)
+- Function call: `<fn> ကို လုပ်ပါ။` (no arguments),
+  `<fn> ကို လုပ်ရန် <arg>[, <arg>] ဖြင့်။`, or with the verb at the end:
+  `<fn> ကို (<arg>[, <arg>]) ဖြင့် လုပ်ပါ။` — the same two spellings work for
+  library functions as `<lib> ၏ <fn> ...`
 - Collections: `<name> မှာ <literal> ဖြစ်၏။`
   - List: `[1, 2, 3]`
   - Tuple: `(1, 2, 3)`
@@ -66,6 +70,7 @@ Import a library, then reach its functions with the `၏` particle.
 - Call with arguments in parens: `<lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။`
 - Call with `လုပ်ရန်`/`ဖြင့်`: `<lib> ၏ <fn> ကို လုပ်ရန် <arg> ဖြင့်။`
   (the argument(s) may also be parenthesized: `<lib> ၏ <fn> ကို လုပ်ရန် (<arg>) ဖြင့်။`)
+- Call with the verb at the end: `<lib> ၏ <fn> ကို (<arg>) ဖြင့် လုပ်ပါ။`
 - Store the result in a variable: `<var> အတွက် <lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။`
   or `<var> အတွက် <lib> ၏ <fn> ကို လုပ်ရန် <arg> ဖြင့်။`
 
@@ -88,6 +93,40 @@ Built-in libraries and the functions they expose:
 response အတွက် request ၏ get("https://api.example.com/data") ကို လုပ်ပါ။
 response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
 ```
+
+#### Connecting another script
+
+`နည်းပညာများ <name> ကို အသုံးပြုပါ။` resolves `<name>` in three steps, and
+reports `E062` only when all of them miss:
+
+1. a built-in library (`request`, `ကျပန်း`, `အချိန်`),
+2. a package installed with `akk install <name>`, then
+3. a plain `<name>.akk` script sitting next to the program being run (or in
+   the current working directory, then beside the `akk` binary).
+
+So a program can borrow helpers straight out of a neighboring file -- no
+install step and no recompiling `akk` needed:
+
+```
+# Tools.akk
+fn add(a, b) {
+    return a + b;
+}
+```
+
+```
+# main.akk
+နည်းပညာများ Tools ကို အသုံးပြုပါ။
+
+TOOL :int = Tools.add(1, 100);      # = Tools ၏ add(1, 100)
+print(TOOL);                        # 101
+```
+
+The imported script's functions are reached through its library name
+(`<name> ၏ <fn>` or `<name>.<fn>`), and only the functions that script
+defines are visible that way. A script that imports itself -- directly, or
+through a cycle of other scripts -- is reported as `E119` instead of
+recursing forever.
 
 All error messages are in Myanmar, formatted as `လိုင်း <N> ...` (the `eng`
 syntax below reports its own errors in English instead).
@@ -191,6 +230,34 @@ pick = r.တန်ဖိုး(["A"]);         # through an alias: `use ကျ�
 
 A library function that produces no value (like `အချိန်`'s `စောင့်`) may be
 called as a statement, but using it as a value is `E117`.
+
+#### Library functions as values
+
+Leaving off the call binds the function itself: `<lib>.<fn>` is a
+first-class value that can be stored and called later. When the declaration
+carries a type annotation, that type is the type the call will return.
+
+```
+use Tools;                       # = နည်းပညာများ Tools ကို အသုံးပြုပါ။
+
+TOOL :int = Tools.add;           # bind Tools.akk's `add`
+r :int = TOOL(1, 100);           # 101
+print(r);
+
+ALIAS = Tools.add;               # untyped binding
+print(ALIAS(2, 3));              # 5
+ALIAS(4, 5);                     # as a statement: the value is discarded
+
+var အတွက် TOOL(1, 100) ကို လုပ်ပါ။   # the call sentence spelling
+var ကို ဖော်ပြပါ။                  # 101
+```
+
+A binding can also be called through the Myanmar forms
+(`<name> ကို လုပ်ရန် <args> ဖြင့်။`, or the call sentence
+`<name>(<args>) ကို လုပ်ပါ။`). Creating the binding checks that the library
+is imported and, for a script or package, that it defines that function
+(`E089`, `E085`, `E086`); calling a binding whose function returns nothing is
+`E117`, like any other library call.
 
 Both spellings share one namespace: `pin` constants are immutable everywhere,
 eng values work inside Myanmar statements (and vice versa), and an eng `fn` is
