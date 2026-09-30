@@ -268,6 +268,10 @@ pub struct Interpreter {
     /// How many loops are currently running (eng `loop`, `while`, `for`). A
     /// `break` while this is 0 has no loop to stop (E116).
     loop_depth: usize,
+    /// When `Some`, everything the program prints is collected here as well
+    /// as shown on stdout, so `akk` can save the run's output next to the
+    /// program as a `<file_name>.akop` file. `None` disables the capture.
+    output_log: Option<String>,
 }
 
 impl Interpreter {
@@ -289,7 +293,37 @@ impl Interpreter {
             call_depth: 0,
             break_signal: None,
             loop_depth: 0,
+            output_log: None,
         }
+    }
+
+    /// Starts collecting the program's output (see `output_log`).
+    pub fn capture_output(&mut self) {
+        self.output_log = Some(String::new());
+    }
+
+    /// Returns the output collected so far, and stops capturing.
+    pub fn take_output(&mut self) -> Option<String> {
+        self.output_log.take()
+    }
+
+    /// Program output: shown on stdout, and appended to the capture buffer
+    /// when one is active.
+    fn emit(&mut self, text: &str) {
+        print!("{}", text);
+        if let Some(log) = self.output_log.as_mut() {
+            log.push_str(text);
+        }
+    }
+
+    fn emit_line(&mut self, text: &str) {
+        self.emit(&format!("{}\n", text));
+    }
+
+    /// Prompts are written without a trailing newline, so flush them
+    /// explicitly before the program blocks on input.
+    fn flush_stdout(&self) {
+        let _ = io::stdout().flush();
     }
 
     /// Adds a folder to search for plain `<name>.akk` libraries, on top of
@@ -365,13 +399,13 @@ impl Interpreter {
             }
             Stmt::EngPrint { value, line } => {
                 let v = self.eval(value, *line, None)?;
-                println!("{}", display(&v));
+                self.emit_line(&display(&v));
                 Ok(())
             }
             Stmt::EngInput { prompt, line } => {
                 let p = self.eval(prompt, *line, None)?;
-                print!("{}", display(&p));
-                io::stdout().flush().ok();
+                self.emit(&display(&p));
+                self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
                 Ok(())
@@ -383,8 +417,8 @@ impl Interpreter {
                 line,
             } => {
                 let p = self.eval(prompt, *line, None)?;
-                print!("{}", display(&p));
-                io::stdout().flush().ok();
+                self.emit(&display(&p));
+                self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
                 let trimmed = buf.trim().to_string();
@@ -513,21 +547,21 @@ impl Interpreter {
             }
             Stmt::Print { value, line } => {
                 let v = self.eval(value, *line, None)?;
-                println!("{}", display(&v));
+                self.emit_line(&display(&v));
                 Ok(())
             }
             Stmt::InputNoAssign { value, line } => {
                 let prompt = self.eval(value, *line, None)?;
-                print!("{}", display(&prompt));
-                io::stdout().flush().ok();
+                self.emit(&display(&prompt));
+                self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
                 Ok(())
             }
             Stmt::InputAssign { name, value, line } => {
                 let prompt = self.eval(value, *line, None)?;
-                print!("{}", display(&prompt));
-                io::stdout().flush().ok();
+                self.emit(&display(&prompt));
+                self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
                 let trimmed = buf.trim().to_string();
