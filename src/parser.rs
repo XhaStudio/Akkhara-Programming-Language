@@ -54,6 +54,10 @@ pub enum Expr {
     /// Library call in the eng spelling: `<lib>.<fn>(arg1, arg2, ...)` --
     /// the same call as the Myanmar `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
     LibCall(String, String, Vec<Expr>, usize),
+    /// A library function named without calling it: `<lib>.<fn>`. Its
+    /// value is a callable, so `TOOL = Tools.add;` binds `add` and a later
+    /// `TOOL(1, 100)` invokes it.
+    LibFnRef(String, String, usize),
     /// Member/field access: `<expr> ၏ <field>` -- reads a named field off
     /// an Akkhara object (e.g. `response ၏ အခြေအနေကုဒ်` reads the status
     /// code field off a "request" library response object).
@@ -894,13 +898,16 @@ fn is_single_braced_group(tokens: &[Token]) -> bool {
 
 /// Parse the argument list for a function call. Accepts either a single
 /// inline expression (`<arg>`), a comma-separated inline list
-/// (`<arg1>, <arg2>`), or a multi-line brace form spanning multiple lines:
-/// `{ <arg1>, <arg2>, ... }`.
+/// (`<arg1>, <arg2>`), a parenthesized list (`(<arg1>, <arg2>)`, the same
+/// spelling library calls accept), or a multi-line brace form spanning
+/// multiple lines: `{ <arg1>, <arg2>, ... }`.
 fn parse_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, String> {
     if tokens.is_empty() {
         return Err(func_call_missing_arg_err(line));
     }
     let inner: &[Token] = if is_single_braced_group(tokens) {
+        &tokens[1..tokens.len() - 1]
+    } else if is_single_paren_group(tokens) {
         &tokens[1..tokens.len() - 1]
     } else {
         tokens
@@ -1064,6 +1071,23 @@ fn try_parse_lib_call(
     }
 
     if tail.len() >= 2 && ident_eq(&tail[0].tok, KW_PARTICLE) {
+        // `<fn> ကို (<args>) ဖြင့် လုပ်ပါ။` -- the verb-at-the-end spelling
+        // of `<fn> ကို လုပ်ရန် (<args>) ဖြင့်။`.
+        if matches!(tail[1].tok, Tok::LParen) {
+            let close = find_close(tail, 1, line)?;
+            let after = &tail[close + 1..];
+            if after.len() != 2
+                || !ident_eq(&after[0].tok, KW_BY)
+                || !ident_eq(&after[1].tok, KW_CALL)
+            {
+                return Err(lib_call_syntax_err(line));
+            }
+            if !end_present {
+                return Err(missing_period_err(line));
+            }
+            let args = parse_lib_call_args(&tail[2..close], line)?;
+            return Ok(Some(lib_call_stmt(assign_name, lib, fn_name, args, line)));
+        }
         // `<fn> ကို လုပ်ပါ။` (no arguments)
         if ident_eq(&tail[1].tok, KW_CALL) {
             if tail.len() != 2 {
@@ -1161,12 +1185,13 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
             continue;
         }
 
-        // eng library call: `<lib>.<fn>(args)` -- the English spelling of
-        // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
-        if i + 2 < tokens.len()
+        // eng library call `<lib>.<fn>(args)` -- the English spelling of
+        // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။` -- and, without a call, the
+        // first-class function reference `<lib>.<fn>` (whose value a later
+        // `TOOL(1, 100)` can invoke).
+        if i + 1 < tokens.len()
             && matches!(tokens[i].tok, Tok::Dot)
             && matches!(tokens[i + 1].tok, Tok::Ident(_))
-            && matches!(tokens[i + 2].tok, Tok::LParen)
         {
             let lib = match &expr {
                 Expr::Ident(name) => name.clone(),
@@ -1177,18 +1202,23 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
                 _ => unreachable!(),
             };
             let dot_line = tokens[i].line;
-            let close = find_close(tokens, i + 2, tokens[i + 2].line)?;
-            let inner = &tokens[i + 3..close];
-            let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
-            let mut args = Vec::with_capacity(parts.len());
-            for p in parts {
-                let arg = parse_expr(p, line).map_err(|_| {
-                    eng_call_bad_form_err(line, &format!("{}.{}", lib, fn_name))
-                })?;
-                args.push(arg);
+            if i + 2 < tokens.len() && matches!(tokens[i + 2].tok, Tok::LParen) {
+                let close = find_close(tokens, i + 2, tokens[i + 2].line)?;
+                let inner = &tokens[i + 3..close];
+                let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
+                let mut args = Vec::with_capacity(parts.len());
+                for p in parts {
+                    let arg = parse_expr(p, line).map_err(|_| {
+                        eng_call_bad_form_err(line, &format!("{}.{}", lib, fn_name))
+                    })?;
+                    args.push(arg);
+                }
+                expr = Expr::LibCall(lib, fn_name, args, dot_line);
+                i = close + 1;
+            } else {
+                expr = Expr::LibFnRef(lib, fn_name, dot_line);
+                i += 2;
             }
-            expr = Expr::LibCall(lib, fn_name, args, dot_line);
-            i = close + 1;
             continue;
         }
 
@@ -2479,6 +2509,134 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     //     before the generic function-call branches below. ---
     if let Some(stmt) = try_parse_lib_call(&body, line, end_present)? {
         return Ok(stmt);
+    }
+
+    // --- Call expression in a Myanmar sentence: `<name>(<args>) ကို လုပ်ပါ။`,
+    //     and its assigning form `<var> အတွက် <name>(<args>) ကို လုပ်ပါ။`.
+    //     This is the `(...)` spelling of `<name> ကို လုပ်ရန် <args> ဖြင့်။`,
+    //     so `<name>` may be a function, a library, or a variable bound to a
+    //     first-class library function (`TOOL ...`). ---
+    if end_present
+        && body.len() >= 3
+        && ident_eq(&body[body.len() - 1].tok, KW_CALL)
+        && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
+    {
+        let head = &body[..body.len() - 2];
+        let (assign_name, call_tokens) = if head.len() >= 2
+            && matches!(head[0].tok, Tok::Ident(_))
+            && ident_eq(&head[1].tok, KW_FOR)
+        {
+            let name = match &head[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            (Some(name), &head[2..])
+        } else {
+            (None, head)
+        };
+        // Only when the callee is written as `name(...)`, so the plain
+        // `<fn> ကို လုပ်ပါ။` forms handled below are left untouched.
+        if matches!(call_tokens.first().map(|t| &t.tok), Some(Tok::Ident(_)))
+            && matches!(call_tokens.get(1).map(|t| &t.tok), Some(Tok::LParen))
+        {
+            if let Ok(expr) = parse_expr(call_tokens, line) {
+                match expr {
+                    Expr::LibCall(lib, fn_name, args, cline) => {
+                        return Ok(match assign_name {
+                            Some(name) => Stmt::LibCallAssign {
+                                name,
+                                lib,
+                                fn_name,
+                                args,
+                                line: cline,
+                            },
+                            None => Stmt::LibCall {
+                                lib,
+                                fn_name,
+                                args,
+                                line: cline,
+                            },
+                        });
+                    }
+                    Expr::NewObj(fn_name, args, cline) => {
+                        return Ok(match assign_name {
+                            Some(name) => Stmt::FuncCallAssign {
+                                name,
+                                fn_name,
+                                args,
+                                line: cline,
+                            },
+                            None => Stmt::ExprStmt {
+                                value: Expr::NewObj(fn_name, args, cline),
+                                line: cline,
+                            },
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // --- Function call with the verb at the end:
+    //       <fn name> ကို (<arg1>, <arg2>) ဖြင့် လုပ်ပါ။
+    //     the same call as `<fn name> ကို လုပ်ရန် (<args>) ဖြင့်။`. The
+    //     assigning form `<var> အတွက် <fn name> ကို (<args>) ဖြင့် လုပ်ပါ။`
+    //     works too. `<fn name>` may be a function, or a name bound to a
+    //     first-class library function. ---
+    if end_present
+        && body.len() >= 4
+        && ident_eq(&body[body.len() - 1].tok, KW_CALL)
+    {
+        let (assign_name, rest) = if matches!(body[0].tok, Tok::Ident(_))
+            && ident_eq(&body[1].tok, KW_FOR)
+        {
+            let name = match &body[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            (Some(name), &body[2..])
+        } else {
+            (None, &body[..])
+        };
+        // `<fn name> ကို ( ... ) ဖြင့် လုပ်ပါ`
+        if rest.len() >= 4
+            && matches!(rest[0].tok, Tok::Ident(_))
+            && ident_eq(&rest[1].tok, KW_PARTICLE)
+            && matches!(rest[2].tok, Tok::LParen)
+        {
+            let fn_name = match &rest[0].tok {
+                Tok::Ident(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            let close = find_close(rest, 2, rest[2].line)?;
+            let after = &rest[close + 1..];
+            if after.len() != 2
+                || !ident_eq(&after[0].tok, KW_BY)
+                || !ident_eq(&after[1].tok, KW_CALL)
+            {
+                return Err(generic_syntax_err(line));
+            }
+            let inner = &rest[3..close];
+            let args = if inner.is_empty() {
+                Vec::new()
+            } else {
+                parse_call_args(inner, line)?
+            };
+            return Ok(match assign_name {
+                Some(name) => Stmt::FuncCallAssign {
+                    name,
+                    fn_name,
+                    args,
+                    line,
+                },
+                None => Stmt::FuncCall {
+                    name: fn_name,
+                    args,
+                    line,
+                },
+            });
+        }
     }
 
     // --- Function call with argument(s): <fn name> ကို လုပ်ရန် <argument> ဖြင့်။
