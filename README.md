@@ -22,6 +22,14 @@ or, before installing the command globally:
 ./target/release/akk myprogram.akk
 ```
 
+A successful run reports how long the program took on its last stdout line,
+e.g. `Interpreted in 0.003s` (nothing is printed when the program fails).
+
+The program's own output is also saved next to the source file as
+`<file_name>.akop` — running `hello.akk` writes `hello.akop` holding exactly
+what the program printed (the timing line is not included). Each run
+overwrites the file, and a failing run writes nothing.
+
 ## Install the `akk` command (Windows / PowerShell)
 
 See the comment block at the top of `command.ps1` for full instructions —
