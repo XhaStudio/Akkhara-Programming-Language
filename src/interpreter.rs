@@ -14,6 +14,26 @@ pub enum Value {
     Set(Vec<Value>),
     Dict(Vec<(Value, Value)>),
     Object(String, Vec<(String, Value)>),
+    /// A library function bound as a value (a first-class library
+    /// function) -- e.g. the `Tools.add` in `TOOL = Tools.add;`. Calling
+    /// the binding (`TOOL(1, 100)`) forwards to the library function.
+    Callable(Callable),
+}
+
+/// What a `Value::Callable` refers to. Kept as a name pair rather than a
+/// closure so values stay `Clone` and comparable.
+#[derive(Debug, Clone)]
+pub enum Callable {
+    /// A function of an imported library: `<lib> ၏ <fn>` / `<lib>.<fn>`.
+    Library { lib: String, fn_name: String },
+}
+
+impl Callable {
+    fn label(&self) -> String {
+        match self {
+            Callable::Library { lib, fn_name } => format!("{}.{}", lib, fn_name),
+        }
+    }
 }
 
 const TYPE_INT: &str = "ကိန်းပြည့်";
@@ -31,6 +51,7 @@ fn type_name_mm(v: &Value) -> &'static str {
         Value::Set(_) => "အုပ်စု",
         Value::Dict(_) => "အဘိဓာန်",
         Value::Object(_, _) => "class object",
+        Value::Callable(_) => "function",
     }
 }
 
@@ -76,6 +97,7 @@ pub fn display(v: &Value) -> String {
         Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_, _) => {
             repr(v)
         }
+        Value::Callable(kind) => kind.label(),
     }
 }
 
@@ -124,6 +146,7 @@ fn repr(v: &Value) -> String {
                     .join(", ")
             )
         }
+        Value::Callable(kind) => kind.label(),
     }
 }
 
@@ -225,6 +248,12 @@ pub struct Interpreter {
     /// alias -> canonical library name. Every `<lib> ၏ ...` reference is
     /// resolved through this before dispatch.
     lib_aliases: HashMap<String, String>,
+    /// Function names each imported script/package library defined, keyed
+    /// by canonical library name. Set when the library's source is run, so
+    /// `<lib> ၏ <fn>` / `<lib>.<fn>` only reaches the functions that came
+    /// from that library -- a plain function name registered elsewhere
+    /// isn't reachable through an unrelated library.
+    lib_functions: HashMap<String, Vec<String>>,
     /// Pending `return` from inside a function body: `Some(None)` is a bare
     /// `return;`, `Some(Some(v))` returns `v`, and `None` means no return is
     /// in flight. Set by `Stmt::EngReturn`, consumed by `call_function`.
@@ -255,11 +284,20 @@ impl Interpreter {
             self_stack: Vec::new(),
             libraries: LibraryLoader::new(libraries_dir),
             lib_aliases: HashMap::new(),
+            lib_functions: HashMap::new(),
             return_signal: None,
             call_depth: 0,
             break_signal: None,
             loop_depth: 0,
         }
+    }
+
+    /// Adds a folder to search for plain `<name>.akk` libraries, on top of
+    /// the program's own folder. `akk` calls this with the directory of the
+    /// file being run, so `နည်းပညာများ Tools ကို အသုံးပြုပါ။` can pull in a
+    /// neighboring `Tools.akk`.
+    pub fn add_library_search_dir(&mut self, dir: std::path::PathBuf) {
+        self.libraries.add_script_dir(dir);
     }
 
     pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
@@ -613,6 +651,16 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::FuncCall { name, args, line } => {
+                // A user function wins; otherwise a variable bound to a
+                // first-class library function (`TOOL`) is callable, so the
+                // Myanmar form `<name> ကို လုပ်ရန် <args> ဖြင့်။` works for
+                // either.
+                if !self.functions.contains_key(name) {
+                    if let Some(Value::Callable(kind)) = self.env.get(name).cloned() {
+                        self.invoke_callable(&kind, args, *line)?;
+                        return Ok(());
+                    }
+                }
                 self.call_function(name, args, *line)?;
                 Ok(())
             }
@@ -622,7 +670,16 @@ impl Interpreter {
                 args,
                 line,
             } => {
-                let result = self.call_function(fn_name, args, *line)?;
+                let result = if !self.functions.contains_key(fn_name) {
+                    match self.env.get(fn_name).cloned() {
+                        Some(Value::Callable(kind)) => {
+                            Some(self.invoke_callable(&kind, args, *line)?)
+                        }
+                        _ => self.call_function(fn_name, args, *line)?,
+                    }
+                } else {
+                    self.call_function(fn_name, args, *line)?
+                };
                 let value = result.ok_or_else(|| {
                     format!(
                         "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
@@ -1218,7 +1275,25 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
                 }
             }
-            _ => Err(lib_unknown_err(lib, line)),
+            // Not a built-in: a script/package imported with
+            // `နည်းပညာများ <name> ကို အသုံးပြုပါ။` registers its functions
+            // globally, so `<lib> ၏ <fn>` / `<lib>.<fn>` reaches the one
+            // that library defined. Functions defined outside that library
+            // aren't reachable through it.
+            _ => {
+                let owns_fn = self
+                    .lib_functions
+                    .get(lib)
+                    .map(|fns| fns.iter().any(|f| f == fn_name))
+                    .unwrap_or(false);
+                if owns_fn {
+                    return self.call_function(fn_name, args, line);
+                }
+                if self.lib_functions.contains_key(lib) {
+                    return Err(lib_fn_unknown_err(lib, fn_name, line));
+                }
+                Err(lib_unknown_err(lib, line))
+            }
         }
     }
 
@@ -1236,48 +1311,88 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         }
     }
 
-    /// Imports one library by name: built-ins are compiled straight into
-    /// the akk binary, anything else must be a package downloaded with
-    /// `akk install <name>` under the libraries/ folder. Its source is
-    /// plain Akkhara, so loading it just means running it -- that
-    /// registers its function/class definitions the same way any top-level
-    /// definition does.
+    /// Imports one library by name, in this order:
+    ///   1. built-ins (`ကျပန်း`, `အချိန်`, `request`) compiled into akk,
+    ///   2. a package downloaded with `akk install <name>`, and
+    ///   3. a plain `<name>.akk` script next to the running program.
+    /// Anything else is the "library not found" error (E062). A script or
+    /// package is plain Akkhara, so loading it just means running it --
+    /// that registers its function/class definitions the same way any
+    /// top-level definition does -- and the functions it defines are
+    /// remembered so `<lib> ၏ <fn>` reaches exactly those.
     fn import_library(&mut self, name: &str, line: usize) -> Result<(), String> {
+        if self.libraries.is_loaded(name) {
+            // Already brought in: running it again would re-run its
+            // top-level statements and re-register everything it defines.
+            return Ok(());
+        }
         if name == "ကျပန်း" || name == "အချိန်" || name == "request" {
             self.libraries.mark_loaded(name);
             return Ok(());
         }
-        match self.libraries.find_dynamic_source(name) {
-            Some(src) => {
-                let tokens = crate::lexer::lex(&src).map_err(|e| {
-                    format!(
-                        "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                        line, name, e
-                    )
-                })?;
-                let stmts = crate::parser::parse(&tokens).map_err(|e| {
-                    format!(
-                        "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
-                        line, name, e
-                    )
-                })?;
-                self.run(&stmts)?;
-                self.libraries.mark_loaded(name);
-                Ok(())
-            }
+        let src = self
+            .libraries
+            .find_dynamic_source(name)
+            .or_else(|| self.libraries.find_script_source(name));
+        match src {
+            Some(src) => self.run_library_source(name, &src, line),
             None => Err(format!(
-                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ။",
-                line, name, name
+                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ၊ သို့မဟုတ် program နှင့် တစ်ခုတည်းသော folder တွင် \"{}.akk\" ဖိုင်ကို ထားပါ။",
+                line, name, name, name
             )),
         }
     }
 
+    /// Lexes, parses and runs one script/package library's source, then
+    /// records the functions it defined. `begin_loading`/`end_loading`
+    /// turn an import cycle (a library that imports itself, directly or
+    /// through other scripts) into the E119 error instead of infinite
+    /// recursion; the library is only marked loaded once it succeeds.
+    fn run_library_source(&mut self, name: &str, src: &str, line: usize) -> Result<(), String> {
+        if !self.libraries.begin_loading(name) {
+            return Err(format!(
+                "E119 လိုင်း {} တွင် \"{}\" နည်းပညာများကို အပြန်အလှန် import လုပ်နေပါသည် (import cycle)။",
+                line, name
+            ));
+        }
+        let before: std::collections::HashSet<String> =
+            self.functions.keys().cloned().collect();
+        let result = (|| -> Result<(), String> {
+            let tokens = crate::lexer::lex(src).map_err(|e| {
+                format!(
+                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                    line, name, e
+                )
+            })?;
+            let stmts = crate::parser::parse(&tokens).map_err(|e| {
+                format!(
+                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                    line, name, e
+                )
+            })?;
+            self.run(&stmts)
+        })();
+        self.libraries.end_loading(name);
+        result?;
+        let defined: Vec<String> = self
+            .functions
+            .keys()
+            .filter(|k| !before.contains(*k))
+            .cloned()
+            .collect();
+        self.lib_functions.insert(name.to_string(), defined);
+        self.libraries.mark_loaded(name);
+        Ok(())
+    }
+
     /// Is `name` a library this binary knows about? Used to tell
     /// `<lib> အဖြစ် <alias>။` (a library alias) apart from the older
-    /// `<fn> အဖြစ် <alias>` function alias.
+    /// `<fn> အဖြစ် <alias>` function alias. A name counts when it's a
+    /// built-in, a downloaded package, or a plain `<name>.akk` script.
     fn is_known_library(&self, name: &str) -> bool {
         name == "request" || name == "ကျပန်း" || name == "အချိန်"
             || self.libraries.find_dynamic_source(name).is_some()
+            || self.libraries.find_script_source(name).is_some()
     }
 
     /// Rewrites a `<lib>` written in source through any registered alias,
@@ -1384,6 +1499,34 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.eval_lib_call(lib, fn_name, arg_exprs, *call_line)?
                     .ok_or_else(|| eng_lib_no_value_err(lib, fn_name, *call_line))
             }
+            Expr::LibFnRef(lib, fn_name, refline) => {
+                // `<lib>.<fn>` without a call is a first-class reference:
+                // its value binds the library function, so `TOOL = Tools.add;`
+                // then `TOOL(1, 100)` calls it. The library must be imported,
+                // and for a script/package library the function must be one
+                // it defines.
+                let resolved = self.resolve_lib(lib);
+                let lib = resolved.as_str();
+                if lib == LIB_REQUEST_NAME || lib == "ကျပန်း" || lib == "အချိန်" {
+                    self.require_library_loaded(lib, *refline)?;
+                } else {
+                    let owns_fn = self
+                        .lib_functions
+                        .get(lib)
+                        .map(|fns| fns.iter().any(|f| f == fn_name))
+                        .unwrap_or(false);
+                    if !owns_fn {
+                        if self.lib_functions.contains_key(lib) {
+                            return Err(lib_fn_unknown_err(lib, fn_name, *refline));
+                        }
+                        return Err(lib_unknown_err(lib, *refline));
+                    }
+                }
+                Ok(Value::Callable(Callable::Library {
+                    lib: lib.to_string(),
+                    fn_name: fn_name.clone(),
+                }))
+            }
             Expr::NewObj(class_name, arg_exprs, new_line) => {
                 // `name(args)` in an expression reaches here (the parser uses
                 // this node for any call-shaped `<name>(...)`): a user class
@@ -1397,6 +1540,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     }
                     if is_eng_builtin(class_name) {
                         return self.call_builtin(class_name, arg_exprs, *new_line);
+                    }
+                    // A variable holding a callable: `TOOL(1, 100)` invokes
+                    // the library function `TOOL` was bound to.
+                    if let Some(Value::Callable(kind)) = self.env.get(class_name).cloned() {
+                        return self.invoke_callable(&kind, arg_exprs, *new_line);
                     }
                 }
                 self.construct_object(class_name, arg_exprs, *new_line)
@@ -1667,7 +1815,26 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         if is_eng_builtin(name) {
             return Ok(Some(self.call_builtin(name, args, line)?));
         }
+        if let Some(Value::Callable(kind)) = self.env.get(name).cloned() {
+            return self.invoke_callable(&kind, args, line).map(Some);
+        }
         Err(eng_unknown_fn_err(line, name))
+    }
+
+    /// Invoke a first-class library function bound as a value (see
+    /// `Value::Callable`). Produced no value like any other library call --
+    /// e.g. `အချိန်`'s `စောင့်` -- is the E117 error.
+    fn invoke_callable(
+        &mut self,
+        kind: &Callable,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Value, String> {
+        match kind {
+            Callable::Library { lib, fn_name } => self
+                .eval_lib_call(lib, fn_name, args, line)?
+                .ok_or_else(|| eng_lib_no_value_err(lib, fn_name, line)),
+        }
     }
 
     /// Run one eng builtin: `len`, `abs`, `min`, `max`, `sqrt`, `floor`,
@@ -2187,6 +2354,12 @@ fn is_eng_builtin(name: &str) -> bool {
 /// float for a `:float` annotation (`pi :float = 3;` holds 3.0). Shared by
 /// every eng declaration form, loop-value declarations included.
 fn check_eng_value(name: &str, type_name: &str, v: Value, line: usize) -> Result<Value, String> {
+    // A callable (a library function bound to a name) may be declared under
+    // any type: the annotation describes the value the function returns,
+    // which is enforced when it is actually called.
+    if matches!(v, Value::Callable(_)) {
+        return Ok(v);
+    }
     // int accepts floats the way the rest of Akkhara does: int/float are one
     // numeric family.
     let type_ok = match type_name {
