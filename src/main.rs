@@ -147,10 +147,41 @@ fn main() {
     };
 
     let mut interp = interpreter::Interpreter::new(libraries_dir());
+    // Let this program import a neighboring `<name>.akk` script with
+    // `နည်းပညာများ <name> ကို အသုံးပြုပါ။`: search the program's own folder
+    // first, then the current working directory, before the libraries/
+    // folder next to the binary.
+    let script_dir = PathBuf::from(filename)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    interp.add_library_search_dir(script_dir);
+    if let Ok(cwd) = env::current_dir() {
+        interp.add_library_search_dir(cwd);
+    }
+    // Collect the program's output so it can be saved alongside the program
+    // (in addition to being shown on stdout).
+    interp.capture_output();
+
+    // Time the interpretation itself (not the lex/parse step) and report it
+    // once the program has finished successfully.
+    let started = std::time::Instant::now();
     if let Err(e) = interp.run(&stmts) {
         eprintln!("{}", e);
         process::exit(1);
     }
+    let elapsed = started.elapsed().as_secs_f64();
+
+    // Save the output next to the program as `<file_name>.akop`.
+    if let Some(log) = interp.take_output() {
+        let out_path = PathBuf::from(filename).with_extension("akop");
+        if let Err(e) = fs::write(&out_path, log) {
+            eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), e);
+        }
+    }
+
+    println!("Interpreted in {:.3}s", elapsed);
 }
 
 /// `akk --check` -- looks up the latest GitHub release tag and compares it
