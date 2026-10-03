@@ -1,6 +1,6 @@
 [package]
 name = "akkhara"
-version = "0.3.12"
+version = "0.3.13"
 edition = "2021"
 
 [[bin]]
@@ -12,6 +12,38 @@ rand = "0.8"
 ureq = { version = "2.9", default-features = false, features = ["native-tls", "gzip"] }
 native-tls = { version = "0.2", features = ["vendored"] }
 crossterm = "0.27"
+
+# The App GUI library (libraries/App/main.rs). eframe's glow (OpenGL)
+# renderer is used instead of the default wgpu one: a smaller dependency
+# tree that works on older GPUs. `default_fonts` gives the Latin UI its
+# baseline font, on top of which a system Myanmar font is loaded at
+# runtime.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+
+# App runs its GUI event loop on a background thread (the interpreter thread
+# stays inside App.run), and winit only allows that when it is asked
+# explicitly -- see the event-loop hook in libraries/App/main.rs. The
+# version must stay compatible with the one eframe builds against, or the
+# EventLoopBuilder types would not match.
+winit = "0.30"
+
+# Native file-open dialog for App.pick_file().
+rfd = "0.17"
+
+# App.image() decoding, limited to the formats an App program is likely to
+# point at.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "bmp",
+    "gif",
+    "webp",
+] }
 
 [profile.release]
 opt-level = 3
