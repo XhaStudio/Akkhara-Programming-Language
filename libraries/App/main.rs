@@ -1760,10 +1760,12 @@ fn event_loop_hook(builder: &mut eframe::EventLoopBuilder<eframe::UserEvent>) {
         target_os = "openbsd"
     ))]
     {
-        use winit::platform::wayland::EventLoopBuilderExtWayland as _;
-        builder.with_any_thread(true);
-        use winit::platform::x11::EventLoopBuilderExtX11 as _;
-        builder.with_any_thread(true);
+        // On Linux both `EventLoopBuilderExtWayland` and
+        // `EventLoopBuilderExtX11` are in scope at once, so a plain
+        // `builder.with_any_thread(true)` is ambiguous (E0034). Either
+        // trait sets the same winit flag, and the trait method is named
+        // explicitly here to pick one without importing both.
+        winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(builder, true);
     }
     #[cfg(not(any(
         target_os = "windows",
