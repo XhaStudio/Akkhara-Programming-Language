@@ -281,8 +281,8 @@ fn app_func_name(v: &Value, fn_name: &str, line: usize) -> Result<String, String
     }
 }
 
-/// A `choice` item list: a list/tuple/set of values (each shown as text), or
-/// a single string used as the only item.
+/// A `choice` / `listbox` item list: a list/tuple/set of values (each shown
+/// as text), or a single string used as the only item.
 fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, String> {
     match v {
         Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
@@ -295,6 +295,75 @@ fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, Strin
             "ရွေးစရာ item များ ပါသော list တစ်ခု",
         )),
     }
+}
+
+/// A `table` row list: a list whose elements are rows. Each row is either a
+/// list of cells or a single scalar (a one-cell row).
+fn app_rows(v: &Value, fn_name: &str, line: usize) -> Result<Vec<Vec<String>>, String> {
+    match v {
+        Value::List(items) | Value::Tuple(items) | Value::Set(items) => Ok(items
+            .iter()
+            .map(|row| match row {
+                Value::List(cells) | Value::Tuple(cells) | Value::Set(cells) => {
+                    cells.iter().map(display).collect()
+                }
+                other => vec![display(other)],
+            })
+            .collect()),
+        Value::Str(s) => Ok(vec![vec![s.clone()]]),
+        _ => Err(app_want_text_err(
+            fn_name,
+            line,
+            "အတန်းများ ပါသော list တစ်ခု (အတန်းတစ်ခုစီသည် cell စာသားများ၏ list)",
+        )),
+    }
+}
+
+/// The value of `App.set_items`: a list of items, or a list of rows (each a
+/// list of cells). A single string becomes a one-item list.
+fn app_items_value(
+    v: &Value,
+    fn_name: &str,
+    line: usize,
+) -> Result<crate::app_library::AppValue, String> {
+    match v {
+        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+            if items
+                .iter()
+                .any(|e| matches!(e, Value::List(_) | Value::Tuple(_) | Value::Set(_)))
+            {
+                Ok(crate::app_library::AppValue::Rows(app_rows(
+                    v, fn_name, line,
+                )?))
+            } else {
+                Ok(crate::app_library::AppValue::Items(
+                    items.iter().map(display).collect(),
+                ))
+            }
+        }
+        Value::Str(s) => Ok(crate::app_library::AppValue::Items(vec![s.clone()])),
+        _ => Err(app_want_text_err(
+            fn_name,
+            line,
+            "item များ (သို့) အတန်းများ ပါသော list တစ်ခု",
+        )),
+    }
+}
+
+/// A row/column index for `App.cell` / `App.set_cell`: a non-negative whole
+/// number.
+fn app_index(v: &Value, fn_name: &str, line: usize) -> Result<usize, String> {
+    let index = match v {
+        Value::Int(i) => Some(*i),
+        Value::Float(f) if f.fract() == 0.0 => Some(*f as i64),
+        _ => None,
+    };
+    index.filter(|i| *i >= 0).map(|i| i as usize).ok_or_else(|| {
+        format!(
+            "E090 လိုင်း {} တွင် \"App.{}\" ၏ row/column သည် 0 နှင့်အထက် ကိန်းပြည့် ဖြစ်ရပါသည်။",
+            line, fn_name
+        )
+    })
 }
 
 /// A value handed to `App.set`: numbers and booleans keep their type (a
@@ -314,6 +383,14 @@ fn app_value_to(v: crate::app_library::AppValue) -> Value {
         crate::app_library::AppValue::Int(i) => Value::Int(i),
         crate::app_library::AppValue::Float(f) => Value::Float(f),
         crate::app_library::AppValue::Bool(b) => Value::Bool(b),
+        crate::app_library::AppValue::Items(items) => {
+            Value::List(items.into_iter().map(Value::Str).collect())
+        }
+        crate::app_library::AppValue::Rows(rows) => Value::List(
+            rows.into_iter()
+                .map(|r| Value::List(r.into_iter().map(Value::Str).collect()))
+                .collect(),
+        ),
     }
 }
 
@@ -1640,6 +1717,38 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     .map_err(|e| app_err(e, line))?;
                 Ok(Some(app_widget_handle(id, "choice")))
             }
+            "listbox" => {
+                app_argc(fn_name, count, 6, 6, line)?;
+                let win = handle(0)?;
+                let items = app_items(&vals[1], fn_name, line)?;
+                let id = crate::app_library::listbox(
+                    win,
+                    items,
+                    num(2)?,
+                    num(3)?,
+                    num(4)?,
+                    num(5)?,
+                )
+                .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "listbox")))
+            }
+            "table" => {
+                app_argc(fn_name, count, 7, 7, line)?;
+                let win = handle(0)?;
+                let headers = app_items(&vals[1], fn_name, line)?;
+                let rows = app_rows(&vals[2], fn_name, line)?;
+                let id = crate::app_library::table(
+                    win,
+                    headers,
+                    rows,
+                    num(3)?,
+                    num(4)?,
+                    num(5)?,
+                    num(6)?,
+                )
+                .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "table")))
+            }
             "image" => {
                 app_argc(fn_name, count, 4, 4, line)?;
                 let win = handle(0)?;
@@ -1672,6 +1781,43 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 crate::app_library::set(widget, value).map_err(|e| app_err(e, line))?;
                 Ok(None)
             }
+            // `App.items(w)` / `App.set_items(w, list)`: the item list of a
+            // choice/listbox, or the rows of a table.
+            "items" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let widget = handle(0)?;
+                let value =
+                    crate::app_library::items(widget).map_err(|e| app_err(e, line))?;
+                Ok(Some(app_value_to(value)))
+            }
+            "set_items" => {
+                app_argc(fn_name, count, 2, 2, line)?;
+                let widget = handle(0)?;
+                let value = app_items_value(&vals[1], fn_name, line)?;
+                crate::app_library::set_items(widget, value).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            // `App.cell(t, row, col)` / `App.set_cell(t, row, col, v)`:
+            // one table cell read or written by position.
+            "cell" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let widget = handle(0)?;
+                let row = app_index(&vals[1], fn_name, line)?;
+                let column = app_index(&vals[2], fn_name, line)?;
+                let value = crate::app_library::cell(widget, row, column)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_value_to(value)))
+            }
+            "set_cell" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let widget = handle(0)?;
+                let row = app_index(&vals[1], fn_name, line)?;
+                let column = app_index(&vals[2], fn_name, line)?;
+                let value = app_value_from(&vals[3]);
+                crate::app_library::set_cell(widget, row, column, &value)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
             // `App.number(widget)` / `App.number("12.5")`: the value of a
             // widget -- or a piece of text -- read as a number, so a text
             // box can be used in arithmetic (`x :float = App.number(box);`).
@@ -1688,7 +1834,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             crate::app_library::AppValue::Float(f) => {
                                 return Ok(Some(Value::Float(f)))
                             }
-                            crate::app_library::AppValue::Bool(_) => {
+                            crate::app_library::AppValue::Bool(_)
+                            | crate::app_library::AppValue::Items(_)
+                            | crate::app_library::AppValue::Rows(_) => {
                                 return Err(app_want_text_err(
                                     fn_name,
                                     line,
