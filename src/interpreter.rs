@@ -179,6 +179,186 @@ fn http_response_to_value(r: crate::request_library::HttpResponse) -> Value {
     )
 }
 
+// --- "App" GUI library handles ---
+//
+// Every `App` window/widget function returns a plain Value::Object tagged
+// "App-window" or "App-widget", so a handle behaves like any other value:
+// it can be stored in a variable, passed back into `App.*`, and read with
+// the generic `<expr> ၏ <field>` syntax (`w ၏ id`). Only the numeric id
+// crosses into the GUI library, which owns the real window and widget
+// objects.
+const LIB_APP_NAME: &str = "App";
+const APP_WINDOW_CLASS: &str = "App-window";
+const APP_WIDGET_CLASS: &str = "App-widget";
+
+fn app_window_handle(id: u64) -> Value {
+    Value::Object(
+        APP_WINDOW_CLASS.to_string(),
+        vec![
+            ("id".to_string(), Value::Int(id as i64)),
+            ("class".to_string(), Value::Str("window".to_string())),
+        ],
+    )
+}
+
+fn app_widget_handle(id: u64, kind: &str) -> Value {
+    Value::Object(
+        APP_WIDGET_CLASS.to_string(),
+        vec![
+            ("id".to_string(), Value::Int(id as i64)),
+            ("class".to_string(), Value::Str("widget".to_string())),
+            ("kind".to_string(), Value::Str(kind.to_string())),
+        ],
+    )
+}
+
+/// Pulls the id out of an App handle, with `E120` when the value is not one
+/// (`App.get(42)`, `App.move("x", 0, 0)`, ...).
+fn app_handle_id(v: &Value, fn_name: &str, line: usize) -> Result<u64, String> {
+    if let Value::Object(class, fields) = v {
+        if class == APP_WINDOW_CLASS || class == APP_WIDGET_CLASS {
+            if let Some(Value::Int(id)) = fields.iter().find(|(k, _)| k == "id").map(|(_, v)| v) {
+                if *id > 0 {
+                    return Ok(*id as u64);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "E120 လိုင်း {} တွင် \"App.{}\" သည် App handle တစ်ခု လိုအပ်ပါသည်၊ {} ရရှိပါသည်။",
+        line,
+        fn_name,
+        type_name_mm(v)
+    ))
+}
+
+/// `App.<fn>`'s argument-count check. A few widget functions accept an
+/// optional trailing argument (`button`'s callback, `color`'s background),
+/// so a range is allowed as well as an exact count.
+fn app_argc(fn_name: &str, got: usize, min: usize, max: usize, line: usize) -> Result<(), String> {
+    if (min..=max).contains(&got) {
+        return Ok(());
+    }
+    if min == max {
+        Err(format!(
+            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            line, fn_name, min, got
+        ))
+    } else {
+        Err(format!(
+            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" function သည် argument {} မှ {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            line, fn_name, min, max, got
+        ))
+    }
+}
+
+fn app_want_text_err(fn_name: &str, line: usize, want: &str) -> String {
+    format!(
+        "E126 လိုင်း {} တွင် \"App.{}\" ၏ argument သည် {} ဖြစ်ရပါသည်။",
+        line, fn_name, want
+    )
+}
+
+/// A coordinate / size / duration argument: any number.
+fn app_num(v: &Value, fn_name: &str, line: usize) -> Result<f32, String> {
+    as_f64(v).map(|f| f as f32).ok_or_else(|| {
+        format!(
+            "E090 လိုင်း {} တွင် \"App.{}\" ၏ argument များသည် ကိန်းဂဏန်း ဖြစ်ရပါသည်။",
+            line, fn_name
+        )
+    })
+}
+
+/// A callback-name argument: must be text (`"on_save"`), not a bare name.
+fn app_func_name(v: &Value, fn_name: &str, line: usize) -> Result<String, String> {
+    match v {
+        Value::Str(s) if !s.trim().is_empty() => Ok(s.clone()),
+        _ => Err(app_want_text_err(
+            fn_name,
+            line,
+            "callback function နာမည် စာသား (ဥပမာ \"on_save\")",
+        )),
+    }
+}
+
+/// A `choice` item list: a list/tuple/set of values (each shown as text), or
+/// a single string used as the only item.
+fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, String> {
+    match v {
+        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+            Ok(items.iter().map(display).collect())
+        }
+        Value::Str(s) => Ok(vec![s.clone()]),
+        _ => Err(app_want_text_err(
+            fn_name,
+            line,
+            "ရွေးစရာ item များ ပါသော list တစ်ခု",
+        )),
+    }
+}
+
+/// A value handed to `App.set`: numbers and booleans keep their type (a
+/// checkbox needs a boolean), everything else becomes text.
+fn app_value_from(v: &Value) -> crate::app_library::AppValue {
+    match v {
+        Value::Int(i) => crate::app_library::AppValue::Int(*i),
+        Value::Float(f) => crate::app_library::AppValue::Float(*f),
+        Value::Bool(b) => crate::app_library::AppValue::Bool(*b),
+        other => crate::app_library::AppValue::Text(display(other)),
+    }
+}
+
+fn app_value_to(v: crate::app_library::AppValue) -> Value {
+    match v {
+        crate::app_library::AppValue::Text(s) => Value::Str(s),
+        crate::app_library::AppValue::Int(i) => Value::Int(i),
+        crate::app_library::AppValue::Float(f) => Value::Float(f),
+        crate::app_library::AppValue::Bool(b) => Value::Bool(b),
+    }
+}
+
+/// Appends the source line to a library error, which reports only its own
+/// `E1xx` code (the same treatment the `request` library gets).
+fn app_err(e: String, line: usize) -> String {
+    format!("{} (လိုင်း {})", e, line)
+}
+
+/// Text -> number for `App.number`, in the language's own number model:
+/// an integer-looking text becomes `ကိန်းပြည့်`, anything else with a
+/// decimal point / exponent becomes `ဒဿမကိန်း`. Myanmar digits count (a box
+/// holding `၅` is five), and an empty box counts as 0. `None` means the
+/// text isn't a number at all (`E128`).
+fn app_parse_number(text: &str) -> Option<Value> {
+    let ascii: String = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '၀' => '0',
+            '၁' => '1',
+            '၂' => '2',
+            '၃' => '3',
+            '၄' => '4',
+            '၅' => '5',
+            '၆' => '6',
+            '၇' => '7',
+            '၈' => '8',
+            '၉' => '9',
+            other => other,
+        })
+        .collect();
+
+    if ascii.is_empty() {
+        return Some(Value::Int(0));
+    }
+    if let Ok(i) = ascii.parse::<i64>() {
+        return Some(Value::Int(i));
+    }
+    if let Ok(f) = ascii.parse::<f64>() {
+        return Some(Value::Float(f));
+    }
+    None
+}
+
 // --- Errors for the `<lib> ၏ <fn>(...) ကို လုပ်ပါ။` library-call syntax. ---
 
 fn lib_unknown_err(lib: &str, line: usize) -> String {
@@ -1309,6 +1489,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
                 }
             }
+            "App" => {
+                self.require_library_loaded(LIB_APP_NAME, line)?;
+                self.eval_app_call(fn_name, args, line)
+            }
             // Not a built-in: a script/package imported with
             // `နည်းပညာများ <name> ကို အသုံးပြုပါ။` registers its functions
             // globally, so `<lib> ၏ <fn>` / `<lib>.<fn>` reaches the one
@@ -1328,6 +1512,329 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
                 Err(lib_unknown_err(lib, line))
             }
+        }
+    }
+
+    /// Call one of the `App` GUI library's functions
+    /// (`Stmt::LibCall` / `Stmt::LibCallAssign` / `Expr::LibCall`).
+    ///
+    /// Everything the GUI needs is a plain value here: handles are objects
+    /// carrying an id, callbacks are function *names* as text, and the
+    /// windows/widgets themselves live in the library's own model. `run`
+    /// blocks until its window closes, and every callback the GUI sends is
+    /// dispatched back into `call_function` by name.
+    fn eval_app_call(
+        &mut self,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for arg in args {
+            vals.push(self.eval(arg, line, None)?);
+        }
+        let count = vals.len();
+        let num = |i: usize| app_num(&vals[i], fn_name, line);
+        let handle = |i: usize| app_handle_id(&vals[i], fn_name, line);
+        let text = |i: usize| display(&vals[i]);
+
+        match fn_name {
+            // ----- window -----
+            "screen" => {
+                app_argc(fn_name, count, 2, 2, line)?;
+                Ok(Some(app_window_handle(crate::app_library::screen(
+                    num(0)?,
+                    num(1)?,
+                ))))
+            }
+            "title" => {
+                app_argc(fn_name, count, 2, 2, line)?;
+                let win = handle(0)?;
+                crate::app_library::title(win, &text(1)).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "run" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let win = handle(0)?;
+                // The callback the GUI hands back is a function name; the
+                // interpreter is the only side that can call it.
+                let mut on_callback = |name: &str| -> Result<(), String> {
+                    if !self.functions.contains_key(name) {
+                        return Err(app_err(
+                            crate::app_library::err_missing_callback(name),
+                            line,
+                        ));
+                    }
+                    self.call_function(name, &[], line).map(|_| ())
+                };
+                crate::app_library::run(win, &mut on_callback).map_err(|e| {
+                    // Errors out of a callback already carry their own line.
+                    if e.contains("လိုင်း ") {
+                        e
+                    } else {
+                        app_err(e, line)
+                    }
+                })?;
+                Ok(None)
+            }
+            "close" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let win = handle(0)?;
+                crate::app_library::close(win).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+
+            // ----- widgets -----
+            "label" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let win = handle(0)?;
+                let id = crate::app_library::label(win, &text(1), num(2)?, num(3)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "label")))
+            }
+            "button" => {
+                app_argc(fn_name, count, 4, 5, line)?;
+                let win = handle(0)?;
+                let callback = if count >= 5 {
+                    Some(app_func_name(&vals[4], fn_name, line)?)
+                } else {
+                    None
+                };
+                let id = crate::app_library::button(
+                    win,
+                    &text(1),
+                    num(2)?,
+                    num(3)?,
+                    callback.as_deref(),
+                )
+                .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "button")))
+            }
+            "input" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let win = handle(0)?;
+                let id = crate::app_library::input(win, num(1)?, num(2)?, num(3)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "input")))
+            }
+            "textarea" => {
+                app_argc(fn_name, count, 5, 5, line)?;
+                let win = handle(0)?;
+                let id =
+                    crate::app_library::textarea(win, num(1)?, num(2)?, num(3)?, num(4)?)
+                        .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "textarea")))
+            }
+            "checkbox" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let win = handle(0)?;
+                let id = crate::app_library::checkbox(win, &text(1), num(2)?, num(3)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "checkbox")))
+            }
+            "choice" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let win = handle(0)?;
+                let items = app_items(&vals[1], fn_name, line)?;
+                let id = crate::app_library::choice(win, items, num(2)?, num(3)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "choice")))
+            }
+            "image" => {
+                app_argc(fn_name, count, 4, 4, line)?;
+                let win = handle(0)?;
+                let path = app_func_name(&vals[1], fn_name, line)
+                    .map_err(|_| app_want_text_err(fn_name, line, "ပုံဖိုင် လမ်းကြောင်း စာသား"))?;
+                let id = crate::app_library::image(win, &path, num(2)?, num(3)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "image")))
+            }
+            "canvas" => {
+                app_argc(fn_name, count, 5, 5, line)?;
+                let win = handle(0)?;
+                let id =
+                    crate::app_library::canvas(win, num(1)?, num(2)?, num(3)?, num(4)?)
+                        .map_err(|e| app_err(e, line))?;
+                Ok(Some(app_widget_handle(id, "canvas")))
+            }
+
+            // ----- values, geometry, style -----
+            "get" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let widget = handle(0)?;
+                let value = crate::app_library::get(widget).map_err(|e| app_err(e, line))?;
+                Ok(Some(app_value_to(value)))
+            }
+            "set" => {
+                app_argc(fn_name, count, 2, 2, line)?;
+                let widget = handle(0)?;
+                let value = app_value_from(&vals[1]);
+                crate::app_library::set(widget, value).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            // `App.number(widget)` / `App.number("12.5")`: the value of a
+            // widget -- or a piece of text -- read as a number, so a text
+            // box can be used in arithmetic (`x :float = App.number(box);`).
+            "number" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let text = match &vals[0] {
+                    Value::Object(..) => {
+                        let widget = handle(0)?;
+                        let value =
+                            crate::app_library::get(widget).map_err(|e| app_err(e, line))?;
+                        match value {
+                            crate::app_library::AppValue::Text(s) => s,
+                            crate::app_library::AppValue::Int(i) => return Ok(Some(Value::Int(i))),
+                            crate::app_library::AppValue::Float(f) => {
+                                return Ok(Some(Value::Float(f)))
+                            }
+                            crate::app_library::AppValue::Bool(_) => {
+                                return Err(app_want_text_err(
+                                    fn_name,
+                                    line,
+                                    "စာသား (text) သို့မဟုတ် ကိန်းဂဏန်း",
+                                ))
+                            }
+                        }
+                    }
+                    other => display(other),
+                };
+                match app_parse_number(&text) {
+                    Some(v) => Ok(Some(v)),
+                    None => Err(app_err(crate::app_library::err_not_a_number(&text), line)),
+                }
+            }
+            "move" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let widget = handle(0)?;
+                crate::app_library::move_to(widget, num(1)?, num(2)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "size" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let widget = handle(0)?;
+                crate::app_library::resize(widget, num(1)?, num(2)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "color" => {
+                app_argc(fn_name, count, 2, 3, line)?;
+                let widget = handle(0)?;
+                let fg = if !matches!(vals[1], Value::Str(_)) {
+                    return Err(app_want_text_err(fn_name, line, "အရောင်စာသား"));
+                } else {
+                    display(&vals[1])
+                };
+                let bg = if count >= 3 {
+                    Some(display(&vals[2]))
+                } else {
+                    None
+                };
+                crate::app_library::color(widget, Some(&fg), bg.as_deref())
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "font" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let widget = handle(0)?;
+                let name = app_func_name(&vals[1], fn_name, line)?;
+                crate::app_library::font(widget, &name, num(2)?)
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "show" | "hide" | "enable" | "disable" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let widget = handle(0)?;
+                let result = match fn_name {
+                    "show" => crate::app_library::show(widget),
+                    "hide" => crate::app_library::hide(widget),
+                    "enable" => crate::app_library::enable(widget),
+                    _ => crate::app_library::disable(widget),
+                };
+                result.map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+
+            // ----- events -----
+            "on_key" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let win = handle(0)?;
+                let key = app_func_name(&vals[1], fn_name, line)?;
+                let func = app_func_name(&vals[2], fn_name, line)?;
+                crate::app_library::on_key(win, &key, &func).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "every" => {
+                app_argc(fn_name, count, 3, 3, line)?;
+                let win = handle(0)?;
+                let ms = as_i64(&vals[1])
+                    .filter(|ms| *ms > 0)
+                    .ok_or_else(|| app_want_text_err(fn_name, line, "1 နှင့်အထက် မီလီစက္ကန့် ကိန်းပြည့်"))?;
+                let func = app_func_name(&vals[2], fn_name, line)?;
+                crate::app_library::every(win, ms as u64, &func).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+
+            // ----- dialogs -----
+            "message" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                crate::app_library::message(&text(0));
+                Ok(None)
+            }
+            "ask" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                Ok(Some(Value::Bool(crate::app_library::ask(&text(0)))))
+            }
+            "pick_file" => {
+                app_argc(fn_name, count, 0, 0, line)?;
+                Ok(Some(Value::Str(crate::app_library::pick_file())))
+            }
+
+            // ----- canvas drawing -----
+            "rect" => {
+                app_argc(fn_name, count, 6, 6, line)?;
+                let cv = handle(0)?;
+                crate::app_library::rect(cv, num(1)?, num(2)?, num(3)?, num(4)?, &display(&vals[5]))
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "circle" => {
+                app_argc(fn_name, count, 5, 5, line)?;
+                let cv = handle(0)?;
+                crate::app_library::circle(cv, num(1)?, num(2)?, num(3)?, &display(&vals[4]))
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "line" => {
+                app_argc(fn_name, count, 6, 6, line)?;
+                let cv = handle(0)?;
+                crate::app_library::line(
+                    cv,
+                    num(1)?,
+                    num(2)?,
+                    num(3)?,
+                    num(4)?,
+                    &display(&vals[5]),
+                )
+                .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "text" => {
+                app_argc(fn_name, count, 5, 5, line)?;
+                let cv = handle(0)?;
+                crate::app_library::text(cv, num(1)?, num(2)?, &text(3), &display(&vals[4]))
+                    .map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+            "clear" => {
+                app_argc(fn_name, count, 1, 1, line)?;
+                let cv = handle(0)?;
+                crate::app_library::clear(cv).map_err(|e| app_err(e, line))?;
+                Ok(None)
+            }
+
+            _ => Err(lib_fn_unknown_err(LIB_APP_NAME, fn_name, line)),
         }
     }
 
@@ -1360,7 +1867,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             // top-level statements and re-register everything it defines.
             return Ok(());
         }
-        if name == "ကျပန်း" || name == "အချိန်" || name == "request" {
+        if name == "ကျပန်း" || name == "အချိန်" || name == "request" || name == LIB_APP_NAME {
             self.libraries.mark_loaded(name);
             return Ok(());
         }
@@ -1424,7 +1931,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// `<fn> အဖြစ် <alias>` function alias. A name counts when it's a
     /// built-in, a downloaded package, or a plain `<name>.akk` script.
     fn is_known_library(&self, name: &str) -> bool {
-        name == "request" || name == "ကျပန်း" || name == "အချိန်"
+        name == "request" || name == "ကျပန်း" || name == "အချိန်" || name == LIB_APP_NAME
             || self.libraries.find_dynamic_source(name).is_some()
             || self.libraries.find_script_source(name).is_some()
     }
