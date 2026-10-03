@@ -60,7 +60,8 @@ App ၏ run(w) ကို လုပ်ပါ။
 
 ## Widgets
 
-Every widget call takes the window handle and its `x`, `y` position.
+Every widget call takes the window handle, its `x`, `y` position, and a
+size where the widget needs one.
 
 | Call | Meaning |
 |---|---|
@@ -70,6 +71,8 @@ Every widget call takes the window handle and its `x`, `y` position.
 | `notes = App.textarea(w, 20, 140, 300, 100)` | multi-line text box, 300 × 100 |
 | `c = App.checkbox(w, "Remember me", 20, 250)` | tick box with a caption |
 | `d = App.choice(w, ["Red", "Green", "Blue"], 20, 280)` | dropdown built from a list |
+| `li = App.listbox(w, ["Mon", "Tue"], 20, 20, 160, 100)` | scrolled list of rows; click a row to select it, scroll with the wheel |
+| `tb = App.table(w, ["Name", "Age"], [["Aung", 30], ["Su", 25]], 200, 20, 220, 140)` | grid of cells; an empty `headers` list leaves the header row off; click a row to select it |
 | `pic = App.image(w, "logo.png", 200, 20)` | picture; png, jpeg, bmp, gif and webp. The file's size becomes the widget's size unless `App.size` changes it |
 | `cv = App.canvas(w, 0, 0, 400, 300)` | blank drawing area for `rect`/`circle`/`line`/`text` |
 
@@ -83,9 +86,14 @@ box အတွက် App ၏ input(w, 20, 100, 200) ကို လုပ်ပါ�
 
 | Call | Meaning |
 |---|---|
-| `v = App.get(widget)` | current value: input/textarea text, a checkbox's `True`/`False`, the item a choice has selected (`""` when nothing is), or a label/button's caption / an image's path. A canvas has no single value (`E122`) |
-| `App.set(widget, value)` | change it. Text widgets take anything (numbers and booleans are written as text), a checkbox wants `True`/`False`, and a choice wants one of its own items |
+| `v = App.get(widget)` | current value: input/textarea text, a checkbox's `True`/`False`, the item a `choice`/`listbox` has selected (`""` when nothing is), or a label/button's caption / an image's path. A canvas has no single value (`E122`) |
+| `App.set(widget, value)` | change it. Text widgets take anything (numbers and booleans are written as text), a checkbox wants `True`/`False`, and a `choice`/`listbox` wants one of its own items |
 | `n = App.number(widget)` | the same value read as a number, so a text box can be used in arithmetic. Also takes a piece of text: `App.number("12.5")` |
+| `App.get(li)` / `App.set(li, "Tue")` | a listbox's selected item, like a choice (`""` clears the selection) |
+| `App.get(tb)` / `App.set(tb, 1)` | a table's selected row: `get` hands back its cells as a list (`[]` when nothing is selected), `set` takes a row number (`-1` clears the selection) |
+| `list = App.items(w)` | every item of a `choice`/`listbox`, or every row of a `table` (each row a list of its cells) |
+| `App.set_items(w, list)` | replace those items/rows; a flat list given to a table means one-cell rows |
+| `App.cell(tb, 1, 0)` / `App.set_cell(tb, 1, 1, 26)` | read or change one table cell (numbers and booleans are written as text) |
 
 ```
 App ၏ set(box, "Hello") ကို လုပ်ပါ။
@@ -108,6 +116,32 @@ point as `ဒဿမ` (Myanmar digits count, so a box holding `၅` is five). An 
 box — or empty text — counts as `0`; anything else that isn't a number (say
 `"twelve"`) raises `E128`, and a checkbox's `True`/`False` is `E126`: read it
 with `App.get` instead.
+
+### Lists and tables
+
+`App.listbox` and `App.table` are the two widgets that hold rows of items.
+Both scroll with the mouse wheel while the pointer is over them, and both
+highlight the row the user clicks. A table draws its columns at equal widths.
+
+```
+li = App.listbox(w, ["Mon", "Tue", "Wed"], 20, 20, 160, 100)
+App.set(li, "Tue")            # select an item
+print(App.get(li))            # Tue
+App.set_items(li, ["A", "B"])  # replace the items
+print(App.items(li))          # ["A", "B"]
+
+tb = App.table(w, ["Name", "Age"], [["Aung", 30], ["Su", 25]], 200, 20, 220, 140)
+App.set(tb, 1)                # select row 1
+row = App.get(tb)             # ["Su", "25"]
+print(row[0])                 # Su
+print(App.cell(tb, 1, 1))     # 25
+App.set_cell(tb, 1, 1, 26)    # change one cell
+```
+
+A selection survives `App.set_items` only while the same item (or the same
+row number) still exists; otherwise it is cleared. `App.set(li, "")` and
+`App.set(tb, -1)` clear a selection directly. An empty `headers` list leaves
+the header row off, and a row number or cell outside the table is `E122`.
 
 ## Geometry and style
 
@@ -225,14 +259,14 @@ on a canvas.
 | `E086` | no such function in the `App` library |
 | `E087` | wrong number of arguments |
 | `E089` | `App` was used without `နည်းပညာများ App ကို အသုံးပြုပါ။` |
-| `E090` | a coordinate, size or interval argument wasn't a number |
+| `E090` | a coordinate, size, row/column index or interval argument wasn't a number |
 | `E120` | a window/widget handle was expected, something else was given |
 | `E121` | the handle has no window or widget behind it |
-| `E122` | the widget kind doesn't support that: `get`/`set` on a canvas, `set` a choice to an item it doesn't have, `rect`/`circle`/... on a non-canvas, an unreadable image file, an empty `choice` list |
+| `E122` | the widget kind doesn't support that: `get`/`set` on a canvas, `items` on a label, `set` a choice/listbox to an item it doesn't have, `cell`/`set_cell` on a non-table, a row/cell that doesn't exist, `rect`/`circle`/... on a non-canvas, an unreadable image file, an empty `choice` list |
 | `E123` | `App.run` couldn't start the event loop, or a second `App.run` was started while one was still running |
 | `E124` | an unknown key name for `on_key`, or an interval below 1 ms for `every` |
 | `E125` | an unknown colour name or a malformed hex colour |
-| `E126` | a text argument was expected (a callback name, a colour string, `App.number` on a checkbox, ...) |
+| `E126` | a text argument was expected (a callback name, a colour string, `App.number` on a checkbox, `App.set_items` with something that isn't a list, ...) |
 | `E127` | a callback fired but no function with that name exists |
 | `E128` | `App.number` was given text that isn't a number |
 
