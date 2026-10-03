@@ -61,6 +61,10 @@ pub enum AppValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A `choice` / `listbox` item list, or one `table` row.
+    Items(Vec<String>),
+    /// A `table`'s rows, each a list of cells.
+    Rows(Vec<Vec<String>>),
 }
 
 impl AppValue {
@@ -78,6 +82,14 @@ impl AppValue {
                 }
             }
             AppValue::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+            AppValue::Items(items) => format!("[{}]", items.join(", ")),
+            AppValue::Rows(rows) => format!(
+                "[{}]",
+                rows.iter()
+                    .map(|r| format!("[{}]", r.join(", ")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -256,6 +268,11 @@ const DEFAULT_BUTTON_BG: Color32 = Color32::from_rgb(0xE0, 0xE0, 0xE0);
 const DISABLED_BG: Color32 = Color32::from_rgb(0xEC, 0xEC, 0xEC);
 const DISABLED_TEXT: Color32 = Color32::from_rgb(0x9E, 0x9E, 0x9E);
 const BORDER: Color32 = Color32::from_rgb(0x8C, 0x8C, 0x8C);
+/// List/table row highlight, row hover, a table's header band and its grid.
+const SELECTED_BG: Color32 = Color32::from_rgb(0xCC, 0xE0, 0xFF);
+const HOVER_BG: Color32 = Color32::from_rgb(0xEE, 0xF3, 0xFA);
+const HEADER_BG: Color32 = Color32::from_rgb(0xE4, 0xE8, 0xEF);
+const GRID_LINE: Color32 = Color32::from_rgb(0xD0, 0xD4, 0xDA);
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 
@@ -272,6 +289,8 @@ pub enum Kind {
     Textarea,
     Checkbox,
     Choice,
+    Listbox,
+    Table,
     Image,
     Canvas,
 }
@@ -286,6 +305,8 @@ impl Kind {
             Kind::Textarea => "textarea",
             Kind::Checkbox => "checkbox",
             Kind::Choice => "choice",
+            Kind::Listbox => "listbox",
+            Kind::Table => "table",
             Kind::Image => "image",
             Kind::Canvas => "canvas",
         }
@@ -321,9 +342,15 @@ struct Widget {
     /// Label/button caption, image path, or the text of a canvas `text()`.
     text: String,
     value: WidgetValue,
-    /// `choice` items, in the order they were given.
+    /// `choice` / `listbox` items, in the order they were given.
     items: Vec<String>,
+    /// A `table`'s headings (empty means no header row) and row data.
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    /// The item/row highlighted in a `choice`, `listbox` or `table`.
     selected: Option<usize>,
+    /// How far a `listbox`/`table` is scrolled down, in pixels.
+    scroll: f32,
     fg: Option<Color>,
     bg: Option<Color>,
     /// A font name requested with `App.font`, resolved against the loaded
@@ -351,7 +378,10 @@ impl Widget {
             text: String::new(),
             value: WidgetValue::None,
             items: Vec::new(),
+            headers: Vec::new(),
+            rows: Vec::new(),
             selected: None,
+            scroll: 0.0,
             fg: None,
             bg: None,
             font_name: None,
@@ -651,6 +681,48 @@ pub fn choice(window: u64, items: Vec<String>, x: f32, y: f32) -> Result<u64, St
     add_widget(window, w)
 }
 
+/// `App.listbox(window, [items], x, y, width, height)` -- a scrolled list of
+/// text rows the user can click to select. Unlike `choice`, an empty list is
+/// allowed: the items can be filled later with `App.set_items`.
+pub fn listbox(
+    window: u64,
+    items: Vec<String>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Result<u64, String> {
+    let mut w = Widget::new(next_id(), Kind::Listbox);
+    w.x = x;
+    w.y = y;
+    w.w = width.max(24.0);
+    w.h = height.max(24.0);
+    w.items = items;
+    add_widget(window, w)
+}
+
+/// `App.table(window, [headers], [[cells], ...], x, y, width, height)` -- a
+/// grid of rows and columns. An empty `headers` list leaves the header row
+/// off; each row is a list of cell values (shown as text).
+pub fn table(
+    window: u64,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Result<u64, String> {
+    let mut w = Widget::new(next_id(), Kind::Table);
+    w.x = x;
+    w.y = y;
+    w.w = width.max(24.0);
+    w.h = height.max(24.0);
+    w.headers = headers;
+    w.rows = rows;
+    add_widget(window, w)
+}
+
 /// `App.image(window, path, x, y)` -- the file's own pixel size becomes the
 /// widget's size (unless `App.size` overrides it).
 pub fn image(window: u64, path: &str, x: f32, y: f32) -> Result<u64, String> {
@@ -683,9 +755,10 @@ pub fn canvas(window: u64, x: f32, y: f32, width: f32, height: f32) -> Result<u6
 // Reading and changing widget values
 // ---------------------------------------------------------------------------
 
-/// `App.get(widget)` -- input/textarea text, a checkbox's `True`/`False`, or
-/// the item a choice has selected. Labels, buttons and images report their
-/// text/path; a canvas has no single value (`E122`).
+/// `App.get(widget)` -- input/textarea text, a checkbox's `True`/`False`, the
+/// item a `choice`/`listbox` has selected, or a `table`'s selected row (as a
+/// list of its cells). Labels, buttons and images report their text/path; a
+/// canvas has no single value (`E122`).
 pub fn get(id: u64) -> Result<AppValue, String> {
     let mut m = model();
     let widget = m.widget_mut(id)?;
@@ -699,10 +772,18 @@ pub fn get(id: u64) -> Result<AppValue, String> {
             Ok(AppValue::Text(s.clone()))
         }
         (Kind::Checkbox, WidgetValue::Flag(b)) => Ok(AppValue::Bool(*b)),
-        (Kind::Choice, _) => Ok(AppValue::Text(
+        (Kind::Choice | Kind::Listbox, _) => Ok(AppValue::Text(
             widget
                 .selected
                 .and_then(|i| widget.items.get(i))
+                .cloned()
+                .unwrap_or_default(),
+        )),
+        // A table's selection is a whole row, handed back as its cells.
+        (Kind::Table, _) => Ok(AppValue::Items(
+            widget
+                .selected
+                .and_then(|i| widget.rows.get(i))
                 .cloned()
                 .unwrap_or_default(),
         )),
@@ -712,7 +793,9 @@ pub fn get(id: u64) -> Result<AppValue, String> {
 
 /// `App.set(widget, value)` -- changes what a widget shows. Text widgets
 /// accept anything (numbers and booleans are shown as text), a checkbox
-/// wants `True`/`False`, and a choice wants one of its own items.
+/// wants `True`/`False`, a `choice`/`listbox` wants one of its own items (an
+/// empty string clears a listbox's selection), and a `table` wants a row
+/// number (`-1` clears the selection).
 pub fn set(id: u64, value: AppValue) -> Result<(), String> {
     let mut m = model();
     let widget = m.widget_mut(id)?;
@@ -750,6 +833,53 @@ pub fn set(id: u64, value: AppValue) -> Result<(), String> {
                 )),
             }
         }
+        Kind::Listbox => {
+            let wanted = value.as_text();
+            if wanted.is_empty() {
+                widget.selected = None;
+                return Ok(());
+            }
+            match widget.items.iter().position(|i| *i == wanted) {
+                Some(i) => {
+                    widget.selected = Some(i);
+                    Ok(())
+                }
+                None => Err(err_unsupported(
+                    "listbox",
+                    "set",
+                    &format!(
+                        "\"{}\" သည် list ထဲတွင် မပါပါ။ (\"\" ဖြင့် ရွေးချယ်မှုကို ဖျက်နိုင်ပါသည်။)",
+                        wanted
+                    ),
+                )),
+            }
+        }
+        Kind::Table => {
+            let index = match value {
+                AppValue::Int(i) => i,
+                AppValue::Float(f) if f.fract() == 0.0 => f as i64,
+                _ => {
+                    return Err(err_unsupported(
+                        "table",
+                        "set",
+                        "အတန်း နံပါတ် (ကိန်းပြည့်) လိုအပ်ပါသည်။ -1 ဖြင့် ရွေးချယ်မှုကို ဖျက်နိုင်ပါသည်။",
+                    ))
+                }
+            };
+            if index == -1 {
+                widget.selected = None;
+                return Ok(());
+            }
+            if index < 0 || index as usize >= widget.rows.len() {
+                return Err(format!(
+                    "E122 အတန်း {} မရှိပါ (အတန်း {} ခု ရှိပါသည်)။",
+                    index,
+                    widget.rows.len()
+                ));
+            }
+            widget.selected = Some(index as usize);
+            Ok(())
+        }
         Kind::Label | Kind::Button | Kind::Image => {
             widget.text = value.as_text();
             Ok(())
@@ -760,6 +890,126 @@ pub fn set(id: u64, value: AppValue) -> Result<(), String> {
             "canvas အတွက် set မရပါ — clear(cv) ဖြင့် ရှင်းပြီး ပြန်ဆွဲပါ။",
         )),
     }
+}
+
+/// `App.items(widget)` -- every item of a `choice` / `listbox`, or every row
+/// of a `table` (each row a list of cell texts). Other widgets have no item
+/// list (`E122`).
+pub fn items(id: u64) -> Result<AppValue, String> {
+    let mut m = model();
+    let widget = m.widget_mut(id)?;
+    match widget.kind {
+        Kind::Choice | Kind::Listbox => Ok(AppValue::Items(widget.items.clone())),
+        Kind::Table => Ok(AppValue::Rows(widget.rows.clone())),
+        other => Err(err_unsupported(
+            other.name(),
+            "items",
+            "choice/listbox/table တစ်ခုကို လိုအပ်ပါသည်။",
+        )),
+    }
+}
+
+/// `App.set_items(widget, list)` -- replaces a `choice`/`listbox`'s items or
+/// a `table`'s rows. A flat text list given to a table makes one-cell rows.
+/// The selection is kept when it still points at the same item/row, and
+/// cleared otherwise.
+pub fn set_items(id: u64, value: AppValue) -> Result<(), String> {
+    let mut m = model();
+    let widget = m.widget_mut(id)?;
+    match widget.kind {
+        Kind::Choice | Kind::Listbox => {
+            let AppValue::Items(items) = value else {
+                return Err(err_unsupported(
+                    widget.kind.name(),
+                    "set_items",
+                    "item စာသားများ ပါသော list တစ်ခု လိုအပ်ပါသည်။",
+                ));
+            };
+            if widget.kind == Kind::Choice && items.is_empty() {
+                return Err(
+                    "E122 \"choice\" widget အတွက် item တစ်ခုထက်မကပါသော list တစ်ခု လိုအပ်ပါသည်။"
+                        .to_string(),
+                );
+            }
+            // Keep the selection when the selected item is still there.
+            let selected_text = widget
+                .selected
+                .and_then(|i| widget.items.get(i))
+                .cloned();
+            widget.items = items;
+            widget.selected = selected_text
+                .and_then(|text| widget.items.iter().position(|i| *i == text));
+            Ok(())
+        }
+        Kind::Table => {
+            let rows = match value {
+                AppValue::Rows(rows) => rows,
+                // A flat list is a table of one-cell rows.
+                AppValue::Items(items) => items.into_iter().map(|s| vec![s]).collect(),
+                _ => {
+                    return Err(err_unsupported(
+                        "table",
+                        "set_items",
+                        "အတန်း list တစ်ခု လိုအပ်ပါသည် (အတန်းတစ်ခုစီသည် cell list တစ်ခု)။",
+                    ))
+                }
+            };
+            widget.rows = rows;
+            if widget.selected.map_or(false, |i| i >= widget.rows.len()) {
+                widget.selected = None;
+            }
+            Ok(())
+        }
+        other => Err(err_unsupported(
+            other.name(),
+            "set_items",
+            "choice/listbox/table တစ်ခုကို လိုအပ်ပါသည်။",
+        )),
+    }
+}
+
+/// `App.cell(table, row, column)` -- one cell of a table as text. A row or
+/// column that does not exist is `E122`, and so is using this on another
+/// kind of widget.
+pub fn cell(id: u64, row: usize, column: usize) -> Result<AppValue, String> {
+    let mut m = model();
+    let widget = m.widget_mut(id)?;
+    if widget.kind != Kind::Table {
+        return Err(err_unsupported(
+            widget.kind.name(),
+            "cell",
+            "table တစ်ခုကို လိုအပ်ပါသည်။",
+        ));
+    }
+    widget
+        .rows
+        .get(row)
+        .and_then(|r| r.get(column))
+        .cloned()
+        .map(AppValue::Text)
+        .ok_or_else(|| format!("E122 အတန်း {}၊ ကော်လံ {} မရှိပါ။", row, column))
+}
+
+/// `App.set_cell(table, row, column, value)` -- changes one cell (numbers
+/// and booleans are written as text). Out-of-range or non-table use is
+/// `E122`.
+pub fn set_cell(id: u64, row: usize, column: usize, value: &AppValue) -> Result<(), String> {
+    let mut m = model();
+    let widget = m.widget_mut(id)?;
+    if widget.kind != Kind::Table {
+        return Err(err_unsupported(
+            widget.kind.name(),
+            "set_cell",
+            "table တစ်ခုကို လိုအပ်ပါသည်။",
+        ));
+    }
+    let target = widget
+        .rows
+        .get_mut(row)
+        .and_then(|r| r.get_mut(column))
+        .ok_or_else(|| format!("E122 အတန်း {}၊ ကော်လံ {} မရှိပါ။", row, column))?;
+    *target = value.as_text();
+    Ok(())
 }
 
 /// `App.move(widget, x, y)`.
@@ -1519,6 +1769,200 @@ fn paint_widget(
                         }
                     });
             });
+            if active && new_selected != selected {
+                widget.selected = new_selected;
+            }
+        }
+
+        Kind::Listbox => {
+            let row_h = (widget.font_size() * 1.7).max(18.0);
+            let bg = widget
+                .bg
+                .map(Color::to_color32)
+                .unwrap_or(DEFAULT_FIELD_BG);
+            painter.rect_filled(rect, 3.0, bg);
+            painter.rect_stroke(rect, 3.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+            let inner = rect.shrink(1.0);
+            let items = widget.items.clone();
+            let selected = widget.selected;
+            let max_scroll = (row_h * items.len() as f32 - inner.height()).max(0.0);
+            let mut scroll = widget.scroll.clamp(0.0, max_scroll);
+            let list_response = ui.interact(rect, id, Sense::click());
+            if widget.enabled && list_response.hovered() {
+                let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                if wheel != 0.0 {
+                    scroll = (scroll - wheel).clamp(0.0, max_scroll);
+                }
+            }
+            let clip = painter.with_clip_rect(inner);
+            let mut new_selected = selected;
+            for (i, item) in items.iter().enumerate() {
+                let top = inner.top() - scroll + row_h * i as f32;
+                let row_rect = Rect::from_min_size(
+                    Pos2::new(inner.left(), top),
+                    Vec2::new(inner.width(), row_h),
+                );
+                if !row_rect.intersects(inner) {
+                    continue;
+                }
+                let hit = row_rect.intersect(inner);
+                let mut row_bg = None;
+                if widget.enabled {
+                    let response = ui.interact(hit, id.with(("row", i)), Sense::click());
+                    if response.clicked() {
+                        new_selected = Some(i);
+                    }
+                    if response.hovered() {
+                        row_bg = Some(HOVER_BG);
+                    }
+                }
+                if new_selected == Some(i) {
+                    row_bg = Some(SELECTED_BG);
+                }
+                if let Some(fill) = row_bg {
+                    clip.rect_filled(hit, 0.0, fill);
+                }
+                clip.text(
+                    Pos2::new(hit.left() + 6.0, row_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    item,
+                    font.clone(),
+                    fg,
+                );
+            }
+            widget.scroll = scroll;
+            if active && new_selected != selected {
+                widget.selected = new_selected;
+            }
+        }
+
+        Kind::Table => {
+            let row_h = (widget.font_size() * 1.7).max(18.0);
+            let headers = widget.headers.clone();
+            let rows = widget.rows.clone();
+            let selected = widget.selected;
+            let columns = headers
+                .len()
+                .max(rows.iter().map(|r| r.len()).max().unwrap_or(0))
+                .max(1);
+            let bg = widget
+                .bg
+                .map(Color::to_color32)
+                .unwrap_or(DEFAULT_FIELD_BG);
+            painter.rect_filled(rect, 3.0, bg);
+            painter.rect_stroke(rect, 3.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+            let inner = rect.shrink(1.0);
+            let col_w = inner.width() / columns as f32;
+            let header_h = if headers.is_empty() {
+                0.0
+            } else {
+                row_h.min(inner.height())
+            };
+            let body = Rect::from_min_max(
+                Pos2::new(inner.left(), inner.top() + header_h),
+                inner.max,
+            );
+            let clip = painter.with_clip_rect(inner);
+
+            if header_h > 0.0 {
+                let header_rect =
+                    Rect::from_min_size(inner.min, Vec2::new(inner.width(), header_h));
+                clip.rect_filled(header_rect, 0.0, HEADER_BG);
+                for c in 0..columns {
+                    let Some(heading) = headers.get(c) else {
+                        continue;
+                    };
+                    let cell_rect = Rect::from_min_size(
+                        Pos2::new(inner.left() + col_w * c as f32, header_rect.top()),
+                        Vec2::new(col_w, header_h),
+                    );
+                    let cell_clip = painter.with_clip_rect(cell_rect.intersect(inner));
+                    cell_clip.text(
+                        Pos2::new(cell_rect.left() + 6.0, cell_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        heading,
+                        font.clone(),
+                        fg,
+                    );
+                }
+            }
+
+            let max_scroll = (row_h * rows.len() as f32 - body.height().max(0.0)).max(0.0);
+            let mut scroll = widget.scroll.clamp(0.0, max_scroll);
+            let table_response = ui.interact(rect, id, Sense::click());
+            if widget.enabled && table_response.hovered() {
+                let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                if wheel != 0.0 {
+                    scroll = (scroll - wheel).clamp(0.0, max_scroll);
+                }
+            }
+            let body_clip = painter.with_clip_rect(body.intersect(inner));
+            let mut new_selected = selected;
+            for (r, row) in rows.iter().enumerate() {
+                let top = body.top() - scroll + row_h * r as f32;
+                let row_rect = Rect::from_min_size(
+                    Pos2::new(inner.left(), top),
+                    Vec2::new(inner.width(), row_h),
+                );
+                if !row_rect.intersects(body) {
+                    continue;
+                }
+                let hit = row_rect.intersect(body);
+                let mut row_bg = None;
+                if widget.enabled {
+                    let response = ui.interact(hit, id.with(("row", r)), Sense::click());
+                    if response.clicked() {
+                        new_selected = Some(r);
+                    }
+                    if response.hovered() {
+                        row_bg = Some(HOVER_BG);
+                    }
+                }
+                if new_selected == Some(r) {
+                    row_bg = Some(SELECTED_BG);
+                }
+                if let Some(fill) = row_bg {
+                    body_clip.rect_filled(hit, 0.0, fill);
+                }
+                for c in 0..columns {
+                    let Some(cell) = row.get(c) else {
+                        continue;
+                    };
+                    let cell_rect = Rect::from_min_size(
+                        Pos2::new(inner.left() + col_w * c as f32, row_rect.top()),
+                        Vec2::new(col_w, row_h),
+                    );
+                    let cell_clip = painter.with_clip_rect(cell_rect.intersect(body));
+                    cell_clip.text(
+                        Pos2::new(cell_rect.left() + 6.0, row_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        cell,
+                        font.clone(),
+                        fg,
+                    );
+                }
+            }
+
+            // Column separators, and the line under the header band.
+            let line = Stroke::new(1.0, GRID_LINE);
+            for c in 1..columns {
+                let x = inner.left() + col_w * c as f32;
+                clip.line_segment(
+                    [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
+                    line,
+                );
+            }
+            if header_h > 0.0 {
+                clip.line_segment(
+                    [
+                        Pos2::new(inner.left(), inner.top() + header_h),
+                        Pos2::new(inner.right(), inner.top() + header_h),
+                    ],
+                    line,
+                );
+            }
+
+            widget.scroll = scroll;
             if active && new_selected != selected {
                 widget.selected = new_selected;
             }
