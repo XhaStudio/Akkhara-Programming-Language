@@ -94,6 +94,7 @@ Built-in libraries and the functions they expose:
 | `ကျပန်း` | `ကိန်း` / `random_int` | `(min, max)` | integer |
 | `ကျပန်း` | `ဒဿမ` / `random_float` | `(min, max)` | float |
 | `အချိန်` | `စောင့်` / `wait` | `(seconds)` | none |
+| `App` | `screen` / `label` / `button` / ... | see below | window / widget handle (GUI) |
 
 ```
 နည်းပညာများ request ကို အသုံးပြုပါ။
@@ -101,6 +102,49 @@ Built-in libraries and the functions they expose:
 response အတွက် request ၏ get("https://api.example.com/data") ကို လုပ်ပါ။
 response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
 ```
+
+#### App — windows, widgets and an event loop
+
+`App` is the GUI library, compiled into `akk` like the others: a window, its
+widgets, dialogs and a drawing canvas, with no extra runtime needed. Build
+the whole UI first, then `App.run(w)` shows the window and waits for it to
+close — Tkinter's `mainloop()`.
+
+Every `screen`/widget call returns a handle (an object value, exactly like a
+`request` response), and a button's callback is the *name* of an Akkhara
+function, given as text.
+
+| Group | Functions |
+|---|---|
+| window | `screen(width, height)`, `title(w, text)`, `run(w)`, `close(w)` |
+| widgets | `label(w, text, x, y)`, `button(w, text, x, y, "fn")`, `input(w, x, y, width)`, `textarea(w, x, y, width, height)`, `checkbox(w, text, x, y)`, `choice(w, [items], x, y)`, `image(w, path, x, y)`, `canvas(w, x, y, width, height)` |
+| values | `get(widget)`, `set(widget, value)`, `number(widget)` (reads a box's text as a number) |
+| geometry & style | `move`, `size`, `color`, `font`, `show`, `hide`, `enable`, `disable` |
+| events | `on_key(w, "Enter", "fn")`, `every(w, milliseconds, "fn")` |
+| dialogs | `message(text)`, `ask(text)`, `pick_file()` |
+| canvas | `rect`, `circle`, `line`, `text`, `clear` |
+
+```
+နည်းပညာများ App ကို အသုံးပြုပါ။
+
+w အတွက် App ၏ screen(320, 180) ကို လုပ်ပါ။
+App ၏ title(w, "Greeting") ကို လုပ်ပါ။
+box အတွက် App ၏ input(w, 20, 20, 200) ကို လုပ်ပါ။
+ok အတွက် App ၏ button(w, "Greet", 20, 60, "on_greet") ကို လုပ်ပါ။
+msg အတွက် App ၏ label(w, "type your name", 20, 110) ကို လုပ်ပါ။
+
+fn on_greet() {
+    name :str = App.get(box);
+    App.set(msg, name);
+}
+
+App ၏ run(w) ကို လုပ်ပါ။
+```
+
+The eng spelling is the same names with dots — `w = App.screen(320, 180);`,
+`App.set(msg, "hi");`, `App.run(w);`. The full reference (colours, key
+names, font handling, canvas drawing and the `E120`–`E128` error codes) is in
+[`libraries/App/README.md`](libraries/App/README.md).
 
 #### Connecting another script
 
