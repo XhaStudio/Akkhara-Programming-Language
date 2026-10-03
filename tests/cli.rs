@@ -177,6 +177,61 @@ const CASES: &[Case] = &[
         stderr_code: None,
         stdin: &[],
     },
+    // App GUI library: handles, values, styling and canvas calls. Nothing
+    // here opens a window -- only App.run does, and these fixtures avoid it
+    // so the suite stays headless and fast.
+    Case {
+        name: "app_headless",
+        exit: 0,
+        stdout: &[
+            "Hello",
+            "notes text",
+            "True",
+            "choice empty",
+            "Green",
+            "Name (required)",
+            "12",
+            "-3.5",
+            "5",
+            "13.5",
+            "0",
+            "1",
+            "input",
+            "eng works",
+            "True",
+            "2.5",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "app_run_closed",
+        exit: 0,
+        stdout: &["before run", "after run"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "app_errors",
+        exit: 0,
+        stdout: &[
+            "E086 ok",
+            "E087 ok",
+            "E090 ok",
+            "E120 ok",
+            "E122 get ok",
+            "E122 set ok",
+            "E122 draw ok",
+            "E124 ok",
+            "E125 ok",
+            "E126 ok",
+            "E126 callback ok",
+            "E126 number ok",
+            "E128 ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
     // --- programs that fail ------------------------------------------------
     Case {
         name: "parse_alias_missing",
@@ -232,6 +287,13 @@ const CASES: &[Case] = &[
         exit: 1,
         stdout: &[],
         stderr_code: Some("E118"),
+        stdin: &[],
+    },
+    Case {
+        name: "app_not_imported",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E089"),
         stdin: &[],
     },
     Case {
@@ -320,6 +382,26 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
+/// Drops the interpreter's own `Interpreted in ...` line, which a successful
+/// run prints last (see the README). Fixture expectations list just the
+/// program's output, so comparing against it word for word would fail for
+/// every passing program.
+fn without_timing_line(stdout: String) -> String {
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    if lines
+        .last()
+        .map(|line| line.starts_with("Interpreted in "))
+        .unwrap_or(false)
+    {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
 fn expected_stdout(lines: &[&str]) -> String {
     if lines.is_empty() {
         String::new()
@@ -335,7 +417,7 @@ fn fixtures_match_expected_behavior() {
     for case in CASES {
         let output = run_fixture(case.name, case.stdin);
         let exit = output.status.code().unwrap_or(-1);
-        let stdout = text(&output.stdout);
+        let stdout = without_timing_line(text(&output.stdout));
         let stderr = text(&output.stderr);
 
         if exit != case.exit {
