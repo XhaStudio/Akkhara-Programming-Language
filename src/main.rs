@@ -22,6 +22,12 @@ mod random_library;
 #[path = "../libraries/request/main.rs"]
 mod request_library;
 
+/// The Akkhara "App" GUI library, compiled in from its own source under
+/// `libraries/App/main.rs`. Programs load it with:
+///     နည်းပညာများ App ကို အသုံးပြုပါ။
+#[path = "../libraries/App/main.rs"]
+mod app_library;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
