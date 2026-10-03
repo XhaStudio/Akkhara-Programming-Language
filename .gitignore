@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+
+# Program output saved next to each source file it ran (see the README).
+*.akop
