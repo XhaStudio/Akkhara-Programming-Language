@@ -117,8 +117,8 @@ function, given as text.
 | Group | Functions |
 |---|---|
 | window | `screen(width, height)`, `title(w, text)`, `run(w)`, `close(w)` |
-| widgets | `label(w, text, x, y)`, `button(w, text, x, y, "fn")`, `input(w, x, y, width)`, `textarea(w, x, y, width, height)`, `checkbox(w, text, x, y)`, `choice(w, [items], x, y)`, `image(w, path, x, y)`, `canvas(w, x, y, width, height)` |
-| values | `get(widget)`, `set(widget, value)`, `number(widget)` (reads a box's text as a number) |
+| widgets | `label(w, text, x, y)`, `button(w, text, x, y, "fn")`, `input(w, x, y, width)`, `textarea(w, x, y, width, height)`, `checkbox(w, text, x, y)`, `choice(w, [items], x, y)`, `listbox(w, [items], x, y, width, height)`, `table(w, [headers], [[cells], ...], x, y, width, height)`, `image(w, path, x, y)`, `canvas(w, x, y, width, height)` |
+| values | `get(widget)`, `set(widget, value)`, `number(widget)` (reads a box's text as a number), `items(widget)`, `set_items(widget, list)`, `cell(table, row, col)`, `set_cell(table, row, col, value)` |
 | geometry & style | `move`, `size`, `color`, `font`, `show`, `hide`, `enable`, `disable` |
 | events | `on_key(w, "Enter", "fn")`, `every(w, milliseconds, "fn")` |
 | dialogs | `message(text)`, `ask(text)`, `pick_file()` |
