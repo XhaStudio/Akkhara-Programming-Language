@@ -71,6 +71,24 @@ fn libraries_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("libraries"))
 }
 
+/// Saves everything the run showed on the terminal next to the program as
+/// `<file name>.akop`: the output collected while the program ran, followed
+/// by the run's closing line -- the error message when it fails, or the
+/// `Interpreted in ...` line when it succeeds. It is written on every run, so
+/// a failing program leaves its `.akop` behind as well.
+fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str) {
+    // Appended as-is, without forcing a line break: a program that ends in a
+    // prompt (printed without a trailing newline) shows its closing line on
+    // the same terminal line, and the log keeps that text.
+    let mut log = output.unwrap_or_default();
+    log.push_str(closing_line);
+    log.push('\n');
+    let out_path = PathBuf::from(filename).with_extension("akop");
+    if let Err(e) = fs::write(&out_path, log) {
+        eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), e);
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage: akk <file name>");
     eprintln!("       akk --version | -v");
@@ -131,7 +149,9 @@ fn main() {
     let src = match fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", filename, e);
+            let msg = format!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", filename, e);
+            eprintln!("{}", msg);
+            save_terminal_log(filename, None, &msg);
             process::exit(1);
         }
     };
@@ -140,6 +160,7 @@ fn main() {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{}", e);
+            save_terminal_log(filename, None, &e);
             process::exit(1);
         }
     };
@@ -148,6 +169,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}", e);
+            save_terminal_log(filename, None, &e);
             process::exit(1);
         }
     };
@@ -175,19 +197,20 @@ fn main() {
     let started = std::time::Instant::now();
     if let Err(e) = interp.run(&stmts) {
         eprintln!("{}", e);
+        // A failing run still saves its transcript: what the program managed
+        // to print, then the error the terminal showed.
+        let output = interp.take_output();
+        save_terminal_log(filename, output, &e);
         process::exit(1);
     }
     let elapsed = started.elapsed().as_secs_f64();
+    let closing_line = format!("Interpreted in {:.3}s", elapsed);
+    println!("{}", closing_line);
 
-    // Save the output next to the program as `<file_name>.akop`.
-    if let Some(log) = interp.take_output() {
-        let out_path = PathBuf::from(filename).with_extension("akop");
-        if let Err(e) = fs::write(&out_path, log) {
-            eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), e);
-        }
-    }
-
-    println!("Interpreted in {:.3}s", elapsed);
+    // Save everything the terminal showed next to the program as
+    // `<file_name>.akop`: the program's output and that closing line.
+    let output = interp.take_output();
+    save_terminal_log(filename, output, &closing_line);
 }
 
 /// `akk --check` -- looks up the latest GitHub release tag and compares it
