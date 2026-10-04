@@ -372,7 +372,12 @@ const KW_ASSIGN: &str = "သည်";
 const KW_ASSIGN_COLLECTION: &str = "မှာ";
 const KW_IS: &str = "ဖြစ်၏";
 const KW_PARTICLE: &str = "ကို";
+/// Short declaration: `<name> က <value> ။` -- the same statement as
+/// `<name> သည် <value> ဖြစ်၏။`, with the `ဖြစ်၏` left out.
+const KW_DECL: &str = "က";
 const KW_PRINT: &str = "ဖော်ပြပါ";
+/// Short print: `<value> ကို ပြပါ။` -- `ပြပါ` for `ဖော်ပြပါ`.
+const KW_PRINT_ALT: &str = "ပြပါ";
 const KW_INPUT: &str = "မေးပါ";
 const KW_FOR: &str = "အတွက်";
 const KW_TO: &str = "သို့";
@@ -397,15 +402,30 @@ const KW_FINALLY: &str = "နောက်ဆုံးတွင်";
 
 const KW_IF: &str = "အကယ်၍";
 const KW_ELIF: &str = "သို့မဟုတ်";
+/// `အခြား` -- the short spelling of `သို့မဟုတ်` (the else-if branch).
+const KW_ELIF_ALT: &str = "အခြား";
 const KW_ELSE: &str = "မဟုတ်လျှင်";
+/// `မဟုတ်ရင်` -- the short spelling of `မဟုတ်လျှင်` (the else branch).
+const KW_ELSE_ALT: &str = "မဟုတ်ရင်";
 const KW_THEN_POS: &str = "ဖြစ်လျှင်";
+/// `ဖြစ်ရင်` -- the short spelling of `ဖြစ်လျှင်`.
+const KW_THEN_POS_ALT: &str = "ဖြစ်ရင်";
 const KW_THEN_NEG: &str = "မဖြစ်လျှင်";
+/// `မဖြစ်ရင်` -- the short spelling of `မဖြစ်လျှင်`.
+const KW_THEN_NEG_ALT: &str = "မဖြစ်ရင်";
 const KW_AND: &str = "နှင့်";
 const KW_OR: &str = "သို့";
+/// `and` / `or` -- the English spellings of `(နှင့်)` / `(သို့)`.
+const KW_AND_ALT: &str = "and";
+const KW_OR_ALT: &str = "or";
 
 const KW_WHILE: &str = "အခြေအနေ";
 const KW_WHILE_POS: &str = "ဖြစ်နေစဉ်";
+/// `ဖြစ်နေစဥ်` -- the same word with `ဥ` instead of `ဉ`.
+const KW_WHILE_POS_ALT: &str = "ဖြစ်နေစဥ်";
 const KW_WHILE_NEG: &str = "မဖြစ်နေစဉ်";
+/// `မဖြစ်နေစဥ်` -- `မဖြစ်နေစဉ်` with `ဥ`.
+const KW_WHILE_NEG_ALT: &str = "မဖြစ်နေစဥ်";
 
 const KW_FUNC_DEF: &str = "လုပ်ငန်း";
 const KW_BY: &str = "ဖြင့်";
@@ -1409,15 +1429,108 @@ fn parse_particle_call(
 // Statement splitting: '။' at bracket-depth 0 ends a statement.
 // ---------------------------------------------------------------------
 
+// --- condition keywords, long and short spelling -------------------------
+//
+// Each header keyword has a long and a short spelling and both parse to the
+// same thing. The short ones let an if/while be written without its leading
+// `အကယ်၍` / `အခြေအနေ`: `(<cond>) ဖြစ်ရင်` ... `ပြီး။`.
+
+fn is_then_pos(tok: &Tok) -> bool {
+    ident_eq(tok, KW_THEN_POS) || ident_eq(tok, KW_THEN_POS_ALT)
+}
+
+fn is_then_neg(tok: &Tok) -> bool {
+    ident_eq(tok, KW_THEN_NEG) || ident_eq(tok, KW_THEN_NEG_ALT)
+}
+
+fn is_while_pos(tok: &Tok) -> bool {
+    ident_eq(tok, KW_WHILE_POS) || ident_eq(tok, KW_WHILE_POS_ALT)
+}
+
+fn is_while_neg(tok: &Tok) -> bool {
+    ident_eq(tok, KW_WHILE_NEG) || ident_eq(tok, KW_WHILE_NEG_ALT)
+}
+
+/// A keyword that closes a header and starts its body: `ဖြစ်လျှင်` /
+/// `ဖြစ်ရင်` and their negative forms, plus `ဖြစ်နေစဉ်` / `ဖြစ်နေစဥ်` for a
+/// while loop.
+fn is_cond_terminator(tok: &Tok) -> bool {
+    is_then_pos(tok) || is_then_neg(tok) || is_while_pos(tok) || is_while_neg(tok)
+}
+
+/// `ဖြစ်နေစဉ်` / `မဖြစ်နေစဉ်` (either spelling): the header of a while loop,
+/// as opposed to the `ဖြစ်ရင်` of an if.
+fn is_while_terminator(tok: &Tok) -> bool {
+    is_while_pos(tok) || is_while_neg(tok)
+}
+
+/// The leading keyword of an if or while header. It may be left out.
+fn is_cond_opener(tok: &Tok) -> bool {
+    ident_eq(tok, KW_IF) || ident_eq(tok, KW_WHILE)
+}
+
+fn is_elif(tok: &Tok) -> bool {
+    ident_eq(tok, KW_ELIF) || ident_eq(tok, KW_ELIF_ALT)
+}
+
+fn is_else(tok: &Tok) -> bool {
+    ident_eq(tok, KW_ELSE) || ident_eq(tok, KW_ELSE_ALT)
+}
+
+/// `သို့မဟုတ်` / `အခြား` (else-if) and `မဟုတ်လျှင်` / `မဟုတ်ရင်` (else).
+fn is_branch_separator(tok: &Tok) -> bool {
+    is_elif(tok) || is_else(tok)
+}
+
+/// Bookkeeping shared by `split_statements` and `find_first_at_block_level`,
+/// so both agree on where a block starts and ends. `depth` counts the nesting
+/// levels that a `ပြီး` closes; `pending_header` counts headers whose leading
+/// keyword has already opened its level.
+///
+/// A level is opened by the leading keyword (`အကယ်၍`, `အခြေအနေ`) or, when it
+/// is left out, by the header's terminator (`(<cond>) ဖြစ်ရင်`), so exactly
+/// one of the two counts it. An else-if / else separator marks the header as
+/// pending again, which keeps the next branch's terminator neutral -- every
+/// branch belongs to the same level.
+fn advance_block_depth(tok: &Tok, depth: &mut i32, pending_header: &mut i32) {
+    if is_open(tok) {
+        *depth += 1;
+    } else if is_close(tok) {
+        *depth -= 1;
+    } else if ident_eq(tok, KW_LOOP_EACH)
+        || ident_eq(tok, KW_FUNC_DEF)
+        || ident_eq(tok, KW_CLASS_DEF)
+        || ident_eq(tok, KW_TRY)
+    {
+        // for / function / class / try: their headers have no terminator, so
+        // the keyword itself opens the level.
+        *depth += 1;
+    } else if is_cond_opener(tok) {
+        *depth += 1;
+        *pending_header += 1;
+    } else if is_cond_terminator(tok) {
+        if *pending_header > 0 {
+            *pending_header -= 1;
+        } else {
+            *depth += 1;
+        }
+    } else if is_branch_separator(tok) {
+        *pending_header += 1;
+    } else if ident_eq(tok, KW_LOOP_END) {
+        *depth -= 1;
+        *pending_header = 0;
+    }
+}
+
 fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
     let mut stmts = Vec::new();
     let mut depth = 0i32;
+    let mut pending_header = 0i32;
     let mut start = 0usize;
     for (i, t) in tokens.iter().enumerate() {
-        if is_open(&t.tok) {
-            depth += 1;
-        } else if is_close(&t.tok) {
-            depth -= 1;
+        let was_close = is_close(&t.tok);
+        advance_block_depth(&t.tok, &mut depth, &mut pending_header);
+        if was_close {
             // An eng block statement (`if (...) { ... }`, `while (...) {...}`,
             // `fn ... {...}`, `loop {...}`) or a `= loop { ... }` value has no
             // ';' / '။' of its own, so its closing '}' ends the chunk. `else`
@@ -1435,15 +1548,6 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
                 stmts.push((slice.to_vec(), line));
                 start = i + 1;
             }
-        } else if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
-            // Opens a for-loop, if/else, while, or function-definition block:
-            // its header has no terminating '။' of its own, so treat it as a
-            // nesting level too, just like brackets, so interior statement-
-            // terminating '။' tokens don't prematurely close the outer
-            // chunk. All block kinds share the same closing keyword "ပြီး".
-            depth += 1;
-        } else if ident_eq(&t.tok, KW_LOOP_END) {
-            depth -= 1;
         } else if depth == 0 && matches!(t.tok, Tok::End) {
             let slice = &tokens[start..=i];
             let line = slice[0].line;
@@ -1493,23 +1597,8 @@ fn chunk_has_loop_block(tokens: &[Token], start: usize, end: usize) -> bool {
 /// separators / condition terminators). Returns (index, which kws entry).
 fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, usize)> {
     let mut depth = 0i32;
+    let mut pending_header = 0i32;
     for (i, t) in tokens.iter().enumerate() {
-        if is_open(&t.tok) {
-            depth += 1;
-            continue;
-        }
-        if is_close(&t.tok) {
-            depth -= 1;
-            continue;
-        }
-        if ident_eq(&t.tok, KW_LOOP_EACH) || ident_eq(&t.tok, KW_IF) || ident_eq(&t.tok, KW_WHILE) || ident_eq(&t.tok, KW_FUNC_DEF) || ident_eq(&t.tok, KW_CLASS_DEF) || ident_eq(&t.tok, KW_TRY) {
-            depth += 1;
-            continue;
-        }
-        if ident_eq(&t.tok, KW_LOOP_END) {
-            depth -= 1;
-            continue;
-        }
         if depth == 0 {
             if let Tok::Ident(s) = &t.tok {
                 for (ki, kw) in kws.iter().enumerate() {
@@ -1519,6 +1608,7 @@ fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, u
                 }
             }
         }
+        advance_block_depth(&t.tok, &mut depth, &mut pending_header);
     }
     None
 }
@@ -2274,6 +2364,27 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                     let inner = body[1..].to_vec();
                     return parse_while_statement(&inner, line);
                 }
+                // An if or while with its leading keyword left out:
+                // `(<cond>) ဖြစ်ရင် ... ပြီး။` -- the header's terminator says
+                // which of the two it is.
+                if let Some((idx, _)) = find_first_at_block_level(
+                    &body,
+                    &[
+                        KW_THEN_POS,
+                        KW_THEN_POS_ALT,
+                        KW_THEN_NEG,
+                        KW_THEN_NEG_ALT,
+                        KW_WHILE_POS,
+                        KW_WHILE_POS_ALT,
+                        KW_WHILE_NEG,
+                        KW_WHILE_NEG_ALT,
+                    ],
+                ) {
+                    if is_while_terminator(&body[idx].tok) {
+                        return parse_while_statement(&body, line);
+                    }
+                    return parse_if_statement(&body, line);
+                }
                 if !body.is_empty() && ident_eq(&body[0].tok, KW_FUNC_DEF) {
                     let inner = body[1..].to_vec();
                     return parse_func_def(&inner, line);
@@ -2776,7 +2887,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     }
 
     // --- Print statement: ... ကို ဖော်ပြပါ။ ---
-    if let Some(idx) = find_kw(&body, KW_PRINT) {
+    if let Some(idx) = find_kw(&body, KW_PRINT).or_else(|| find_kw(&body, KW_PRINT_ALT)) {
         let value = parse_particle_call(&body, idx, KW_PRINT, line)?;
         if !end_present {
             return Err(missing_period_err(line));
@@ -3023,6 +3134,23 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(generic_syntax_err(line));
         }
         let value = parse_expr(value_tokens, line)?;
+        return Ok(Stmt::VarDecl { name, value, line });
+    }
+
+    // --- Short declaration: `name က value ။` -- the same statement as
+    //     `name သည် value ဖြစ်၏။`, with the `ဖြစ်၏` left out. ---
+    if body.len() >= 3
+        && matches!(body[0].tok, Tok::Ident(_))
+        && ident_eq(&body[1].tok, KW_DECL)
+    {
+        if !end_present {
+            return Err(missing_period_err(line));
+        }
+        let name = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!(),
+        };
+        let value = parse_expr(&body[2..], line)?;
         return Ok(Stmt::VarDecl { name, value, line });
     }
 
@@ -3320,17 +3448,20 @@ fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<Con
     let mut pending_op: Option<LogicalOp> = None;
 
     while idx < tokens.len() {
-        // eng library logical operators: bare `&&` / `||` tokens between
-        // condition groups, e.g. `if (a > 1) && (b < 5) { ... }`.
-        if matches!(tokens[idx].tok, Tok::And | Tok::Or) {
+        // Logical operators between condition groups: the eng `&&` / `||`
+        // tokens, or the words `and` / `or`.
+        let bare_op = match &tokens[idx].tok {
+            Tok::And => Some(LogicalOp::And),
+            Tok::Or => Some(LogicalOp::Or),
+            Tok::Ident(s) if s == KW_AND_ALT => Some(LogicalOp::And),
+            Tok::Ident(s) if s == KW_OR_ALT => Some(LogicalOp::Or),
+            _ => None,
+        };
+        if let Some(op) = bare_op {
             if pending_op.is_some() || atoms.is_empty() {
                 return Err(syntax_err(line));
             }
-            pending_op = Some(if matches!(tokens[idx].tok, Tok::And) {
-                LogicalOp::And
-            } else {
-                LogicalOp::Or
-            });
+            pending_op = Some(op);
             idx += 1;
             continue;
         }
@@ -3340,8 +3471,12 @@ fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<Con
         let close = find_close(tokens, idx, line)?;
         let group = &tokens[idx + 1..close];
 
-        let is_and = group.len() == 1 && ident_eq(&group[0].tok, KW_AND);
-        let is_or = group.len() == 1 && ident_eq(&group[0].tok, KW_OR);
+        // An operator on its own in parentheses: `(နှင့်)` / `(သို့)`, or the
+        // English `(and)` / `(or)`.
+        let is_and = group.len() == 1
+            && (ident_eq(&group[0].tok, KW_AND) || ident_eq(&group[0].tok, KW_AND_ALT));
+        let is_or = group.len() == 1
+            && (ident_eq(&group[0].tok, KW_OR) || ident_eq(&group[0].tok, KW_OR_ALT));
 
         if is_and || is_or {
             if pending_op.is_some() || atoms.is_empty() {
@@ -3386,7 +3521,7 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
             if seen_else {
                 return Err(if_else_not_last_err(line));
             }
-            if ident_eq(&inner[cursor].tok, KW_ELSE) {
+            if is_else(&inner[cursor].tok) {
                 seen_else = true;
                 cursor += 1;
                 let body_stmts = parse_block(&inner[cursor..])?;
@@ -3397,7 +3532,7 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
                 });
                 cursor = inner.len();
                 break;
-            } else if ident_eq(&inner[cursor].tok, KW_ELIF) {
+            } else if is_elif(&inner[cursor].tok) {
                 cursor += 1;
             } else {
                 return Err(generic_syntax_err(line));
@@ -3406,20 +3541,25 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(if_missing_condition_err(line));
         }
 
-        // Parse condition-chain, terminated by "ဖြစ်လျှင်" (positive) or
-        // "မဖြစ်လျှင်" (negative).
-        let (term_rel, which) =
-            find_first_at_block_level(&inner[cursor..], &[KW_THEN_POS, KW_THEN_NEG])
-                .ok_or_else(|| if_missing_then_err(line))?;
+        // Parse condition-chain, terminated by "ဖြစ်လျှင်"/"ဖြစ်ရင်"
+        // (positive) or "မဖြစ်လျှင်"/"မဖြစ်ရင်" (negative).
+        let (term_rel, which) = find_first_at_block_level(
+            &inner[cursor..],
+            &[KW_THEN_POS, KW_THEN_POS_ALT, KW_THEN_NEG, KW_THEN_NEG_ALT],
+        )
+        .ok_or_else(|| if_missing_then_err(line))?;
         let term_abs = cursor + term_rel;
-        let negate = which == 1;
+        let negate = which >= 2;
         let cond_tokens = &inner[cursor..term_abs];
         let cond = parse_cond_chain(cond_tokens, line, false)?;
         cursor = term_abs + 1;
 
         // Body runs until the next branch keyword at this same level, or to
         // the end of the whole if-statement.
-        let body_end = match find_first_at_block_level(&inner[cursor..], &[KW_ELIF, KW_ELSE]) {
+        let body_end = match find_first_at_block_level(
+            &inner[cursor..],
+            &[KW_ELIF, KW_ELIF_ALT, KW_ELSE, KW_ELSE_ALT],
+        ) {
             Some((rel, _)) => cursor + rel,
             None => inner.len(),
         };
@@ -3447,9 +3587,12 @@ fn parse_while_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(while_missing_condition_err(line));
     }
 
-    let (term_idx, which) = find_first_at_block_level(inner, &[KW_WHILE_POS, KW_WHILE_NEG])
-        .ok_or_else(|| while_missing_then_err(line))?;
-    let negate = which == 1;
+    let (term_idx, which) = find_first_at_block_level(
+        inner,
+        &[KW_WHILE_POS, KW_WHILE_POS_ALT, KW_WHILE_NEG, KW_WHILE_NEG_ALT],
+    )
+    .ok_or_else(|| while_missing_then_err(line))?;
+    let negate = which >= 2;
     let cond_tokens = &inner[..term_idx];
     let cond = parse_cond_chain(cond_tokens, line, true)?;
 
