@@ -44,8 +44,8 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 
 ## Language reference
 
-- Variable: `<name> သည် <value> ဖြစ်၏။`
-- Print: `<value> ကို ဖော်ပြပါ။`
+- Variable: `<name> သည် <value> ဖြစ်၏။` or the short `<name> က <value>။`
+- Print: `<value> ကို ဖော်ပြပါ။` or `<value> ကို ပြပါ။`
 - Input (discard): `<prompt> ကို မေးပါ။`
 - Input (assign): `<name> အတွက် <prompt> ကို မေးပါ။`
 - Type conversion: `<value> ကို <type> သို့ ပြောင်းပါ။` (types: `ကိန်းပြည့်`, `ဒဿမကိန်း`, `စာသား`)
@@ -65,6 +65,37 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 - Arithmetic: `+ - * /` (Myanmar names in errors: ပေါင်း၊ နှတ်၊ မြှောက်၊ စား), unary minus supported (`-1`, `value * -1`, `value ကို -1 မြှောက်ပါ။`)
 - Numbers: both Myanmar digits (၀-၉) and ASCII digits
 - Booleans: `True`/`False` and `မှန်`/`မှား`
+
+### Blocks
+
+A block is a header with no `။` of its own, its statements, and a closing
+`ပြီး။`. If and while have a long and a short spelling; both parse to the
+same block.
+
+- If: `အကယ်၍ (<condition>) ဖြစ်လျှင်` ... `သို့မဟုတ် (<condition>) ဖြစ်လျှင်` ... `မဟုတ်လျှင်` ... `ပြီး။`.
+  Leave the leading keyword out and shorten the terminators instead:
+  `(<condition>) ဖြစ်ရင်` ... `အခြား (<condition>) ဖြစ်ရင်` ... `မဟုတ်ရင်` ... `ပြီး။`.
+  `မဖြစ်လျှင်` / `မဖြစ်ရင်` runs the branch when the
+  condition is *not* true.
+- While: `အခြေအနေ (<condition>) ဖြစ်နေစဉ်` ... `ပြီး။`, or
+  `(<condition>) ဖြစ်နေစဥ်` ... `ပြီး။` -- the keyword is optional, and
+  `မဖြစ်နေစဉ်` / `မဖြစ်နေစဥ်` loops while the condition is not true.
+- For, over a range: `i သည် 0, 10 ထဲမှ တစ်ခုစီ 1 တိုးခြင်းဖြင့်` ... `ပြီး။`
+  (the end is exclusive; the step clause is `1 တိုးခြင်းဖြင့်` and may be any number).
+- For, over a collection: `x သည် xs ထဲမှ တစ်ခုစီ` ... `ပြီး။`.
+
+Conditions join with `and` / `or`, or with their own Myanmar groups
+`(နှင့်)` / `(သို့)`:
+
+```
+(<cond1>) and (<cond2>) ဖြစ်ရင်
+    ...
+အခြား (<cond1>) (သို့) (<cond2>) ဖြစ်ရင်
+    ...
+မဟုတ်ရင်
+    ...
+ပြီး။
+```
 
 ### Type keywords
 `စာသား`(str) `ကိန်းပြည့်`(int) `ဒဿမ`/`ဒဿမကိန်း`(float) `မှန်/မှား`(bool) `စာရင်း`(list) `အစု`(tuple) `အုပ်စု`(set) `အဘိဓာန်`(dict) `ဇယား`(table)
@@ -176,9 +207,16 @@ print(TOOL);                        # 101
 
 The imported script's functions are reached through its library name
 (`<name> ၏ <fn>` or `<name>.<fn>`), and only the functions that script
-defines are visible that way. A script that imports itself -- directly, or
-through a cycle of other scripts -- is reported as `E119` instead of
-recursing forever.
+defines are visible that way. Adding `အဖြစ် <alias>` to the import line gives
+the script a shorter name -- `နည်းပညာများ ExpensesStore အဖြစ် Store ကို
+အသုံးပြုပါ။` later reaches its functions as `Store.<fn>`. A script that
+imports itself -- directly, or through a cycle of other scripts -- is
+reported as `E119` instead of recursing forever.
+
+[`examples/app_expenses.akk`](examples/app_expenses.akk) leans on all of
+this: its eight-slot ledger lives in
+[`examples/ExpensesStore.akk`](examples/ExpensesStore.akk), which the
+window imports under the shorter name.
 
 All error messages are in Myanmar, formatted as `လိုင်း <N> ...` (the `eng`
 syntax below reports its own errors in English instead).
