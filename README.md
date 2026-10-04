@@ -25,10 +25,12 @@ or, before installing the command globally:
 A successful run reports how long the program took on its last stdout line,
 e.g. `Interpreted in 0.003s` (nothing is printed when the program fails).
 
-The program's own output is also saved next to the source file as
-`<file_name>.akop` — running `hello.akk` writes `hello.akop` holding exactly
-what the program printed (the timing line is not included). Each run
-overwrites the file, and a failing run writes nothing.
+Every run also saves its terminal transcript next to the source file as
+`<file_name>.akop` — running `hello.akk` writes `hello.akop` holding what the
+program printed followed by the run's closing line: `Interpreted in 0.003s`
+when it succeeds, the error message when it fails (a program that fails
+before printing anything leaves just the error). The file is written on every
+run, success or failure, and each run overwrites it.
 
 ## Install the `akk` command (Windows / PowerShell)
 
@@ -55,6 +57,12 @@ Restart PowerShell and `akk file.akk` works from anywhere.
   `<fn> ကို လုပ်ရန် <arg>[, <arg>] ဖြင့်။`, or with the verb at the end:
   `<fn> ကို (<arg>[, <arg>]) ဖြင့် လုပ်ပါ။` — the same two spellings work for
   library functions as `<lib> ၏ <fn> ...`
+- Function definition: `လုပ်ငန်း <name> သည်` ... `ပြီး။` (no parameters),
+  `လုပ်ငန်း <name> အတွက် <p1>, <p2> ဖြင့်` ... `ပြီး။`, or a parenthesized header:
+  `လုပ်ငန်း <name>() သည်` ... `ပြီး။` / `လုပ်ငန်း <name>(<p1>, <p2>) ဖြင့်` ... `ပြီး။`.
+- Function call, bare spelling: `<fn>()` / `<fn>(<arg>[, <arg>])` -- the same call
+  as `<fn> ကို လုပ်ပါ။`; a trailing `;` or `။` is optional, and one of them is
+  needed when another statement follows (`greet();` or `greet()။`).
 - Collections: `<name> မှာ <literal> ဖြစ်၏။`
   - List: `[1, 2, 3]`
   - Tuple: `(1, 2, 3)`
@@ -105,6 +113,8 @@ Conditions join with `and` / `or`, or with their own Myanmar groups
 Import a library, then reach its functions with the `၏` particle.
 
 - Import: `နည်းပညာများ <lib>[, <lib>] ကို အသုံးပြုပါ။`
+  The `ကို` particle is required: writing `နည်းပညာများ <lib> အသုံးပြုပါ။` fails with
+  `E094 လိုင်း <line> တွင် နည်းပညာ(<lib>) ကို အသုံးပြုရန် "ကို" ခံရေးရန် လိုအပ်ပါသည်`.
 - Call (no arguments): `<lib> ၏ <fn> ကို လုပ်ပါ။`
 - Call with arguments in parens: `<lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။`
 - Call with `လုပ်ရန်`/`ဖြင့်`: `<lib> ၏ <fn> ကို လုပ်ရန် <arg> ဖြင့်။`
@@ -284,6 +294,9 @@ print(total);        # 12
 breaks with a value), and it stops the innermost loop — `while`, `for` and
 `loop` alike. A `break` (or a `return` / a `break`) written as the last
 statement of a block may drop its `;`, e.g. `if (i == 3) { break }`.
+
+An eng statement has to end with its `;`; leaving it off reports
+`E002 Line <line>: Its missing semicolon ";"`, whether the line ends with nothing at all or with a Myanmar `။`.
 
 Conditions compare with `== != < <= > >=` and combine with `&&`, `||` and `!`,
 e.g. `if (flag && !done) { ... }`.
