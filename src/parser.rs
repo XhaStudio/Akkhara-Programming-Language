@@ -198,7 +198,7 @@ pub enum Stmt {
         line: usize,
     },
     /// Library import:
-    /// `နည်းပညာများ <lib name>[, <lib name>, ...][ အဖြစ် <alias>] ကို အသုံးပြုပါ။`
+    /// `နည်းပညာများ <lib name>[, <lib name>, ...][ အဖြစ် <alias>] ကို သုံးမည်။`
     UseLibrary {
         /// `(library name, optional alias)` pairs, in source order. The
         /// alias (from `... အဖြစ် <alias>`) lets later statements reach the
@@ -334,7 +334,7 @@ pub enum LogicalOp {
 #[derive(Debug, Clone)]
 pub struct CondAtom {
     pub lhs: Expr,
-    /// None for a bare boolean check like "(အလုပ်)" -- just test lhs's
+    /// None for a bare boolean check like "(flag)" -- just test lhs's
     /// truthiness. Some(op) for a full comparison "lhs op rhs".
     pub op: Option<String>, // "<" ">" "==" "!=" "<=" ">="
     pub rhs: Option<Expr>,
@@ -427,17 +427,17 @@ const KW_WHILE_NEG: &str = "မဖြစ်နေစဉ်";
 /// `မဖြစ်နေစဥ်` -- `မဖြစ်နေစဉ်` with `ဥ`.
 const KW_WHILE_NEG_ALT: &str = "မဖြစ်နေစဥ်";
 
-const KW_FUNC_DEF: &str = "လုပ်ငန်း";
+const KW_FUNC_DEF: &str = "အလုပ်";
 const KW_BY: &str = "ဖြင့်";
 const KW_CALL: &str = "လုပ်ပါ";
 const KW_CALL_WITH: &str = "လုပ်ရန်";
 
-const KW_CLASS_DEF: &str = "နည်းလမ်း";
+const KW_CLASS_DEF: &str = "ပုံသေ";
 const KW_SELF: &str = "တန်ဖိုး";
 const KW_NEW: &str = "အသစ်";
 
 // Library system keywords.
-const KW_USE: &str = "အသုံးပြုပါ";
+const KW_USE: &str = "သုံးမည်";
 const KW_LIBRARIES: &str = "နည်းပညာများ";
 const KW_WAIT: &str = "စောင့်ပါ";
 const KW_RANDOM: &str = "ကျပန်းကိန်း";
@@ -538,6 +538,14 @@ fn is_close(tok: &Tok) -> bool {
 
 fn missing_period_err(line: usize) -> String {
     format!("E002 လိုင်း {} ၏စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
+}
+
+/// The eng (English-spelled) statement equivalent of `missing_period_err`: an
+/// eng statement (`name :int = 5`, `print(...)`, `use ...`, ...) written
+/// without its ';' terminator. Shares E002, which is the "statement
+/// terminator is missing" code for every statement style.
+fn missing_semicolon_err(line: usize) -> String {
+    format!("E002 Line {}: Its missing semicolon \";\"", line)
 }
 
 fn generic_syntax_err(line: usize) -> String {
@@ -660,21 +668,21 @@ fn while_missing_then_err(line: usize) -> String {
 
 fn func_missing_name_err(line: usize) -> String {
     format!(
-        "E018 လိုင်း {} တွင် \"လုပ်ငန်း\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        "E018 လိုင်း {} တွင် \"အလုပ်\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_bad_param_err(line: usize) -> String {
     format!(
-        "E019 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — လုပ်ငန်း <fn name> အတွက် <parameter> ဖြင့်",
+        "E019 လိုင်း {} တွင် \"အလုပ်\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_missing_by_err(line: usize) -> String {
     format!(
-        "E020 လိုင်း {} တွင် \"လုပ်ငန်း\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
+        "E020 လိုင်း {} တွင် \"အလုပ်\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
         line
     )
 }
@@ -709,16 +717,44 @@ fn func_call_missing_arg_err(line: usize) -> String {
 
 fn library_use_bad_list_err(line: usize) -> String {
     format!(
-        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို အသုံးပြုပါ။",
+        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို သုံးမည်။",
         line
     )
 }
 
 fn library_use_alias_err(line: usize) -> String {
     format!(
-        "E093 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းပညာများ <lib> အဖြစ် <alias> ကို အသုံးပြုပါ။",
+        "E093 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းပညာများ <lib> အဖြစ် <alias> ကို သုံးမည်။",
         line
     )
+}
+
+/// `နည်းပညာများ <lib> သုံးမည်။` -- the statement wrote "သုံးမည်" without
+/// the "ကို" particle in front of it.
+fn library_use_missing_particle_err(line: usize, lib_name: &str) -> String {
+    format!(
+        "E094 လိုင်း {} တွင် နည်းပညာ({}) ကို အသုံးပြုရန် \"ကို\" ခံရေးရန် လိုအပ်ပါသည်",
+        line, lib_name
+    )
+}
+
+/// The library names in the tokens between "နည်းပညာများ" and
+/// "သုံးမည်", e.g. `["ကျပန်း"]` for `ကျပန်း အဖြစ် r`. Used only to fill in
+/// the missing-"ကို" error message, so a part that doesn't start with a name
+/// is simply skipped.
+fn library_names_before_use(tokens: &[Token]) -> Option<String> {
+    let mut names: Vec<String> = Vec::new();
+    for part in split_top_level_commas(tokens) {
+        match part.first().map(|t| &t.tok) {
+            Some(Tok::Ident(s)) => names.push(s.clone()),
+            _ => {}
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
 }
 
 fn func_alias_missing_name_err(line: usize) -> String {
@@ -772,21 +808,21 @@ fn lib_call_syntax_err(line: usize) -> String {
 
 fn class_missing_name_err(line: usize) -> String {
     format!(
-        "E025 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းလမ်း <class name>။",
+        "E025 လိုင်း {} တွင် \"ပုံသေ\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>။",
         line
     )
 }
 
 fn class_missing_period_err(line: usize) -> String {
     format!(
-        "E026 လိုင်း {} တွင် \"နည်းလမ်း <class name>\" ၏ အပြီးမှာ \"သည်\" သို့မဟုတ် '။' လိုအပ်ပါသည်။",
+        "E026 လိုင်း {} တွင် \"ပုံသေ <class name>\" ၏ အပြီးမှာ \"သည်\" သို့မဟုတ် '။' လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn class_body_not_method_err(line: usize) -> String {
     format!(
-        "E027 လိုင်း {} တွင် \"နည်းလမ်း\" (class) အတွင်း \"လုပ်ငန်း\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
+        "E027 လိုင်း {} တွင် \"ပုံသေ\" (class) အတွင်း \"အလုပ်\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
         line
     )
 }
@@ -2283,6 +2319,80 @@ fn parse_eng_fn_params(tokens: &[Token], line: usize) -> Result<Vec<String>, Str
     Ok(names)
 }
 
+/// `<name>(<args>)` written as a standalone statement -- the parenthesized,
+/// eng spelling of `<name> ကို လုပ်ပါ။`. It is accepted with or without the
+/// trailing ';' (`greet();` / `greet()`), so a call balances a definition
+/// written as `အလုပ် greet() သည် ... ပြီး။`. `print` / `input` keep their
+/// own statements below, so they're left alone here. Returns `Ok(None)` for
+/// any statement with a different shape, so other forms fall through.
+fn try_parse_eng_call_stmt(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    if body.len() < 3
+        || !matches!(body[0].tok, Tok::Ident(_))
+        || !matches!(body[1].tok, Tok::LParen)
+    {
+        return Ok(None);
+    }
+    let name = match &body[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    if name == ENG_PRINT || name == ENG_INPUT {
+        return Ok(None);
+    }
+    // The call's ')' must be the last token: `Name(args) ကို ဖော်ပြပါ။` is
+    // an object construction inside a print statement, not a call, so
+    // anything after the closing paren leaves the statement to the other
+    // forms. An unclosed '(' keeps its own bracket error.
+    let close = find_close(body, 1, line)?;
+    if close + 1 != body.len() {
+        return Ok(None);
+    }
+    let inner = &body[2..close];
+    let mut args = Vec::new();
+    if !inner.is_empty() {
+        for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
+            let arg = parse_expr(part, line).map_err(|_| eng_call_bad_form_err(line, &name))?;
+            args.push(arg);
+        }
+    }
+    Ok(Some(Stmt::EngExprCall { name, args, line }))
+}
+
+/// True when a statement is shaped like an eng (English-spelled) statement,
+/// which ends with ';' rather than '။': `use ...`, `print(...)`,
+/// `input(...)`, `break`, `return`, `pin ...`, `name :<type> = <value>`,
+/// `name = <value>`, `name += <value>`. Used to report a missing ';' as E002
+/// instead of a generic parse failure.
+fn looks_like_eng_stmt(body: &[Token]) -> bool {
+    let first = match body.first() {
+        Some(t) => t,
+        None => return false,
+    };
+    match &first.tok {
+        Tok::Ident(s) => {
+            if s == ENG_USE
+                || s == ENG_PRINT
+                || s == ENG_INPUT
+                || s == ENG_BREAK
+                || s == ENG_RETURN
+                || s == ENG_PIN
+            {
+                return true;
+            }
+        }
+        _ => return false,
+    }
+    // A statement starting with `name(` is deliberately *not* listed here:
+    // `name(args)` is either an eng call (claimed before this check) or,
+    // with anything after the `)`, an ordinary statement like
+    // `အကယ်၍ (n == 1) ဖြစ်လျှင်` or `Point(1, 2) ကို ဖော်ပြပါ။`.
+    match body.get(1).map(|t| &t.tok) {
+        Some(Tok::Colon) | Some(Tok::Assign) => true,
+        Some(Tok::Op(_)) => matches!(body.get(2).map(|t| &t.tok), Some(Tok::Assign)),
+        _ => false,
+    }
+}
+
 fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     let end_present = has_end(tokens);
     let mut body: Vec<Token> = if end_present {
@@ -2299,8 +2409,12 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     };
 
     // --- eng library import: `use <lib> [as <alias>] [, ...];` -- the
-    //     English spelling of `နည်းပညာများ <lib> ကို အသုံးပြုပါ။`. ---
+    //     English spelling of `နည်းပညာများ <lib> ကို သုံးမည်။`. Like
+    //     every eng statement it needs its ';' terminator. ---
     if body.first().map(|t| ident_eq(&t.tok, ENG_USE)) == Some(true) {
+        if !terminated {
+            return Err(missing_semicolon_err(line));
+        }
         return parse_eng_use(decl_body, line);
     }
 
@@ -2327,6 +2441,20 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     //     without the trailing ';'. ---
     if let Some(stmt) = try_parse_eng_loop_assign(decl_body, line)? {
         return Ok(stmt);
+    }
+
+    // --- bare parenthesized call: `name(args)` / `name(args);` -- the eng
+    //     spelling of `<name> ကို လုပ်ပါ။`, e.g. `greet()`. ---
+    if let Some(stmt) = try_parse_eng_call_stmt(decl_body, line)? {
+        return Ok(stmt);
+    }
+
+    // --- eng statement with its ';' left off: `x :int = 5`, `print("hi")`,
+    //     `x = 5`. Report the missing statement terminator rather than a
+    //     generic syntax error -- whether the line ends with nothing at all
+    //     or with a Myanmar '။'. ---
+    if !terminated && looks_like_eng_stmt(decl_body) {
+        return Err(missing_semicolon_err(line));
     }
 
     // --- eng library declarations (semicolon-terminated, C-style spelling):
@@ -2402,13 +2530,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
     }
 
-    // --- Library import: နည်းပညာများ <lib name>[, <lib name>, ...] ကို အသုံးပြုပါ။ ---
+    // --- Library import: နည်းပညာများ <lib name>[, <lib name>, ...] ကို သုံးမည်။ ---
     if !body.is_empty() && ident_eq(&body[0].tok, KW_LIBRARIES) {
         if !end_present {
             return Err(missing_period_err(line));
         }
-        if body.len() >= 4
-            && ident_eq(&body.last().unwrap().tok, KW_USE)
+        let ends_with_use = ident_eq(&body.last().unwrap().tok, KW_USE);
+        if ends_with_use
+            && body.len() >= 4
             && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
         {
             let names_tokens = &body[1..body.len() - 2];
@@ -2470,6 +2599,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 return Err(library_use_bad_list_err(line));
             }
             return Ok(Stmt::UseLibrary { libs, line });
+        }
+        // `နည်းပညာများ <lib> သုံးမည်။` -- "သုံးမည်" is there but the
+        // "ကို" in front of it is missing, so the sentence was never closed
+        // as `<lib> ကို ...`. Reporting it by name makes the fix obvious.
+        if ends_with_use {
+            if let Some(names) = library_names_before_use(&body[1..body.len() - 1]) {
+                return Err(library_use_missing_particle_err(line, &names));
+            }
         }
         return Err(generic_syntax_err(line));
     }
@@ -3357,7 +3494,7 @@ fn parse_typecheck_name(tokens: &[Token]) -> Option<String> {
 /// checked in this order:
 ///   1. Type-check: "<expr> သည် <type>", e.g. "x သည် ကိန်း".
 ///   2. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
-///   3. Bare boolean-valued expression, e.g. "အလုပ်" (test its truthiness).
+///   3. Bare boolean-valued expression, e.g. "flag" (test its truthiness).
 fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
     // eng library logical-not: an atom may be introduced by `!`, negating
     // its truth value. The rest of the atom parses normally.
@@ -3407,7 +3544,7 @@ fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
         }
         None => {
             // No comparison operator at all: treat the whole group as a
-            // single boolean-valued expression, e.g. "(အလုပ်)".
+            // single boolean-valued expression, e.g. "(flag)".
             let lhs = parse_expr(tokens, line)?;
             Ok(CondAtom {
                 lhs,
@@ -3608,10 +3745,10 @@ fn parse_while_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
 }
 
 /// Parse a function definition. `inner` is everything between the leading
-/// "လုပ်ငန်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// "အလုပ်" (already stripped by the caller) and the trailing "ပြီး" (also
 /// already stripped): "<fn name> [အတွက် <param1>, <param2>, ...] ဖြင့် <body...>".
 /// Parse a function definition. `inner` is everything between the leading
-/// "လုပ်ငန်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// "အလုပ်" (already stripped by the caller) and the trailing "ပြီး" (also
 /// already stripped). Two header forms:
 ///   - no-argument short form: "<fn name> သည် <body...>"
 ///   - with parameters:        "<fn name> [အတွက် <param1>, ...] ဖြင့် <body...>"
@@ -3633,6 +3770,43 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(Stmt::FuncDef {
             name,
             params: Vec::new(),
+            body,
+            line,
+        });
+    }
+
+    // Parenthesized parameter list, the eng spelling of the header:
+    //   "<fn name>() သည် <body...>"      -- no parameters
+    //   "<fn name>(<p1>, <p2>) ဖြင့် <body...>"
+    // The `()`-style list accepts either header terminator ("သည်" or
+    // "ဖြင့်"), so `greet() သည်` and `greet(who) ဖြင့်` both read naturally.
+    if !rest.is_empty() && matches!(rest[0].tok, Tok::LParen) {
+        let close = find_close(rest, 0, line).map_err(|_| func_bad_param_err(line))?;
+        let param_tokens = &rest[1..close];
+        let mut params: Vec<String> = Vec::new();
+        if !param_tokens.is_empty() {
+            for part in split_top_level(param_tokens, |t| matches!(t, Tok::Comma)) {
+                match part {
+                    [p] => match &p.tok {
+                        Tok::Ident(s) => params.push(s.clone()),
+                        _ => return Err(func_bad_param_err(line)),
+                    },
+                    _ => return Err(func_bad_param_err(line)),
+                }
+            }
+        }
+        let term_idx = close + 1;
+        let terminated = matches!(
+            rest.get(term_idx).map(|t| &t.tok),
+            Some(t) if ident_eq(t, KW_ASSIGN) || ident_eq(t, KW_BY)
+        );
+        if !terminated {
+            return Err(func_missing_by_err(line));
+        }
+        let body = parse_block(&rest[term_idx + 1..])?;
+        return Ok(Stmt::FuncDef {
+            name,
+            params,
             body,
             line,
         });
@@ -3676,7 +3850,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
 }
 
 /// Parse a class definition. `inner` is everything between the leading
-/// "နည်းလမ်း" (already stripped by the caller) and the trailing "ပြီး" (also
+/// "ပုံသေ" (already stripped by the caller) and the trailing "ပြီး" (also
 /// already stripped). Two header forms are accepted:
 ///   - "<class name> သည် <method definitions...>"   (current/preferred)
 ///   - "<class name>။ <method definitions...>"       (older form)
