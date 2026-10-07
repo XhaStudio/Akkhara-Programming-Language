@@ -22,6 +22,8 @@ const ENG_WHILE: &str = "while";
 const ENG_FN: &str = "fn";
 const ENG_RETURN: &str = "return";
 const ENG_LOOP: &str = "loop";
+const ENG_FOR: &str = "for";
+const ENG_IN: &str = "in";
 const ENG_BREAK: &str = "break";
 const ENG_USE: &str = "use";
 const ENG_AS: &str = "as";
@@ -181,6 +183,11 @@ pub enum Stmt {
     },
     ClassDef {
         name: String,
+        /// Constructor parameters declared in the class header, e.g. the
+        /// `x, y` in `ပုံသေ Point(x, y) သည် ... ပြီး။`. `None` for the
+        /// older parenthesis-less header, where the constructor is the
+        /// first method and its own parameters supply the constructor's.
+        params: Option<Vec<String>>,
         body: Vec<Stmt>,
         line: usize,
     },
@@ -300,6 +307,17 @@ pub enum Stmt {
     /// eng infinite loop statement: `loop { ... }` -- runs until a `break`
     /// (or a `return` unwinds out of the enclosing function).
     EngLoop { body: Vec<Stmt> },
+    /// eng counted loop: `for (<init>; <cond>; <step>) { ... }`. `init` runs
+    /// once before the loop, `cond` is tested before every iteration, and
+    /// `step` runs at the end of each one -- so a `break` inside the body
+    /// skips the step, exactly as in C.
+    EngFor {
+        init: Box<Stmt>,
+        cond: CondChain,
+        step: Box<Stmt>,
+        body: Vec<Stmt>,
+        line: usize,
+    },
     /// eng loop-as-value: `<name> :<type> = loop { ... };` (or the plain
     /// assignment spelling `<name> = loop { ... };`). The variable is seeded
     /// with its type's default before the loop runs (so the body can
@@ -434,7 +452,16 @@ const KW_CALL_WITH: &str = "လုပ်ရန်";
 
 const KW_CLASS_DEF: &str = "ပုံသေ";
 const KW_SELF: &str = "တန်ဖိုး";
+/// `အတု` -- a synonym of `တန်ဖိုး` for the self keyword, so a class method may
+/// write either `တန်ဖိုး <field> သည် <value> ဖြစ်၏။` or
+/// `အတု <field> သည် <value> ဖြစ်၏။`.
+const KW_SELF_ALT: &str = "အတု";
 const KW_NEW: &str = "အသစ်";
+
+/// Either spelling of the self keyword.
+fn is_self_kw(tok: &Tok) -> bool {
+    ident_eq(tok, KW_SELF) || ident_eq(tok, KW_SELF_ALT)
+}
 
 // Library system keywords.
 const KW_USE: &str = "သုံးမည်";
@@ -823,6 +850,13 @@ fn class_missing_period_err(line: usize) -> String {
 fn class_body_not_method_err(line: usize) -> String {
     format!(
         "E027 လိုင်း {} တွင် \"ပုံသေ\" (class) အတွင်း \"အလုပ်\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
+        line
+    )
+}
+
+fn class_bad_param_err(line: usize) -> String {
+    format!(
+        "E095 လိုင်း {} တွင် \"ပုံသေ\" (class) ၏ constructor parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>(<parameter>, ...) သည်",
         line
     )
 }
@@ -1578,6 +1612,11 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
                     || chunk_has_loop_block(tokens, start, i))
                 && !ident_eq_opt(tokens.get(i + 1), ENG_ELSE)
                 && !matches!(tokens.get(i + 1).map(|t| &t.tok), Some(Tok::Semicolon))
+                // A '}' immediately followed by '{' cannot end the statement:
+                // it closes a set/dict literal in an iterator for loop's
+                // header (`for x in {1, 2} { ... }`), and no statement begins
+                // with a bare '{'.
+                && !matches!(tokens.get(i + 1).map(|t| &t.tok), Some(Tok::LBrace))
             {
                 let slice = &tokens[start..=i];
                 let line = slice[0].line;
@@ -1895,19 +1934,58 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
 fn is_eng_block_keyword(tok: &Tok) -> bool {
     matches!(
         tok,
-        Tok::Ident(s) if s == ENG_IF || s == ENG_WHILE || s == ENG_FN || s == ENG_LOOP
+        Tok::Ident(s)
+            if s == ENG_IF || s == ENG_WHILE || s == ENG_FN || s == ENG_LOOP || s == ENG_FOR
     )
 }
 
 fn eng_block_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `loop {{ ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `for (<init>; <cond>; <step>) {{ ... }}`, `loop {{ ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        line
+    )
+}
+
+fn eng_for_form_err(line: usize) -> String {
+    format!(
+        "E109 line {}: expected `for (<init>; <cond>; <step>) {{ ... }}`, e.g. `for (i = 0; i < 10; i = i + 1) {{ ... }}`",
+        line
+    )
+}
+
+fn eng_for_in_form_err(line: usize) -> String {
+    format!(
+        "E109 line {}: expected `for <name> in <value> {{ ... }}`, e.g. `for x in xs {{ ... }}`",
         line
     )
 }
 
 fn eng_return_bad_form_err(line: usize) -> String {
     format!("E109 line {}: expected `return;` or `return <value>;`", line)
+}
+
+/// The `{` that opens an iterator for loop's body. The body is the *last*
+/// depth-0 brace whose matching `}` ends the statement, so a set or dict
+/// literal used as the iterated value is left in the value:
+/// `for k in {"a" သည် 1 ဖြစ်၏။} { ... }`.
+fn find_iter_body_lbrace(tokens: &[Token], line: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut candidates: Vec<usize> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        match t.tok {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => {
+                if depth == 0 && matches!(t.tok, Tok::LBrace) {
+                    candidates.push(i);
+                }
+                depth += 1;
+            }
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
+            _ => {}
+        }
+    }
+    candidates.into_iter().rev().find(|&i| {
+        matches!(find_close(tokens, i, line), Ok(close) if close + 1 == tokens.len())
+    })
 }
 
 /// Index of the first `{` at paren/bracket depth 0 -- the brace that opens a
@@ -2034,7 +2112,93 @@ fn parse_eng_block_statement(tokens: &[Token], line: usize) -> Result<Stmt, Stri
     if ident_eq(&tokens[0].tok, ENG_LOOP) {
         return parse_eng_loop(tokens, line);
     }
+    if ident_eq(&tokens[0].tok, ENG_FOR) {
+        return parse_eng_for(tokens, line);
+    }
     Err(eng_block_form_err(line))
+}
+
+/// `for` in the eng spelling. Two forms, told apart by what follows the
+/// keyword: a '(' opens the three-part counted header, anything else is the
+/// iterator spelling.
+///   - `for (<init>; <cond>; <step>) { ... }`  -- C-style counted loop
+///   - `for <name> in <value> { ... }`         -- Python-style iteration
+fn parse_eng_for(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    if matches!(tokens.get(1).map(|t| &t.tok), Some(Tok::LParen)) {
+        return parse_eng_for_counted(tokens, line);
+    }
+    parse_eng_for_in(tokens, line)
+}
+
+/// `for <name> in <value> { ... }` -- iteration over a value, with the same
+/// rules as the Myanmar `for x သည် xs ထဲမှ တစ်ခုစီ` loop: a number
+/// auto-ranges from 0 (exclusive end), a list / tuple / set yields its
+/// elements, and a dict yields its keys. Any other value is rejected when the
+/// loop runs.
+fn parse_eng_for_in(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    let var_name = match tokens.get(1).map(|t| &t.tok) {
+        Some(Tok::Ident(s)) => s.clone(),
+        _ => return Err(eng_for_in_form_err(line)),
+    };
+    if !ident_eq_opt(tokens.get(2), ENG_IN) {
+        return Err(eng_for_in_form_err(line));
+    }
+    let rest = &tokens[3..];
+    let brace_rel = find_iter_body_lbrace(rest, line).ok_or_else(|| eng_for_in_form_err(line))?;
+    if brace_rel == 0 {
+        return Err(eng_for_in_form_err(line));
+    }
+    let source = parse_expr(&rest[..brace_rel], line).map_err(|_| eng_for_in_form_err(line))?;
+    let (body_tokens, after) =
+        take_brace_block(tokens, 3 + brace_rel, line).map_err(|_| eng_for_in_form_err(line))?;
+    if after != tokens.len() {
+        return Err(eng_for_in_form_err(line));
+    }
+    Ok(Stmt::ForLoop {
+        var_name,
+        source: ForSource::Auto(source),
+        body: parse_block(body_tokens)?,
+        line,
+    })
+}
+
+/// `for (<init>; <cond>; <step>) { ... }` -- the C-style counted loop. The
+/// `<init>` and `<step>` clauses are ordinary eng statements without their
+/// ';' (`i = 0`, `i :int = 0`, `i += 1`, `i = i + 1`), and `<cond>` is an eng
+/// condition. The step runs at the end of every iteration; a `break` in the
+/// body ends the loop before it.
+fn parse_eng_for_counted(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    if !matches!(tokens.get(1).map(|t| &t.tok), Some(Tok::LParen)) {
+        return Err(eng_for_form_err(line));
+    }
+    let header_close = find_close(tokens, 1, line).map_err(|_| eng_for_form_err(line))?;
+    let parts = split_top_level(&tokens[2..header_close], |t| matches!(t, Tok::Semicolon));
+    let (init_tokens, cond_tokens, step_tokens) = match parts.as_slice() {
+        [init, cond, step] if !init.is_empty() && !cond.is_empty() && !step.is_empty() => {
+            (*init, *cond, *step)
+        }
+        _ => return Err(eng_for_form_err(line)),
+    };
+    let cond = parse_eng_cond(cond_tokens, line).map_err(|_| eng_for_form_err(line))?;
+    let init = parse_eng_decl(init_tokens, line).map_err(|_| eng_for_form_err(line))?;
+    let step = parse_eng_decl(step_tokens, line).map_err(|_| eng_for_form_err(line))?;
+
+    let brace = header_close + 1;
+    if !matches!(tokens.get(brace).map(|t| &t.tok), Some(Tok::LBrace)) {
+        return Err(eng_for_form_err(line));
+    }
+    let (body_tokens, after) =
+        take_brace_block(tokens, brace, line).map_err(|_| eng_for_form_err(line))?;
+    if after != tokens.len() {
+        return Err(eng_for_form_err(line));
+    }
+    Ok(Stmt::EngFor {
+        init: Box::new(init),
+        cond,
+        step: Box::new(step),
+        body: parse_block(body_tokens)?,
+        line,
+    })
 }
 
 /// `loop { ... }` used as a statement.
@@ -3172,8 +3336,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         });
     }
 
-    // --- Self field assignment: တန်ဖိုး <field> သည် <value> ဖြစ်၏။ (inside a class method) ---
-    if !body.is_empty() && ident_eq(&body[0].tok, KW_SELF) {
+    // --- Self field assignment: တန်ဖိုး <field> သည် <value> ဖြစ်၏။ (inside a
+    //     class method). `အတု` is accepted as a synonym of `တန်ဖိုး`. ---
+    if !body.is_empty() && is_self_kw(&body[0].tok) {
+        // Quote back whichever spelling the program actually used.
+        let self_kw = match &body[0].tok {
+            Tok::Ident(s) => s.clone(),
+            _ => unreachable!("is_self_kw matches identifiers only"),
+        };
         if body.len() < 2 {
             return Err(generic_syntax_err(line));
         }
@@ -3184,7 +3354,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         if body.len() < 3 || !ident_eq(&body[2].tok, KW_ASSIGN) {
             return Err(format!(
                 "E001 လိုင်း {} တွင် {} {} ကို တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
-                line, KW_SELF, field_name
+                line, self_kw, field_name
             ));
         }
         let is_idx = find_kw(&body, KW_IS).ok_or_else(|| missing_period_err(line))?;
@@ -3192,7 +3362,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         if value_tokens.is_empty() {
             return Err(format!(
                 "E001 လိုင်း {} တွင် {} {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
-                line, KW_SELF, field_name
+                line, self_kw, field_name
             ));
         }
         if !end_present {
@@ -3851,9 +4021,15 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
 
 /// Parse a class definition. `inner` is everything between the leading
 /// "ပုံသေ" (already stripped by the caller) and the trailing "ပြီး" (also
-/// already stripped). Two header forms are accepted:
-///   - "<class name> သည် <method definitions...>"   (current/preferred)
-///   - "<class name>။ <method definitions...>"       (older form)
+/// already stripped). The header is the class name, an optional parenthesized
+/// constructor parameter list, and a terminator bit ("သည်" or '။'):
+///   - "<class name> သည် <method definitions...>"              (no arguments)
+///   - "<class name>။ <method definitions...>"                  (older form)
+///   - "<class name>(<p1>, <p2>) သည် <method definitions...>"  (constructor params)
+///   - "<class name>() သည် <method definitions...>"             (explicitly none)
+/// The parenthesized form declares the constructor's parameters up front. The
+/// first method in the body is still the constructor and runs with those
+/// parameters bound, so it must not declare parameters of its own.
 fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     if inner.is_empty() {
         return Err(class_missing_name_err(line));
@@ -3862,14 +4038,46 @@ fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         Tok::Ident(s) => s.clone(),
         _ => return Err(class_missing_name_err(line)),
     };
-    if inner.len() < 2 {
-        return Err(class_missing_period_err(line));
-    }
-    let body_tokens = if matches!(inner[1].tok, Tok::End) || ident_eq(&inner[1].tok, KW_ASSIGN) {
-        &inner[2..]
+
+    let rest = &inner[1..];
+
+    // New/preferred header: "<class name>(<p1>, <p2>) သည်". The list accepts
+    // either terminator ("သည်" after `()`, or '။' for symmetry with the
+    // argument-less form).
+    let (params, body_tokens) = if !rest.is_empty() && matches!(rest[0].tok, Tok::LParen) {
+        let close = find_close(rest, 0, line).map_err(|_| class_bad_param_err(line))?;
+        let param_tokens = &rest[1..close];
+        let mut params: Vec<String> = Vec::new();
+        if !param_tokens.is_empty() {
+            for part in split_top_level(param_tokens, |t| matches!(t, Tok::Comma)) {
+                match part {
+                    [p] => match &p.tok {
+                        Tok::Ident(s) => params.push(s.clone()),
+                        _ => return Err(class_bad_param_err(line)),
+                    },
+                    _ => return Err(class_bad_param_err(line)),
+                }
+            }
+        }
+        let term_idx = close + 1;
+        let terminated = rest.get(term_idx).is_some_and(|t| {
+            ident_eq(&t.tok, KW_ASSIGN) || matches!(t.tok, Tok::End)
+        });
+        if !terminated {
+            return Err(class_missing_period_err(line));
+        }
+        (Some(params), &rest[term_idx + 1..])
     } else {
-        return Err(class_missing_period_err(line));
+        // Argument-less header: "<name> သည် ..." / "<name>။ ...".
+        if rest.is_empty() {
+            return Err(class_missing_period_err(line));
+        }
+        if !(matches!(rest[0].tok, Tok::End) || ident_eq(&rest[0].tok, KW_ASSIGN)) {
+            return Err(class_missing_period_err(line));
+        }
+        (None, &rest[1..])
     };
+
     let body = parse_block(body_tokens)?;
 
     for s in &body {
@@ -3881,7 +4089,12 @@ fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(class_missing_constructor_err(line, &name));
     }
 
-    Ok(Stmt::ClassDef { name, body, line })
+    Ok(Stmt::ClassDef {
+        name,
+        params,
+        body,
+        line,
+    })
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Vec<Stmt>, String> {
