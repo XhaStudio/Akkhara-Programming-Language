@@ -36,6 +36,18 @@ impl Callable {
     }
 }
 
+/// A class registered by `ပုံသေ <name>[(<params>)] သည် ... ပြီး။`.
+#[derive(Debug, Clone)]
+struct ClassInfo {
+    /// Constructor parameters from the class header's `(<params>)` list.
+    /// `None` when the header has no list, in which case the first method's
+    /// own parameter list supplies the constructor's (the original form).
+    ctor_params: Option<Vec<String>>,
+    /// The class's methods in source order as `(name, parameters, body)`.
+    /// The first one acts as the constructor.
+    methods: Vec<(String, Vec<String>, Vec<Stmt>)>,
+}
+
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
 const TYPE_STR: &str = "စာသား";
@@ -491,7 +503,7 @@ pub struct Interpreter {
     /// is an error; `pin` values are immutable for the rest of the program.
     consts: std::collections::HashSet<String>,
     functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
-    classes: HashMap<String, Vec<(String, Vec<String>, Vec<Stmt>)>>,
+    classes: HashMap<String, ClassInfo>,
     /// Stack of in-progress object constructions. While non-empty, a
     /// "တန်ဖိုး <field> သည် <value> ဖြစ်၏။" statement writes into the field
     /// list on top of this stack instead of the global environment.
@@ -900,36 +912,21 @@ impl Interpreter {
                 negate,
                 body,
                 line,
+            } => self.exec_condition_loop(cond, *negate, body, *line, "while loop"),
+            Stmt::EngFor {
+                init,
+                cond,
+                step,
+                body,
+                line,
             } => {
-                const MAX_ITERS: u64 = 5_000_000;
-                // `loop_depth` gates `break`: a `break` in here must find this
-                // loop, and must be consumed on the way out (so an outer loop
-                // keeps running).
-                self.loop_depth += 1;
-                let result = (|| -> Result<(), String> {
-                    let mut iterations: u64 = 0;
-                    loop {
-                        let c = self.eval_cond_chain(cond)?;
-                        let should_run = if *negate { !c } else { c };
-                        if !should_run {
-                            break;
-                        }
-                        iterations += 1;
-                        if iterations > MAX_ITERS {
-                            return Err(format!(
-                                "E046 လိုင်း {} ၏ while loop သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
-                                line
-                            ));
-                        }
-                        let broke = self.run_loop_body(body)?;
-                        if broke.is_some() || self.return_signal.is_some() {
-                            break;
-                        }
-                    }
-                    Ok(())
-                })();
-                self.loop_depth -= 1;
-                result
+                // `init` runs once, before the loop; the `step` becomes the
+                // loop body's last statement, so `break` and `return` inside
+                // the body leave the loop without running it.
+                self.exec(init)?;
+                let mut loop_body = body.clone();
+                loop_body.push((**step).clone());
+                self.exec_condition_loop(cond, false, &loop_body, *line, "for loop")
             }
             Stmt::FuncDef {
                 name,
@@ -1034,17 +1031,22 @@ impl Interpreter {
                 }
                 Ok(())
             }
-            Stmt::ClassDef { name, body, line } => {
+            Stmt::ClassDef {
+                name,
+                params,
+                body,
+                line,
+            } => {
                 let mut methods: Vec<(String, Vec<String>, Vec<Stmt>)> = Vec::new();
                 for s in body {
                     match s {
                         Stmt::FuncDef {
                             name: mname,
-                            params,
+                            params: mparams,
                             body: mbody,
                             ..
                         } => {
-                            methods.push((mname.clone(), params.clone(), mbody.clone()));
+                            methods.push((mname.clone(), mparams.clone(), mbody.clone()));
                         }
                         _ => {
                             return Err(format!(
@@ -1060,7 +1062,22 @@ impl Interpreter {
                         line, name
                     ));
                 }
-                self.classes.insert(name.clone(), methods);
+                // A header parameter list already names the constructor's
+                // parameters, so the first (constructor) method must be
+                // written without a parameter list of its own.
+                if params.is_some() && !methods[0].1.is_empty() {
+                    return Err(format!(
+                        "E096 လိုင်း {} တွင် \"{}\" class ၏ header တွင် constructor parameter များ ရေးထားပြီးဖြစ်၍ ပထမ method သည် parameter များ ထပ်မံမရေးရပါ။",
+                        line, name
+                    ));
+                }
+                self.classes.insert(
+                    name.clone(),
+                    ClassInfo {
+                        ctor_params: params.clone(),
+                        methods,
+                    },
+                );
                 Ok(())
             }
             Stmt::SelfFieldSet { field, value, line } => {
@@ -1075,7 +1092,7 @@ impl Interpreter {
                         Ok(())
                     }
                     None => Err(format!(
-                        "E035 လိုင်း {} တွင် \"တန်ဖိုး\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+                        "E035 လိုင်း {} တွင် \"တန်ဖိုး\" (သို့မဟုတ် \"အတု\") ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
                         line
                     )),
                 }
@@ -1204,7 +1221,10 @@ impl Interpreter {
 
     /// Substitute "{VarName}" placeholders inside a string literal with the
     /// current value of that variable, e.g. "Hello!, {Name}".
+/// The two accepted spellings of the self keyword inside a `{...}`
+/// placeholder: "{တန်ဖိုး <field>}" and its synonym "{အတု <field>}".
 const SELF_PREFIX: &'static str = "တန်ဖိုး ";
+const SELF_PREFIX_ALT: &'static str = "အတု ";
 
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
         if !s.contains('{') {
@@ -1236,10 +1256,14 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
                         line
                     ));
                 }
-                // "{တန်ဖိုး <field>}" reads the given field off the
-                // object currently under construction (inside a class
-                // method), rather than a plain global variable.
-                if let Some(field_name) = trimmed.strip_prefix(Self::SELF_PREFIX) {
+                // "{တန်ဖိုး <field>}" (or its synonym "{အတု <field>}") reads
+                // the given field off the object currently under construction
+                // (inside a class method), rather than a plain global
+                // variable.
+                let self_field = trimmed
+                    .strip_prefix(Self::SELF_PREFIX)
+                    .or_else(|| trimmed.strip_prefix(Self::SELF_PREFIX_ALT));
+                if let Some(field_name) = self_field {
                     let field_name = field_name.trim();
                     if field_name.is_empty() {
                         return Err(format!(
@@ -2413,8 +2437,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         arg_exprs: &[Expr],
         line: usize,
     ) -> Result<Value, String> {
-        let methods = match self.classes.get(class_name) {
-            Some(m) => m.clone(),
+        let info = match self.classes.get(class_name) {
+            Some(c) => c.clone(),
             None => {
                 return Err(format!(
                     "E032 လိုင်း {} တွင် \"{}\" ဆိုသော class ကို ရှာမတွေ့ပါ။",
@@ -2422,8 +2446,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 ));
             }
         };
-        // The first method defined in the class acts as its constructor.
-        let (_, params, body) = &methods[0];
+        // The constructor's parameters come from the class header's
+        // `(params)` list when it has one; otherwise the first method (the
+        // constructor) supplies them from its own parameter list. Either
+        // way the first method defined in the class is the constructor.
+        let params: Vec<String> = match &info.ctor_params {
+            Some(header_params) => header_params.clone(),
+            None => info.methods[0].1.clone(),
+        };
+        let body = info.methods[0].2.clone();
 
         if arg_exprs.len() != params.len() {
             return Err(format!(
@@ -2450,7 +2481,6 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         }
 
         self.self_stack.push(Vec::new());
-        let body = body.clone();
         // The constructor body counts as a function body, so a `return`
         // inside a method doesn't escape to the top level (E108), and a
         // `break` in it can't reach a caller's loop.
@@ -2487,6 +2517,48 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         run_result?;
 
         Ok(Value::Object(class_name.to_string(), fields))
+    }
+
+    /// Run a condition-tested loop body -- the `while (<cond>) { ... }`
+    /// spelling, and (through `Stmt::EngFor`) the C-style eng `for` loop,
+    /// which only differs in the label its iteration-cap error names.
+    fn exec_condition_loop(
+        &mut self,
+        cond: &CondChain,
+        negate: bool,
+        body: &[Stmt],
+        line: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        const MAX_ITERS: u64 = 5_000_000;
+        // `loop_depth` gates `break`: a `break` in here must find this loop,
+        // and must be consumed on the way out (so an outer loop keeps
+        // running).
+        self.loop_depth += 1;
+        let result = (|| -> Result<(), String> {
+            let mut iterations: u64 = 0;
+            loop {
+                let c = self.eval_cond_chain(cond)?;
+                let should_run = if negate { !c } else { c };
+                if !should_run {
+                    break;
+                }
+                iterations += 1;
+                if iterations > MAX_ITERS {
+                    return Err(format!(
+                        "E046 လိုင်း {} ၏ {} သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
+                        line, label
+                    ));
+                }
+                let broke = self.run_loop_body(body)?;
+                if broke.is_some() || self.return_signal.is_some() {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        self.loop_depth -= 1;
+        result
     }
 
     /// Call a named callee as a statement (`name(args);`): a user-defined
