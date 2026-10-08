@@ -195,7 +195,12 @@ fn main() {
     // Time the interpretation itself (not the lex/parse step) and report it
     // once the program has finished successfully.
     let started = std::time::Instant::now();
-    if let Err(e) = interp.run(&stmts) {
+    let result = interp.run(&stmts);
+    // The program's output is buffered; get it on screen before the closing
+    // line (or the error) that follows it. This stays inside the timed
+    // section, so `Interpreted in ...` still covers the cost of writing it.
+    interp.flush_output();
+    if let Err(e) = result {
         eprintln!("{}", e);
         // A failing run still saves its transcript: what the program managed
         // to print, then the error the terminal showed.
