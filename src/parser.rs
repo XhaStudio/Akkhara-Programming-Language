@@ -38,7 +38,17 @@ fn is_eng_type(s: &str) -> bool {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// A numeric literal that could not be parsed into `Int`/`Float`
+    /// (e.g. `1.2.3`). Kept as text so the interpreter still reports it as
+    /// `E047` when -- and only when -- it is evaluated.
     NumLit(String),
+    /// A numeric literal already parsed at parse time. The interpreter used
+    /// to run `parse::<i64>()` / `parse::<f64>()` on the literal text on
+    /// every single evaluation; the value is the same either way, and the
+    /// `E047` behavior above is unchanged because unparseable literals fall
+    /// back to `NumLit`.
+    Int(i64),
+    Float(f64),
     StrLit(String),
     BoolLit(bool),
     Ident(String),
@@ -1356,6 +1366,25 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
     Ok((expr, i))
 }
 
+/// A `<digits>[.<digits>]` token as an expression: parsed once here instead
+/// of on every evaluation. A literal that parses as neither (the lexer happily
+/// glues two dots into one token, e.g. `1.2.3`) stays a `NumLit`, so the
+/// interpreter reports exactly the same `E047` as before -- and only when the
+/// literal is actually evaluated.
+fn num_lit(s: &str) -> Expr {
+    if s.contains('.') {
+        match s.parse::<f64>() {
+            Ok(v) => Expr::Float(v),
+            Err(_) => Expr::NumLit(s.to_string()),
+        }
+    } else {
+        match s.parse::<i64>() {
+            Ok(v) => Expr::Int(v),
+            Err(_) => Expr::NumLit(s.to_string()),
+        }
+    }
+}
+
 fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
     if pos >= tokens.len() {
         return Err(generic_syntax_err(line));
@@ -1366,7 +1395,7 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
             let (inner, next) = parse_term_at(tokens, pos + 1, line)?;
             Ok((Expr::Neg(Box::new(inner), op_line), next))
         }
-        Tok::Num(s) => Ok((Expr::NumLit(s.clone()), pos + 1)),
+        Tok::Num(s) => Ok((num_lit(s), pos + 1)),
         Tok::Str(s) => Ok((Expr::StrLit(s.clone()), pos + 1)),
         Tok::Bool(b) => Ok((Expr::BoolLit(*b), pos + 1)),
         Tok::Ident(s) => match s.as_str() {
