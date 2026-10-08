@@ -1,7 +1,7 @@
 use crate::library::LibraryLoader;
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -70,8 +70,22 @@ fn type_name_mm(v: &Value) -> &'static str {
 /// Structural equality used for set de-duplication and dict key matching.
 /// Compares by display representation, which is adequate for the primitive
 /// element types Akkhara collections are expected to hold.
+///
+/// The three primitive `same type` cases are answered directly: building the
+/// two display strings just to compare them allocated twice per call, which
+/// is the bulk of the cost of `a == b` and of every set/dict membership test.
+/// Each fast path is exactly equivalent to comparing those reprs:
+/// `display` for Int/Bool is `to_string()`, and repr quotes strings at both
+/// ends, so equal reprs mean equal contents. Everything else -- including
+/// mixed types such as Int(1) vs Float(1.0), which must stay unequal -- still
+/// goes through `repr`, so no other result changes.
 fn value_eq(a: &Value, b: &Value) -> bool {
-    repr(a) == repr(b)
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        _ => repr(a) == repr(b),
+    }
 }
 
 fn op_name_mm(op: char) -> &'static str {
@@ -496,8 +510,48 @@ fn lib_fn_collection_err(lib: &str, fn_name: &str, line: usize) -> String {
     )
 }
 
+// --- variable-table hasher ---------------------------------------------------
+//
+// `env` is hashed on every variable read and every variable write, and its
+// keys are very short identifiers -- exactly the case where the default
+// SipHash-1-3 costs more than the lookup it is protecting. This is the public
+// FxHash mixing step (rotate-xor-multiply per byte), the usual choice for
+// compiler/interpreter symbol tables. It is not collision-resistant against
+// adversarial keys, which is fine here: variable names come from the program's
+// own source. `env` is never iterated, so the changed bucket order is not
+// observable; `functions`, `classes` and the library tables keep the default
+// hasher because they are looked up once, not per statement.
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u8(byte);
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, byte: u8) {
+        self.hash = (self.hash.rotate_left(5) ^ u64::from(byte)).wrapping_mul(FX_SEED);
+    }
+}
+
+/// The variable table: `FxHasher` instead of the default SipHash.
+type VarMap = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
+
 pub struct Interpreter {
-    env: HashMap<String, Value>,
+    env: VarMap,
     /// Names declared with the eng library's `pin` form (`pin name :bool =
     /// true;`). Assigning to a name here -- through either syntax family --
     /// is an error; `pin` values are immutable for the rest of the program.
@@ -541,6 +595,13 @@ pub struct Interpreter {
     /// as shown on stdout, so `akk` can save the run's output next to the
     /// program as a `<file_name>.akop` file. `None` disables the capture.
     output_log: Option<String>,
+    /// Buffered writer for program output. `print!` goes through the global
+    /// `io::Stdout` line writer, which flushes to the OS on every newline, so
+    /// a program printing in a loop paid one write per line. Holding the
+    /// lock and buffering keeps the same bytes in the same order (the buffer
+    /// is flushed before anything is read, and once the run ends) while
+    /// turning those writes into a handful of large ones.
+    out: BufWriter<io::StdoutLock<'static>>,
 }
 
 impl Interpreter {
@@ -550,7 +611,7 @@ impl Interpreter {
     /// name that isn't one of the built-in libraries compiled into akk.
     pub fn new(libraries_dir: std::path::PathBuf) -> Self {
         Interpreter {
-            env: HashMap::new(),
+            env: VarMap::default(),
             consts: std::collections::HashSet::new(),
             functions: HashMap::new(),
             classes: HashMap::new(),
@@ -563,6 +624,7 @@ impl Interpreter {
             break_signal: None,
             loop_depth: 0,
             output_log: None,
+            out: BufWriter::new(io::stdout().lock()),
         }
     }
 
@@ -576,10 +638,38 @@ impl Interpreter {
         self.output_log.take()
     }
 
+    /// Bind `value` to `name`, reusing an existing binding's key.
+    ///
+    /// `HashMap::insert` takes an owned key, so assigning to a variable that
+    /// already exists -- by far the common case for `x = ...;`, `x += ...;`
+    /// and the Myanmar assignment forms -- allocated a fresh copy of the
+    /// name on every single assignment just to look the same slot up again.
+    /// `get_mut` updates that slot in place; a name that isn't bound yet is
+    /// inserted exactly as before.
+    fn store(&mut self, name: &str, value: Value) {
+        if let Some(slot) = self.env.get_mut(name) {
+            *slot = value;
+        } else {
+            self.env.insert(name.to_string(), value);
+        }
+    }
+
+    /// Whether `name` is pinned (`pin` / a constant): assigning to one is an
+    /// error. `consts` is empty for programs that never use `pin`, and an
+    /// empty `HashSet` still hashes the key on every `contains`, so the
+    /// empty check short-circuits the hash on every assignment.
+    fn is_pinned(&self, name: &str) -> bool {
+        !self.consts.is_empty() && self.consts.contains(name)
+    }
+
     /// Program output: shown on stdout, and appended to the capture buffer
-    /// when one is active.
+    /// when one is active. A write error panics with the same message `print!`
+    /// produces (that is what std's own print macro does), so a closed stdout
+    /// still fails loudly.
     fn emit(&mut self, text: &str) {
-        print!("{}", text);
+        if let Err(e) = self.out.write_all(text.as_bytes()) {
+            panic!("failed printing to stdout: {}", e);
+        }
         if let Some(log) = self.output_log.as_mut() {
             log.push_str(text);
         }
@@ -589,10 +679,19 @@ impl Interpreter {
         self.emit(&format!("{}\n", text));
     }
 
-    /// Prompts are written without a trailing newline, so flush them
-    /// explicitly before the program blocks on input.
-    fn flush_stdout(&self) {
-        let _ = io::stdout().flush();
+    /// Prompts are written without a trailing newline, so flush the output
+    /// buffer explicitly before the program blocks on input.
+    fn flush_stdout(&mut self) {
+        let _ = self.out.flush();
+    }
+
+    /// Flushes everything the program has printed but that is still buffered.
+    /// `akk` calls this once the run is over -- before printing the closing
+    /// `Interpreted in ...` line or an error, so the terminal shows the
+    /// program's output ahead of them exactly as it did when each line was
+    /// written out as it was produced.
+    pub fn flush_output(&mut self) {
+        let _ = self.out.flush();
     }
 
     /// Adds a folder to search for plain `<name>.akk` libraries, on top of
@@ -641,11 +740,11 @@ impl Interpreter {
         }
         match stmt {
             Stmt::VarDecl { name, value, line } => {
-                if self.consts.contains(name) {
+                if self.is_pinned(name) {
                     return Err(eng_const_reassign_err(name, *line));
                 }
                 let v = self.eval(value, *line, Some(name))?;
-                self.env.insert(name.clone(), v);
+                self.store(name, v);
                 Ok(())
             }
             Stmt::EngDecl {
@@ -711,13 +810,13 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::EngAssign { name, value, line } => {
-                if self.consts.contains(name) {
+                if self.is_pinned(name) {
                     return Err(eng_const_reassign_err(name, *line));
                 }
                 // A first `name = <value>;` declares the variable, so an eng
                 // assignment needs no separate typed declaration.
                 let v = self.eval(value, *line, Some(name))?;
-                self.env.insert(name.clone(), v);
+                self.store(name, v);
                 Ok(())
             }
             Stmt::EngMathAssign {
@@ -726,15 +825,20 @@ impl Interpreter {
                 amount,
                 line,
             } => {
-                if self.consts.contains(name) {
+                if self.is_pinned(name) {
                     return Err(eng_const_reassign_err(name, *line));
                 }
                 // An undeclared name starts from 0, the way the Myanmar
-                // `... ကို <n> တိုးပါ။` form does.
-                let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
+                // `... ကို <n> တိုးပါ။` form does. Reading `current` before
+                // the amount keeps the old `x += <expr>` order: <expr> sees
+                // the value `x` had before this statement.
+                let current = match self.env.get(name) {
+                    Some(v) => v.clone(),
+                    None => Value::Int(0),
+                };
                 let amt = self.eval(amount, *line, Some(name))?;
                 let result = binary_op(&current, &amt, *op, *line, Some(name))?;
-                self.env.insert(name.clone(), result);
+                self.store(name, result);
                 Ok(())
             }
             Stmt::EngBreak { value, line } => {
@@ -860,13 +964,13 @@ impl Interpreter {
                 let amt = self.eval(amount, *line, None)?;
                 match target {
                     Expr::Ident(name) => {
-                        if self.consts.contains(name) {
+                        if self.is_pinned(name) {
                             return Err(eng_const_reassign_err(name, *line));
                         }
                         // Undeclared variables default to 0 in math-assignment context.
                         let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
                         let result = binary_op(&current, &amt, *op, *line, Some(name))?;
-                        self.env.insert(name.clone(), result);
+                        self.store(name, result);
                         Ok(())
                     }
                     other => {
@@ -2120,6 +2224,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
 
     fn eval(&mut self, expr: &Expr, line: usize, var_ctx: Option<&str>) -> Result<Value, String> {
         match expr {
+            // Literals already parsed by the parser -- no per-evaluation
+            // string parsing.
+            Expr::Int(i) => Ok(Value::Int(*i)),
+            Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::NumLit(s) => {
                 if s.contains('.') {
                     s.parse::<f64>()
