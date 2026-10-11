@@ -523,6 +523,133 @@ fn loop_fn_op(kw: &str) -> Option<char> {
     }
 }
 
+/// Is this word one the parser owns as a keyword? A keyword never names a
+/// callee, so the reversed call form (`(<args>) <name>`) must not read one as
+/// the name: in `x မှာ (1, 2) ဖြစ်၏။` the word after the closing paren ends the
+/// declaration, it does not call anything.
+fn is_reserved_word(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        KW_ASSIGN,
+        KW_ASSIGN_COLLECTION,
+        KW_IS,
+        KW_PARTICLE,
+        KW_DECL,
+        KW_PRINT,
+        KW_PRINT_ALT,
+        KW_INPUT,
+        KW_FOR,
+        KW_TO,
+        KW_CONVERT,
+        KW_LOOP_FROM,
+        KW_LOOP_EACH,
+        KW_LOOP_END,
+        KW_BREAK,
+        KW_TRY,
+        KW_CATCH,
+        KW_FINALLY,
+        KW_IF,
+        KW_ELIF,
+        KW_ELIF_ALT,
+        KW_ELSE,
+        KW_ELSE_ALT,
+        KW_THEN_POS,
+        KW_THEN_POS_ALT,
+        KW_THEN_NEG,
+        KW_THEN_NEG_ALT,
+        KW_AND,
+        KW_OR,
+        KW_AND_ALT,
+        KW_OR_ALT,
+        KW_WHILE,
+        KW_WHILE_POS,
+        KW_WHILE_POS_ALT,
+        KW_WHILE_NEG,
+        KW_WHILE_NEG_ALT,
+        KW_FUNC_DEF,
+        KW_BY,
+        KW_CALL,
+        KW_CALL_WITH,
+        KW_CLASS_DEF,
+        KW_SELF,
+        KW_SELF_ALT,
+        KW_NEW,
+        KW_USE,
+        KW_LIBRARIES,
+        KW_WAIT,
+        KW_RANDOM,
+        KW_BETWEEN,
+        KW_AS,
+        KW_OF,
+        KW_SEND,
+        MATH_FN_INC,
+        MATH_FN_DEC,
+        MATH_FN_MUL,
+        MATH_FN_DIV,
+    ];
+    RESERVED.iter().any(|kw| *kw == name)
+}
+
+/// The callee of a call written with its arguments first: `(<args>) <name>`,
+/// the same call as `<name>(<args>)`. `close` is the index of the `)`; the
+/// answer is the name and the index just past it.
+///
+/// A name followed by `.` is left alone: that is the library of
+/// `<lib>.<fn>(...)`, which keeps its own spellings -- the same reason
+/// `(1, 2) web.get` stays a syntax error instead of calling something called
+/// `web`.
+fn reversed_callee(tokens: &[Token], close: usize) -> Option<(String, usize)> {
+    let name_pos = close + 1;
+    let name = match tokens.get(name_pos).map(|t| &t.tok) {
+        Some(Tok::Ident(name)) if !is_reserved_word(name) => name.clone(),
+        _ => return None,
+    };
+    if matches!(tokens.get(name_pos + 1).map(|t| &t.tok), Some(Tok::Dot)) {
+        return None;
+    }
+    Some((name, name_pos + 1))
+}
+
+/// Does this token run start a call, in either order? `name(args)` (the callee
+/// first) or `(args) name` (the arguments first).
+fn call_shaped(tokens: &[Token]) -> bool {
+    match tokens.first().map(|t| &t.tok) {
+        Some(Tok::Ident(_)) => matches!(tokens.get(1).map(|t| &t.tok), Some(Tok::LParen)),
+        Some(Tok::LParen) => match find_close(tokens, 0, tokens[0].line) {
+            Ok(close) => reversed_callee(tokens, close).is_some(),
+            Err(_) => false,
+        },
+        _ => false,
+    }
+}
+
+/// A statement that is nothing but a reversed call: `(1, 2) add` / `() now`.
+/// Answers the callee and its arguments, or `None` when the parentheses are
+/// something else -- a tuple in the middle of a declaration, a grouping, a
+/// tuple literal on its own.
+fn reversed_call_stmt(body: &[Token], line: usize) -> Result<Option<(String, Vec<Expr>)>, String> {
+    if !matches!(body.first().map(|t| &t.tok), Some(Tok::LParen)) {
+        return Ok(None);
+    }
+    let close = match find_close(body, 0, body[0].line) {
+        Ok(close) => close,
+        Err(_) => return Ok(None),
+    };
+    // Only when the name is the last token: `(1, 2) add` is a call, while
+    // `(1, 2) add ကို လုပ်ပါ` is the Myanmar sentence handled further down.
+    let name = match reversed_callee(body, close) {
+        Some((name, after)) if after == body.len() => name,
+        _ => return Ok(None),
+    };
+    let mut args = Vec::new();
+    let inner = &body[1..close];
+    if !inner.is_empty() {
+        for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
+            args.push(parse_expr(part, line)?);
+        }
+    }
+    Ok(Some((name, args)))
+}
+
 /// The conversion functions that replaced the `<value> ကို <type> သို့
 /// ပြောင်းပါ။` sentence, keyed by the type that sentence named. Returns both
 /// spellings so the removal error can show the one to use instead.
@@ -1450,6 +1577,23 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
         Tok::LParen => {
             let close = find_close(tokens, pos, tokens[pos].line)?;
             let inner = &tokens[pos + 1..close];
+            // A call written with its arguments first -- `(1, 2) add`, `() now`
+            // -- is the same call as `add(1, 2)` / `now()`, and `(<args>)`
+            // before a class name creates an object the same way
+            // `Point(<args>)` does (the interpreter decides class, function or
+            // builtin for both orders). Only a name that is not a keyword can
+            // be a callee, so a plain tuple followed by the rest of a sentence
+            // is still a tuple.
+            if let Some((name, after)) = reversed_callee(tokens, close) {
+                let mut args = Vec::new();
+                if !inner.is_empty() {
+                    for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
+                        args.push(parse_expr(part, line)?);
+                    }
+                }
+                let caret = tokens[pos].line;
+                return Ok((Expr::NewObj(name, args, caret), after));
+            }
             let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
             if parts.len() == 1 {
                 // A single, comma-less parenthesized group is just a
@@ -2528,6 +2672,12 @@ fn parse_eng_fn_params(tokens: &[Token], line: usize) -> Result<Vec<String>, Str
 /// own statements below, so they're left alone here. Returns `Ok(None)` for
 /// any statement with a different shape, so other forms fall through.
 fn try_parse_eng_call_stmt(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    // --- a call with its arguments first: `(1, 2) add;` / `() now;` ---
+    //     The same statement *and the same node* as `add(1, 2);`, so both
+    //     orders resolve the name identically and report the same errors.
+    if let Some((name, args)) = reversed_call_stmt(body, line)? {
+        return Ok(Some(Stmt::EngExprCall { name, args, line }));
+    }
     if body.len() < 3
         || !matches!(body[0].tok, Tok::Ident(_))
         || !matches!(body[1].tok, Tok::LParen)
@@ -2984,11 +3134,10 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         } else {
             (None, head)
         };
-        // Only when the callee is written as `name(...)`, so the plain
-        // `<fn> ကို လုပ်ပါ။` forms handled below are left untouched.
-        if matches!(call_tokens.first().map(|t| &t.tok), Some(Tok::Ident(_)))
-            && matches!(call_tokens.get(1).map(|t| &t.tok), Some(Tok::LParen))
-        {
+        // Only when the callee is written as a call -- `name(...)` or the
+        // reversed `(...) name` -- so the plain `<fn> ကို လုပ်ပါ။` forms
+        // handled below are left untouched.
+        if call_shaped(call_tokens) {
             if let Ok(expr) = parse_expr(call_tokens, line) {
                 match expr {
                     Expr::LibCall(lib, fn_name, args, cline) => {
