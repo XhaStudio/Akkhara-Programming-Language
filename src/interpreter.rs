@@ -10,6 +10,11 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// JSON's `null`. The language has no `null` keyword, so this value only
+    /// ever comes from `json.parse` -- printing it writes `null`, and it is
+    /// equal only to another `null` (a fast path in `value_eq`, ahead of the
+    /// repr comparison the other mixed cases use).
+    Null,
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
@@ -63,6 +68,7 @@ fn type_name_mm(v: &Value) -> &'static str {
         Value::Int(_) => "ကိန်းပြည့်",
         Value::Float(_) => "ဒဿမကိန်း",
         Value::Bool(_) => "မှန်/မှား",
+        Value::Null => "null",
         Value::List(_) => "စာရင်း",
         Value::Tuple(_) => "အစု",
         Value::Set(_) => "အုပ်စု",
@@ -89,6 +95,7 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Null, Value::Null) => true,
         _ => repr(a) == repr(b),
     }
 }
@@ -125,6 +132,7 @@ pub fn display(v: &Value) -> String {
                 "False".to_string()
             }
         }
+        Value::Null => "null".to_string(),
         Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_, _) => {
             repr(v)
         }
@@ -137,7 +145,7 @@ pub fn display(v: &Value) -> String {
 fn repr(v: &Value) -> String {
     match v {
         Value::Str(s) => format!("\"{}\"", s),
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) => display(v),
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => display(v),
         Value::List(items) => {
             format!(
                 "[{}]",
@@ -238,37 +246,167 @@ const SERVER_STATUS: &str = "status";
 const SERVER_STATUS_MM: &str = "အခြေအနေကုဒ်";
 const SERVER_BODY: &str = "body";
 const SERVER_BODY_MM: &str = "အကြောင်းအရာ";
+/// The content type a reply carries unless the program passes its own.
+const SERVER_DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+const SERVER_CONTENT_TYPE: &str = "content_type";
+const SERVER_CONTENT_TYPE_MM: &str = "အမျိုးအစား";
+/// Response headers, as a dict of name -> value.
+const SERVER_HEADERS: &str = "headers";
+const SERVER_HEADERS_MM: &str = "ခေါင်းစီး";
+/// The placeholders a route pattern captured (`/users/:id` -> `id`), as a dict.
+const SERVER_PATH_PARAMS: &str = "path_params";
+const SERVER_PATH_PARAMS_MM: &str = "လမ်းအပိုင်း";
+/// The query text after `?` parsed into a dict, so a handler does not have to
+/// split and decode it itself. The raw text is still there as `query`.
+const SERVER_QUERY_PARAMS: &str = "query_params";
+const SERVER_QUERY_PARAMS_MM: &str = "မေးခွန်းအပိုင်း";
+/// The methods a 405 answer lists when the path is known but the method is
+/// not. `HEAD` rides along with `GET`: a GET route answers a HEAD request.
+const SERVER_HEAD_METHOD: &str = "HEAD";
 
-/// One registered route: an exact method + path, the handler function to call
-/// for it, and the line the route was registered on (used for errors that only
-/// show up when a request arrives).
+/// One piece of a route path: text that must match a segment exactly, or a
+/// `:name` placeholder that matches any one segment and hands it to the
+/// handler.
+enum PathPart {
+    Lit(String),
+    Param(String),
+}
+
+/// One registered route: a method, the path it was registered with, how that
+/// path is matched, the handler function to call, and the line the route was
+/// registered on (used for errors that only show up when a request arrives).
 struct ServerRoute {
     method: String,
     path: String,
+    parts: Vec<PathPart>,
+    /// The path with every placeholder written as `:` -- the identity of the
+    /// route for the duplicate check, so `/users/:id` and `/users/:name` are
+    /// the same route (both match the same requests) while `/users/me` is not.
+    shape: String,
     handler: String,
     line: usize,
 }
 
-/// The request object an Akkhara handler is handed (see the block above).
-fn server_request_value(req: &crate::server_library::Request) -> Value {
+/// Split a route path into parts. Segments are separated by `/`, and a segment
+/// starting with `:` names a parameter. The leading `/` is the caller's job to
+/// check (an empty piece before it is skipped here).
+fn split_route_path(path: &str) -> Vec<PathPart> {
+    path.split('/')
+        .skip(1)
+        .map(|segment| match segment.strip_prefix(':') {
+            Some(name) => PathPart::Param(name.to_string()),
+            None => PathPart::Lit(segment.to_string()),
+        })
+        .collect()
+}
+
+fn route_shape(parts: &[PathPart]) -> String {
+    let mut shape = String::new();
+    for part in parts {
+        shape.push('/');
+        if let PathPart::Lit(text) = part {
+            shape.push_str(text);
+        }
+    }
+    shape
+}
+
+fn route_is_literal(route: &ServerRoute) -> bool {
+    route.parts.iter().all(|p| matches!(p, PathPart::Lit(_)))
+}
+
+/// Match a request path against one route. `Some(params)` means it matched,
+/// carrying the placeholder values in the order the route declares them;
+/// `None` means it did not. A route without placeholders needs the exact path,
+/// byte for byte, the way it always did.
+fn match_route(route: &ServerRoute, path: &str) -> Option<Vec<(String, String)>> {
+    if route_is_literal(route) {
+        return if route.path == path {
+            Some(Vec::new())
+        } else {
+            None
+        };
+    }
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    if segments.len() != route.parts.len() {
+        return None;
+    }
+    let mut params = Vec::new();
+    for (part, segment) in route.parts.iter().zip(segments) {
+        match part {
+            PathPart::Lit(text) => {
+                if text != segment {
+                    return None;
+                }
+            }
+            PathPart::Param(name) => params.push((
+                name.clone(),
+                crate::server_library::decode_component(segment, false),
+            )),
+        }
+    }
+    Some(params)
+}
+
+/// Pairs as a dict, a repeated key keeping its first position and its last
+/// value -- the same rule a dict literal and the JSON reader use.
+fn pairs_to_dict(pairs: &[(String, String)]) -> Value {
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        let key = Value::Str(k.clone());
+        match out.iter_mut().find(|(existing, _)| value_eq(existing, &key)) {
+            Some(slot) => slot.1 = Value::Str(v.clone()),
+            None => out.push((key, Value::Str(v.clone()))),
+        }
+    }
+    Value::Dict(out)
+}
+
+/// The request object an Akkhara handler is handed (see the block above), with
+/// the route's placeholders and the parsed query already in it.
+fn server_request_value(
+    req: &crate::server_library::Request,
+    path_params: &[(String, String)],
+    query_params: &[(String, String)],
+) -> Value {
     let pair = |name: &str, mm: &str, text: &str| -> Vec<(String, Value)> {
         vec![
             (name.to_string(), Value::Str(text.to_string())),
             (mm.to_string(), Value::Str(text.to_string())),
         ]
     };
-    let mut fields: Vec<(String, Value)> = Vec::with_capacity(10);
+    let mut fields: Vec<(String, Value)> = Vec::with_capacity(14);
     fields.extend(pair("method", "နည်းလမ်း", &req.method));
     fields.extend(pair("path", "လမ်း", &req.path));
     fields.extend(pair("query", "မေးခွန်း", &req.query));
     fields.extend(pair("body", "ကိုယ်ထည်", &req.body));
     fields.extend(pair("headers", "ခေါင်းစီး", &req.headers));
+    for (name, mm) in [
+        (SERVER_PATH_PARAMS, SERVER_PATH_PARAMS_MM),
+        (SERVER_QUERY_PARAMS, SERVER_QUERY_PARAMS_MM),
+    ] {
+        let pairs = if name == SERVER_PATH_PARAMS {
+            path_params
+        } else {
+            query_params
+        };
+        let dict = pairs_to_dict(pairs);
+        fields.push((name.to_string(), dict.clone()));
+        fields.push((mm.to_string(), dict));
+    }
     Value::Object(SERVER_REQUEST_CLASS.to_string(), fields)
 }
 
-/// The value `reply(status, body)` produces, readable the same way the
-/// `request` library's response object is (`အခြေအနေကုဒ်` / `အကြောင်းအရာ`).
-fn server_reply_value(status: i64, body: &str) -> Value {
+/// The value `reply(status, body[, content_type])` produces, readable the same
+/// way the `request` library's response object is (`အခြေအနေကုဒ်` /
+/// `အကြောင်းအရာ`), and carrying the headers a program added with `header`.
+fn server_reply_value(
+    status: i64,
+    body: &str,
+    content_type: &str,
+    headers: Vec<(String, String)>,
+) -> Value {
+    let header_dict = pairs_to_dict(&headers);
     Value::Object(
         SERVER_RESPONSE_CLASS.to_string(),
         vec![
@@ -276,30 +414,77 @@ fn server_reply_value(status: i64, body: &str) -> Value {
             (SERVER_STATUS_MM.to_string(), Value::Int(status)),
             (SERVER_BODY.to_string(), Value::Str(body.to_string())),
             (SERVER_BODY_MM.to_string(), Value::Str(body.to_string())),
+            (
+                SERVER_CONTENT_TYPE.to_string(),
+                Value::Str(content_type.to_string()),
+            ),
+            (
+                SERVER_CONTENT_TYPE_MM.to_string(),
+                Value::Str(content_type.to_string()),
+            ),
+            (SERVER_HEADERS.to_string(), header_dict.clone()),
+            (SERVER_HEADERS_MM.to_string(), header_dict),
         ],
     )
 }
 
-/// What a handler's return value means, as (status, body).
-fn server_response_of(value: Option<Value>) -> (u16, String) {
+/// Set one field of a response object, keeping both spellings of that field in
+/// step (a response carries `status` and `အခြေအနေကုဒ်`, and so on).
+fn server_set_field(fields: &mut Vec<(String, Value)>, name: &str, mm: &str, value: Value) {
+    for key in [name, mm] {
+        match fields.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = value.clone(),
+            None => fields.push((key.to_string(), value.clone())),
+        }
+    }
+}
+
+/// One field of a response object by either spelling.
+fn server_field<'a>(fields: &'a [(String, Value)], name: &str, mm: &str) -> Option<&'a Value> {
+    fields
+        .iter()
+        .find(|(k, _)| k == name || k == mm)
+        .map(|(_, v)| v)
+}
+
+/// The header pairs a response object carries, in the order they were added.
+fn server_headers_of(fields: &[(String, Value)]) -> Vec<(String, String)> {
+    match server_field(fields, SERVER_HEADERS, SERVER_HEADERS_MM) {
+        Some(Value::Dict(pairs)) => pairs
+            .iter()
+            .map(|(k, v)| (display(k), display(v)))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What a handler's return value means: status, body, content type and the
+/// headers it set. A plain text is 200 with the default type, and anything
+/// else is its printed form.
+fn server_response_of(value: Option<Value>) -> (u16, String, String, Vec<(String, String)>) {
     match value {
-        None => (200, String::new()),
-        Some(Value::Str(body)) => (200, body),
+        None => (200, String::new(), SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
+        Some(Value::Str(body)) => (200, body, SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
         Some(Value::Object(class, fields)) if class == SERVER_RESPONSE_CLASS => {
-            let status = fields
-                .iter()
-                .find(|(k, _)| k == SERVER_STATUS)
-                .and_then(|(_, v)| as_i64(v))
+            let status = server_field(&fields, SERVER_STATUS, SERVER_STATUS_MM)
+                .and_then(as_i64)
                 .filter(|s| (100..=599).contains(s))
                 .unwrap_or(500);
-            let body = fields
-                .iter()
-                .find(|(k, _)| k == SERVER_BODY)
-                .map(|(_, v)| display(v))
+            let body = server_field(&fields, SERVER_BODY, SERVER_BODY_MM)
+                .map(display)
                 .unwrap_or_default();
-            (status as u16, body)
+            let content_type =
+                server_field(&fields, SERVER_CONTENT_TYPE, SERVER_CONTENT_TYPE_MM)
+                    .map(display)
+                    .unwrap_or_else(|| SERVER_DEFAULT_CONTENT_TYPE.to_string());
+            (status as u16, body, content_type, server_headers_of(&fields))
         }
-        Some(other) => (200, display(&other)),
+        Some(other) => (
+            200,
+            display(&other),
+            SERVER_DEFAULT_CONTENT_TYPE.to_string(),
+            Vec::new(),
+        ),
     }
 }
 
@@ -334,6 +519,90 @@ fn server_text_arg(v: &Value, fn_name: &str, what: &str, line: usize) -> Result<
             line,
         )),
     }
+}
+
+// --- "json" library ---
+//
+// The format work lives in libraries/json/main.rs, which has its own tree type
+// and no dependency on this module; these two functions are the boundary in
+// each direction, and `eval_json_call` is the one entry point every spelling
+// reaches. Importing either name (`json`, `ဂျေဆန်`) makes both spellings work,
+// the same rule the server library follows.
+const LIB_JSON_NAME: &str = "json";
+const LIB_JSON_NAME_MM: &str = "ဂျေဆန်";
+
+/// A parsed JSON tree as a language value: object -> dict (string keys),
+/// array -> list, `null` -> `Value::Null`, numbers to int or float as the text
+/// spelled them.
+fn json_tree_to_value(tree: crate::json_library::Json) -> Value {
+    use crate::json_library::Json;
+    match tree {
+        Json::Null => Value::Null,
+        Json::Bool(b) => Value::Bool(b),
+        Json::Int(i) => Value::Int(i),
+        Json::Float(f) => Value::Float(f),
+        Json::Str(s) => Value::Str(s),
+        Json::Arr(items) => {
+            Value::List(items.into_iter().map(json_tree_to_value).collect())
+        }
+        Json::Obj(members) => Value::Dict(
+            members
+                .into_iter()
+                .map(|(k, v)| (Value::Str(k), json_tree_to_value(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// The other direction, for `json.stringify` / `json.pretty`. A dict key that
+/// is not text uses its printed form (the same rendering a dict prints with);
+/// a class instance becomes an object of its fields, which is what makes
+/// `json.stringify(some_object)` work; a function has no JSON form at all.
+fn value_to_json_tree(v: &Value) -> Result<crate::json_library::Json, String> {
+    use crate::json_library::Json;
+    Ok(match v {
+        Value::Null => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Int(i) => Json::Int(*i),
+        Value::Float(f) => Json::Float(*f),
+        Value::Str(s) => Json::Str(s.clone()),
+        Value::List(items) | Value::Tuple(items) | Value::Set(items) => Json::Arr(
+            items
+                .iter()
+                .map(value_to_json_tree)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Value::Dict(pairs) => Json::Obj(
+            pairs
+                .iter()
+                .map(|(k, val)| Ok((display(k), value_to_json_tree(val)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Value::Object(_, fields) => Json::Obj(
+            fields
+                .iter()
+                .map(|(k, val)| Ok((k.clone(), value_to_json_tree(val)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        // The error carries no line: the caller adds its own (see
+        // `eval_json_call`), which knows the source line.
+        Value::Callable(_) => return Err(String::new()),
+    })
+}
+
+fn json_parse_err(e: crate::json_library::ParseError, line: usize) -> String {
+    format!(
+        "E132 လိုင်း {} တွင် JSON စာသားကို ဖတ်၍မရပါ - {} (အက္ခရာအမှတ် {})",
+        line, e.what, e.at
+    )
+}
+
+fn json_form_err(v: &Value, line: usize) -> String {
+    format!(
+        "E133 လိုင်း {} တွင် {} ကို JSON အဖြစ် ရေး၍မရပါ။",
+        line,
+        type_name_mm(v)
+    )
 }
 
 // --- "App" GUI library handles ---
@@ -624,6 +893,35 @@ fn lib_fn_argc(lib: &str, fn_name: &str, args: &[Expr], want: usize, line: usize
     }
 }
 
+/// The same check as `lib_fn_argc`, for a function that takes an optional
+/// trailing argument (`server.reply`'s content type, `server.redirect`'s
+/// status).
+fn lib_fn_argc_range(
+    lib: &str,
+    fn_name: &str,
+    args: &[Expr],
+    min: usize,
+    max: usize,
+    line: usize,
+) -> Result<(), String> {
+    if (min..=max).contains(&args.len()) {
+        return Ok(());
+    }
+    let wants = if min == max {
+        format!("{} ခု", min)
+    } else {
+        format!("{} မှ {} ခု", min, max)
+    };
+    Err(format!(
+        "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် argument {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+        line,
+        lib,
+        fn_name,
+        wants,
+        args.len()
+    ))
+}
+
 fn lib_fn_argtype_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
         "E090 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် ကိန်းဂဏန်း argument များ လိုအပ်ပါသည်။",
@@ -701,11 +999,11 @@ pub struct Interpreter {
     /// list on top of this stack instead of the global environment.
     self_stack: Vec<Vec<(String, Value)>>,
     /// Loader that resolves and activates libraries imported with
-    /// `နည်းပညာများ <name> ကို အသုံးပြုပါ။`. Only loaded libraries may use
+    /// `နည်းပညာများ <name> ကို သုံးမည်။`. Only loaded libraries may use
     /// their builtins (e.g. စောင့်ပါ).
     libraries: LibraryLoader,
     /// Aliases registered by `<lib> အဖြစ် <alias>။` (and by the
-    /// `နည်းပညာများ <lib> အဖြစ် <alias> ကို အသုံးပြုပါ။` import form):
+    /// `နည်းပညာများ <lib> အဖြစ် <alias> ကို သုံးမည်။` import form):
     /// alias -> canonical library name. Every `<lib> ၏ ...` reference is
     /// resolved through this before dispatch.
     lib_aliases: HashMap<String, String>,
@@ -762,7 +1060,7 @@ pub struct Interpreter {
 impl Interpreter {
     /// `libraries_dir` is where `akk install <name>` places downloaded
     /// packages (normally the `libraries/` folder next to the akk binary).
-    /// It's used to resolve `နည်းပညာများ <name> ကို အသုံးပြုပါ။` for any
+    /// It's used to resolve `နည်းပညာများ <name> ကို သုံးမည်။` for any
     /// name that isn't one of the built-in libraries compiled into akk.
     pub fn new(libraries_dir: std::path::PathBuf) -> Self {
         Interpreter {
@@ -852,7 +1150,7 @@ impl Interpreter {
 
     /// Adds a folder to search for plain `<name>.akk` libraries, on top of
     /// the program's own folder. `akk` calls this with the directory of the
-    /// file being run, so `နည်းပညာများ Tools ကို အသုံးပြုပါ။` can pull in a
+    /// file being run, so `နည်းပညာများ Tools ကို သုံးမည်။` can pull in a
     /// neighboring `Tools.akk`.
     pub fn add_library_search_dir(&mut self, dir: std::path::PathBuf) {
         self.libraries.add_script_dir(dir);
@@ -962,7 +1260,17 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::EngExprCall { name, args, line } => {
-                self.call_named(name, args, *line)?;
+                // A class name builds an object here too, so a bare call
+                // statement means the same thing in both orders: `Point(3, 4)။`
+                // and `(3, 4) Point။`. Anything else keeps this statement's own
+                // resolution (a function, then a builtin, then a variable bound
+                // to a callable), which tolerates a function that returns
+                // nothing -- `greet();` must not need a return value.
+                if self.classes.contains_key(name) {
+                    let _ = self.construct_object(name, args, *line)?;
+                } else {
+                    self.call_named(name, args, *line)?;
+                }
                 Ok(())
             }
             Stmt::EngAssign { name, value, line } => {
@@ -1190,6 +1498,14 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::FuncCall { name, args, line } => {
+                // A class name counts as callable wherever a callee does, the
+                // same as it does in `Expr::NewObj`: `<class> ကို လုပ်ပါ။`
+                // builds the object (and discards it) instead of reporting a
+                // missing function.
+                if self.classes.contains_key(name) {
+                    let _ = self.construct_object(name, args, *line)?;
+                    return Ok(());
+                }
                 // A user function wins; otherwise a builtin, then a variable
                 // bound to a first-class library function (`TOOL`), so the
                 // Myanmar form `<name> ကို လုပ်ရန် <args> ဖြင့်။` works for
@@ -1219,7 +1535,14 @@ impl Interpreter {
                 args,
                 line,
             } => {
-                let result = match self.functions.get(fn_name).cloned() {
+                // A class name resolves here as well, so the assigning
+                // sentence holds an object in either order:
+                // `<var> အတွက် Point(3, 4) ကို လုပ်ပါ။` and
+                // `<var> အတွက် (3, 4) Point ကို လုပ်ပါ။`.
+                let result = if self.classes.contains_key(fn_name) {
+                    Some(self.construct_object(fn_name, args, *line)?)
+                } else {
+                    match self.functions.get(fn_name).cloned() {
                     // The function was already found, so its argument count
                     // is checked and its body runs without a second lookup.
                     Some(function) => self.invoke_looked_up(fn_name, &function, args, *line)?,
@@ -1234,6 +1557,7 @@ impl Interpreter {
                                 _ => self.call_function(fn_name, args, *line)?,
                             }
                         }
+                    }
                     }
                 };
                 let value = result.ok_or_else(|| {
@@ -1416,7 +1740,7 @@ impl Interpreter {
             Stmt::RandomDecl { name, min, max, line } => {
                 if !self.libraries.is_loaded("ကျပန်း") {
                     return Err(format!(
-                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို သုံးမည်။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         line
                     ));
                 }
@@ -1437,7 +1761,7 @@ impl Interpreter {
             Stmt::Wait { amount, unit, line } => {
                 if !self.libraries.is_loaded("အချိန်") {
                     return Err(format!(
-                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန် ကို အသုံးပြုပါ။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန် ကို သုံးမည်။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         line
                     ));
                 }
@@ -1471,7 +1795,7 @@ impl Interpreter {
                 }
                 if !self.libraries.is_loaded("request") {
                     return Err(format!(
-                        "E078 လိုင်း {} တွင် \"request\" ကို သုံးရန် \"နည်းပညာများ request ကို အသုံးပြုပါ။\" ဖြင့် request နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E078 လိုင်း {} တွင် \"request\" ကို သုံးရန် \"နည်းပညာများ request ကို သုံးမည်။\" ဖြင့် request နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         line
                     ));
                 }
@@ -1495,12 +1819,25 @@ const SELF_PREFIX: &'static str = "တန်ဖိုး ";
 const SELF_PREFIX_ALT: &'static str = "အတု ";
 
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
-        if !s.contains('{') {
+        // The fast path is only for a string with nothing to look at: no
+        // placeholder can start without a `{`, and an escaped brace cannot be
+        // unescaped without a `\`. Guarding on `{` alone would leave the
+        // backslash in `"...\}"` -- the piece that closes a JSON body.
+        if !s.contains(['{', '\\']) {
             return Ok(s.to_string());
         }
         let mut out = String::new();
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
+            // "\{" and "\}" are literal braces. Without them a string could
+            // not carry JSON, CSS, a template or any other brace-carrying text:
+            // every "{" would be read as the start of a placeholder (and the
+            // lexer keeps the backslash, so this is the last place that can
+            // tell the two apart).
+            if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
+                out.push(chars.next().unwrap());
+                continue;
+            }
             if c == '{' {
                 let mut name = String::new();
                 let mut closed = false;
@@ -1755,7 +2092,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// (`Stmt::LibCall` / `Stmt::LibCallAssign`).
     ///
     /// The library must already have been imported with
-    /// `နည်းပညာများ <lib> ကို အသုံးပြုပါ။`, and `<fn>` must be one of the
+    /// `နည်းပညာများ <lib> ကို သုံးမည်။`, and `<fn>` must be one of the
     /// native functions that library exposes:
     ///
     ///   request   get(<url>) -> response, post(<url>, <data>) -> response
@@ -1867,8 +2204,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.eval_app_call(fn_name, args, line)
             }
             LIB_SERVER_NAME | LIB_SERVER_NAME_MM => self.eval_server_call(fn_name, args, line),
+            LIB_JSON_NAME | LIB_JSON_NAME_MM => self.eval_json_call(fn_name, args, line),
             // Not a built-in: a script/package imported with
-            // `နည်းပညာများ <name> ကို အသုံးပြုပါ။` registers its functions
+            // `နည်းပညာများ <name> ကို သုံးမည်။` registers its functions
             // globally, so `<lib> ၏ <fn>` / `<lib>.<fn>` reaches the one
             // that library defined. Functions defined outside that library
             // aren't reachable through it.
@@ -1906,6 +2244,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         match fn_name {
             "get" | "ရယူ" => self.register_server_route("GET", fn_name, args, line),
             "post" | "ပို့" => self.register_server_route("POST", fn_name, args, line),
+            "put" | "အစားထိုး" => self.register_server_route("PUT", fn_name, args, line),
+            "delete" | "ဖျက်" => self.register_server_route("DELETE", fn_name, args, line),
+            "patch" | "ပြင်ဆင်" => self.register_server_route("PATCH", fn_name, args, line),
             "route" | "လမ်းကြောင်း" => {
                 lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 3, line)?;
                 let method_v = self.eval(&args[0], line, None)?;
@@ -1917,8 +2258,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.add_server_route(&method, &path, &handler, line)?;
                 Ok(None)
             }
+            // `reply(status, body)` or `reply(status, body, content_type)`: the
+            // third argument is how a handler answers with HTML or JSON instead
+            // of plain text (`json.stringify` writes the body).
             "reply" | "အဖြေ" => {
-                lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 2, line)?;
+                lib_fn_argc_range(LIB_SERVER_NAME, fn_name, args, 2, 3, line)?;
                 let status_v = self.eval(&args[0], line, None)?;
                 let body_v = self.eval(&args[1], line, None)?;
                 let status = as_i64(&status_v).ok_or_else(|| {
@@ -1931,7 +2275,72 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         line,
                     ));
                 }
-                Ok(Some(server_reply_value(status, &display(&body_v))))
+                let content_type = match args.get(2) {
+                    Some(expr) => {
+                        let v = self.eval(expr, line, None)?;
+                        server_text_arg(&v, fn_name, "content type", line)?
+                    }
+                    None => SERVER_DEFAULT_CONTENT_TYPE.to_string(),
+                };
+                Ok(Some(server_reply_value(
+                    status,
+                    &display(&body_v),
+                    &content_type,
+                    Vec::new(),
+                )))
+            }
+            // `header(response, name, value)`: the same response with one more
+            // header, so a handler can build one up before returning it.
+            "header" | "ခေါင်းစီးထည့်" => {
+                lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 3, line)?;
+                let response_v = self.eval(&args[0], line, None)?;
+                let name_v = self.eval(&args[1], line, None)?;
+                let value_v = self.eval(&args[2], line, None)?;
+                let name = server_text_arg(&name_v, fn_name, "header အမည်", line)?;
+                match response_v {
+                    Value::Object(class, mut fields) if class == SERVER_RESPONSE_CLASS => {
+                        let mut headers = server_headers_of(&fields);
+                        headers.push((name, display(&value_v)));
+                        let dict = pairs_to_dict(&headers);
+                        server_set_field(&mut fields, SERVER_HEADERS, SERVER_HEADERS_MM, dict);
+                        Ok(Some(Value::Object(class, fields)))
+                    }
+                    _ => Err(server_arg_err(
+                        fn_name,
+                        "\"အဖြေ\" (reply) မှ ရသော response တန်ဖိုးတစ်ခုကို ပထမ argument အဖြစ်",
+                        line,
+                    )),
+                }
+            }
+            // `redirect(url)` / `redirect(url, status)`: a 302 (or 301, 303,
+            // 307, 308) with a `Location` header and no body.
+            "redirect" | "ပြန်ညွှန်း" => {
+                lib_fn_argc_range(LIB_SERVER_NAME, fn_name, args, 1, 2, line)?;
+                let url_v = self.eval(&args[0], line, None)?;
+                let url = server_text_arg(&url_v, fn_name, "URL", line)?;
+                let status = match args.get(1) {
+                    Some(expr) => {
+                        let v = self.eval(expr, line, None)?;
+                        let code = as_i64(&v).ok_or_else(|| {
+                            server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line)
+                        })?;
+                        if !(300..=399).contains(&code) {
+                            return Err(server_arg_err(
+                                fn_name,
+                                "300 မှ 399 အတွင်း redirect status",
+                                line,
+                            ));
+                        }
+                        code
+                    }
+                    None => 302,
+                };
+                Ok(Some(server_reply_value(
+                    status,
+                    "",
+                    "",
+                    vec![("Location".to_string(), url)],
+                )))
             }
             "serve" | "ဆောင်ရွက်" => {
                 lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 1, line)?;
@@ -2004,23 +2413,99 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 line,
             ));
         }
+        let parts = split_route_path(path);
+        // A placeholder needs a name, and one name per route: two `:id` in the
+        // same path would leave the handler's dict with one of them.
+        let mut names: Vec<&str> = Vec::new();
+        for part in &parts {
+            if let PathPart::Param(name) = part {
+                if name.is_empty() {
+                    return Err(server_route_err(
+                        &format!(
+                            "route path \"{}\" တွင် \":\" နောက်၌ parameter အမည် လိုအပ်ပါသည်။",
+                            path
+                        ),
+                        line,
+                    ));
+                }
+                if names.contains(&name.as_str()) {
+                    return Err(server_route_err(
+                        &format!(
+                            "route path \"{}\" တွင် \":{}\" ကို နှစ်ခါ ရေးထားပါသည်။",
+                            path, name
+                        ),
+                        line,
+                    ));
+                }
+                names.push(name.as_str());
+            }
+        }
+        let shape = route_shape(&parts);
+        // Two routes that match the same requests are a mistake, so the check
+        // is on the shape: `/users/:id` and `/users/:name` are one route, while
+        // `/users/me` is a different one (and wins over the placeholder).
         if self
             .routes
             .iter()
-            .any(|r| r.method == method && r.path == path)
+            .any(|r| r.method == method && r.shape == shape)
         {
             return Err(server_route_err(
-                &format!("{} {} route ကို နှစ်ခါ မှတ်ထားပါသည်။", method, path),
+                &format!(
+                    "{} {} route ကို နှစ်ခါ မှတ်ထားပါသည် ({})။",
+                    method, path, shape
+                ),
                 line,
             ));
         }
         self.routes.push(ServerRoute {
             method: method.to_string(),
             path: path.to_string(),
+            parts,
+            shape,
             handler: handler.to_string(),
             line,
         });
         Ok(())
+    }
+
+    /// Which route answers this request, and what the pattern captured.
+    ///
+    /// A registered exact path beats a pattern that would also match it
+    /// (`/users/me` before `/users/:id`), and patterns are tried in the order
+    /// they were registered. `None` means no route took the request.
+    fn find_server_route(&self, method: &str, path: &str) -> Option<(usize, Vec<(String, String)>)> {
+        for (i, route) in self.routes.iter().enumerate() {
+            if route.method == method && route_is_literal(route) && route.path == path {
+                return Some((i, Vec::new()));
+            }
+        }
+        for (i, route) in self.routes.iter().enumerate() {
+            if route.method != method || route_is_literal(route) {
+                continue;
+            }
+            if let Some(params) = match_route(route, path) {
+                return Some((i, params));
+            }
+        }
+        None
+    }
+
+    /// The methods that could answer this path, for the `Allow` header of a
+    /// 405. Sorted and de-duplicated; `HEAD` is listed next to `GET`, since a
+    /// GET route is what answers a HEAD request.
+    fn allowed_methods(&self, path: &str) -> Vec<String> {
+        let mut methods: Vec<String> = Vec::new();
+        for route in self.routes.iter() {
+            if match_route(route, path).is_some() && !methods.contains(&route.method) {
+                methods.push(route.method.clone());
+            }
+        }
+        if methods.iter().any(|m| m == "GET") && !methods.iter().any(|m| m == SERVER_HEAD_METHOD)
+        {
+            methods.push(SERVER_HEAD_METHOD.to_string());
+        }
+        methods.sort();
+        methods
     }
 
     /// `server.serve(port)`: bind, then answer requests until the process
@@ -2028,12 +2513,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// exactly like any other long-running program).
     ///
     /// What reaches a handler: the request object described next to
-    /// `LIB_SERVER_NAME`. What comes back: the handler's value as a response, a
-    /// 404 for an unrouted path, a 400/413 from the library for a request it
-    /// could not read, and a 500 with the error text when a handler itself
-    /// fails -- one failed request never stops the server. Every request logs
-    /// one line, so a running server leaves a trail on stdout and in the
-    /// `.akop` file.
+    /// `LIB_SERVER_NAME`, including the route's placeholders and the parsed
+    /// query. What comes back: the handler's value as a response, a 404 for an
+    /// unrouted path, a 405 with an `Allow` header for a known path with the
+    /// wrong method, a 400/413 from the library for a request it could not
+    /// read, and a 500 with the error text when a handler itself fails -- one
+    /// failed request never stops the server. A `HEAD` request is answered from
+    /// the `GET` route with its body left off, which is what the method asks
+    /// for. Every request logs one line, so a running server leaves a trail on
+    /// stdout and in the `.akop` file.
     fn serve_server(&mut self, port: u16, line: usize) -> Result<(), String> {
         let listener =
             crate::server_library::Listener::bind(port).map_err(|e| server_listen_err(&e, line))?;
@@ -2044,7 +2532,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             // library's own status is the answer.
             if let Some((status, body)) = pending.problem.take() {
                 self.emit_line(&format!("bad request -> {}", status));
-                if let Err(e) = pending.respond(status, &body) {
+                if let Err(e) = pending.respond(
+                    status,
+                    &body,
+                    SERVER_DEFAULT_CONTENT_TYPE,
+                    &[],
+                    false,
+                ) {
                     self.emit_line(&format!("could not answer: {}", e));
                 }
                 continue;
@@ -2053,35 +2547,134 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 Some(request) => request,
                 None => continue,
             };
-            let route = self
-                .routes
-                .iter()
-                .find(|r| r.method == request.method && r.path == request.path)
-                .map(|r| (r.handler.clone(), r.line));
-            let (status, body) = match route {
-                None => (
-                    404,
-                    format!("no route: {} {}", request.method, request.path),
-                ),
-                Some((handler, route_line)) => match self.lookup_function(&handler, 1, route_line)
-                {
-                    Err(e) => (500, e),
-                    Ok(function) => {
-                        let args = vec![server_request_value(&request)];
-                        match self.invoke_function(&function, args) {
-                            Ok(value) => server_response_of(value),
-                            Err(e) => {
-                                self.emit_line(&format!("handler error: {}", e));
-                                (500, e)
+
+            // A HEAD request is a GET without a body: match the GET routes
+            // when there is no HEAD route of its own, and drop the body below.
+            let mut head_only = false;
+            let mut found = self.find_server_route(&request.method, &request.path);
+            if found.is_none() && request.method == SERVER_HEAD_METHOD {
+                head_only = true;
+                found = self.find_server_route("GET", &request.path);
+            }
+
+            let query_params = crate::server_library::split_query(&request.query);
+            let default_type = || SERVER_DEFAULT_CONTENT_TYPE.to_string();
+            let (status, body, content_type, response_headers) = match found {
+                None => {
+                    let allowed = self.allowed_methods(&request.path);
+                    if allowed.is_empty() {
+                        (
+                            404,
+                            format!("no route: {} {}", request.method, request.path),
+                            default_type(),
+                            Vec::new(),
+                        )
+                    } else {
+                        (
+                            405,
+                            format!(
+                                "method not allowed: {} {} (allowed: {})",
+                                request.method,
+                                request.path,
+                                allowed.join(", ")
+                            ),
+                            default_type(),
+                            vec![("Allow".to_string(), allowed.join(", "))],
+                        )
+                    }
+                }
+                Some((index, path_params)) => {
+                    let (handler, route_line) = {
+                        let route = &self.routes[index];
+                        (route.handler.clone(), route.line)
+                    };
+                    match self.lookup_function(&handler, 1, route_line) {
+                        Err(e) => (500, e, default_type(), Vec::new()),
+                        Ok(function) => {
+                            let args =
+                                vec![server_request_value(&request, &path_params, &query_params)];
+                            match self.invoke_function(&function, args) {
+                                Ok(value) => server_response_of(value),
+                                Err(e) => {
+                                    self.emit_line(&format!("handler error: {}", e));
+                                    (500, e, default_type(), Vec::new())
+                                }
                             }
                         }
                     }
-                },
+                }
             };
             self.emit_line(&format!("{} {} -> {}", request.method, request.path, status));
-            if let Err(e) = pending.respond(status, &body) {
+            if let Err(e) = pending.respond(
+                status,
+                &body,
+                &content_type,
+                &response_headers,
+                head_only,
+            ) {
                 self.emit_line(&format!("could not answer: {}", e));
             }
+        }
+    }
+
+    /// Call one of the "json" library's functions, in either spelling:
+    /// `json.parse(text)` / `ဂျေဆန် ၏ ဖတ်(text)` and the rest.
+    ///
+    /// The library is the only place that knows JSON syntax; this only moves
+    /// values across the boundary and turns the library's own errors into an
+    /// `E132`/`E133` carrying the source line.
+    fn eval_json_call(
+        &mut self,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        self.require_library_loaded(LIB_JSON_NAME, line)?;
+        match fn_name {
+            "parse" | "ဖတ်" => {
+                lib_fn_argc(LIB_JSON_NAME, fn_name, args, 1, line)?;
+                let text_v = self.eval(&args[0], line, None)?;
+                let text = server_text_arg(&text_v, fn_name, "JSON စာသား", line)?;
+                let tree = crate::json_library::parse(&text).map_err(|e| json_parse_err(e, line))?;
+                Ok(Some(json_tree_to_value(tree)))
+            }
+            "stringify" | "ရေးပါ" => {
+                lib_fn_argc(LIB_JSON_NAME, fn_name, args, 1, line)?;
+                let v = self.eval(&args[0], line, None)?;
+                let tree = value_to_json_tree(&v).map_err(|_| json_form_err(&v, line))?;
+                Ok(Some(Value::Str(crate::json_library::write(&tree))))
+            }
+            "pretty" | "လှပစွာ" => {
+                lib_fn_argc(LIB_JSON_NAME, fn_name, args, 1, line)?;
+                let v = self.eval(&args[0], line, None)?;
+                let tree = value_to_json_tree(&v).map_err(|_| json_form_err(&v, line))?;
+                Ok(Some(Value::Str(crate::json_library::write_pretty(&tree, 2))))
+            }
+            // `json.get(value, key, default)`: the lenient member read a
+            // backend needs most -- a missing key, or a value that has no
+            // members at all, gives the default instead of failing.
+            "get" | "ရယူ" => {
+                lib_fn_argc(LIB_JSON_NAME, fn_name, args, 3, line)?;
+                let container = self.eval(&args[0], line, None)?;
+                let key = self.eval(&args[1], line, None)?;
+                let default = self.eval(&args[2], line, None)?;
+                let found = match &container {
+                    Value::Dict(pairs) => pairs
+                        .iter()
+                        .find(|(k, _)| value_eq(k, &key))
+                        .map(|(_, v)| v.clone()),
+                    Value::Object(_, fields) => {
+                        let name = display(&key);
+                        fields
+                            .iter()
+                            .find(|(k, _)| *k == name)
+                            .map(|(_, v)| v.clone())
+                    }
+                    _ => None,
+                };
+                Ok(Some(found.unwrap_or(default)))
+            }
+            _ => Err(lib_fn_unknown_err(LIB_JSON_NAME, fn_name, line)),
         }
     }
 
@@ -2487,7 +3080,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Ok(())
         } else {
             Err(format!(
-                "E089 လိုင်း {} တွင် \"{}\" ကို သုံးရန် \"နည်းပညာများ {} ကို အသုံးပြုပါ။\" ဖြင့် နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                "E089 လိုင်း {} တွင် \"{}\" ကို သုံးရန် \"နည်းပညာများ {} ကို သုံးမည်။\" ဖြင့် နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                 line, lib, lib
             ))
         }
@@ -2517,6 +3110,12 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         if name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM {
             self.libraries.mark_loaded(LIB_SERVER_NAME);
             self.libraries.mark_loaded(LIB_SERVER_NAME_MM);
+            return Ok(());
+        }
+        // The json library has two names for one implementation too.
+        if name == LIB_JSON_NAME || name == LIB_JSON_NAME_MM {
+            self.libraries.mark_loaded(LIB_JSON_NAME);
+            self.libraries.mark_loaded(LIB_JSON_NAME_MM);
             return Ok(());
         }
         let src = self
@@ -2581,6 +3180,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     fn is_known_library(&self, name: &str) -> bool {
         name == "request" || name == "ကျပန်း" || name == "အချိန်" || name == LIB_APP_NAME
             || name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM
+            || name == LIB_JSON_NAME || name == LIB_JSON_NAME_MM
             || self.libraries.find_dynamic_source(name).is_some()
             || self.libraries.find_script_source(name).is_some()
     }
@@ -2697,7 +3297,12 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 // it defines.
                 let resolved = self.resolve_lib(lib);
                 let lib = resolved.as_str();
-                if lib == LIB_REQUEST_NAME || lib == "ကျပန်း" || lib == "အချိန်" {
+                if lib == LIB_REQUEST_NAME
+                    || lib == "ကျပန်း"
+                    || lib == "အချိန်"
+                    || lib == LIB_JSON_NAME
+                    || lib == LIB_JSON_NAME_MM
+                {
                     self.require_library_loaded(lib, *refline)?;
                 } else {
                     let owns_fn = self
@@ -2750,7 +3355,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
                 if !self.libraries.is_loaded(LIB_REQUEST_NAME) {
                     return Err(format!(
-                        "E078 လိုင်း {} တွင် \"request\" ကို သုံးရန် \"နည်းပညာများ request ကို အသုံးပြုပါ။\" ဖြင့် request နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E078 လိုင်း {} တွင် \"request\" ကို သုံးရန် \"နည်းပညာများ request ကို သုံးမည်။\" ဖြင့် request နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         gline
                     ));
                 }
@@ -3191,7 +3796,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
 
     /// Run one eng builtin: `len`, `abs`, `min`, `max`, `sqrt`, `floor`,
     /// `ceil`, `round`, `upper`, `lower`, `trim`, `contains`. Builtins are
-    /// core eng syntax -- no `နည်းပညာများ ... ကို အသုံးပြုပါ။` needed -- and
+    /// core eng syntax -- no `နည်းပညာများ ... ကို သုံးမည်။` needed -- and
     /// work both as statements (`len(xs);`) and inside expressions
     /// (`n :int = len(xs);`).
     fn call_builtin(
