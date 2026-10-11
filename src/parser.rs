@@ -54,14 +54,15 @@ pub enum Expr {
     Ident(String),
     Binary(Box<Expr>, char, Box<Expr>, usize), // line of the operator
     Neg(Box<Expr>, usize),                     // unary minus, line
-    Convert(Box<Expr>, String, usize),         // inner expr, target type keyword, line
     ListLit(Vec<Expr>),
     TupleLit(Vec<Expr>),
     SetLit(Vec<Expr>),
     DictLit(Vec<(Expr, Expr)>),
     /// Postfix index: `xs[i]` or table `xs[row, col]` (or dict `xs[key]`).
     Index(Box<Expr>, Vec<Expr>),
-    /// Object instantiation: `<ClassName> [အသစ်] (arg1, arg2, ...)`.
+    /// Object instantiation: `<ClassName>(arg1, arg2, ...)`. This is the only
+    /// spelling; the old `အသစ်` marker (on either side of the argument list)
+    /// is refused with `E029`.
     NewObj(String, Vec<Expr>, usize),
     /// Library call in the eng spelling: `<lib>.<fn>(arg1, arg2, ...)` --
     /// the same call as the Myanmar `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
@@ -105,11 +106,6 @@ pub enum Stmt {
         name: String,
         min: Expr,
         max: Expr,
-        line: usize,
-    },
-    ConvertStmt {
-        value: Expr,
-        target_type: String,
         line: usize,
     },
     ExprStmt {
@@ -408,7 +404,13 @@ const KW_PRINT: &str = "ဖော်ပြပါ";
 const KW_PRINT_ALT: &str = "ပြပါ";
 const KW_INPUT: &str = "မေးပါ";
 const KW_FOR: &str = "အတွက်";
+/// `သို့` -- the "to" of the request library's send sentence, and the
+/// Myanmar spelling of the `or` condition operator. The conversion sentence
+/// it used to introduce is gone; see `KW_CONVERT` below.
 const KW_TO: &str = "သို့";
+/// `ပြောင်းပါ` -- the verb of the removed conversion sentence. Kept only so
+/// that a line still using it reports its replacement (`စာ(x)`, `int(x)`, ...)
+/// instead of a generic syntax error.
 const KW_CONVERT: &str = "ပြောင်းပါ";
 const KW_LOOP_FROM: &str = "ထဲမှ";
 const KW_LOOP_EACH: &str = "တစ်ခုစီ";
@@ -466,6 +468,11 @@ const KW_SELF: &str = "တန်ဖိုး";
 /// write either `တန်ဖိုး <field> သည် <value> ဖြစ်၏။` or
 /// `အတု <field> သည် <value> ဖြစ်၏။`.
 const KW_SELF_ALT: &str = "အတု";
+/// `အသစ်` -- the removed marker of the object-creation expression, which is
+/// now just `<class name>(<argument>, ...)`. It stays a known word only so a
+/// line still using it reports its replacement (`E029`) instead of a generic
+/// syntax error, the same way `KW_CONVERT` reports the removed conversion
+/// sentence.
 const KW_NEW: &str = "အသစ်";
 
 /// Either spelling of the self keyword.
@@ -485,15 +492,6 @@ const KW_AS: &str = "အဖြစ်";
 const KW_OF: &str = "၏";
 const KW_SEND: &str = "ပို့ပါ";
 const LIB_REQUEST: &str = "request";
-
-const TYPE_INT: &str = "ကိန်းပြည့်";
-const TYPE_FLOAT: &str = "ဒဿမကိန်း";
-const TYPE_STR: &str = "စာသား";
-const TYPE_LIST: &str = "စာရင်း";
-const TYPE_TUPLE: &str = "အစု";
-const TYPE_SET: &str = "အုပ်စု";
-const TYPE_DICT: &str = "အဘိဓာန်";
-const TYPE_TABLE: &str = "ဇယား";
 
 pub const MATH_FN_INC: &str = "တိုးပါ";
 pub const MATH_FN_DEC: &str = "လျော့ပါ";
@@ -525,13 +523,18 @@ fn loop_fn_op(kw: &str) -> Option<char> {
     }
 }
 
-pub fn is_type_keyword(s: &str) -> bool {
-    matches!(
-        s,
-        TYPE_INT | TYPE_FLOAT | TYPE_STR | TYPE_LIST | TYPE_TUPLE | TYPE_SET | TYPE_DICT
-            | TYPE_TABLE
-    ) || s == "မှန်/မှား"
-        || s == "ဘူလ်"
+/// The conversion functions that replaced the `<value> ကို <type> သို့
+/// ပြောင်းပါ။` sentence, keyed by the type that sentence named. Returns both
+/// spellings so the removal error can show the one to use instead.
+fn convert_hint(type_keyword: &str) -> Option<(&'static str, &'static str)> {
+    match type_keyword {
+        "ကိန်းပြည့်" | "int" => Some(("ကိန်းပြည့်", "int")),
+        "ဒဿမကိန်း" | "ဒဿမ" | "float" => Some(("ဒဿမ", "float")),
+        "စာသား" | "စာ" | "str" => Some(("စာ", "str")),
+        "ဘူလ်" | "ဘူးလ်" | "bool" => Some(("ဘူးလ်", "bool")),
+        "ကိန်း" | "digits" => Some(("ကိန်း", "digits")),
+        _ => None,
+    }
 }
 
 /// Splits a token slice on `,` tokens, but only at paren-nesting depth 0, so
@@ -633,18 +636,22 @@ fn fn_missing_value_err(line: usize, fname: &str) -> String {
     )
 }
 
-fn convert_missing_value_err(line: usize) -> String {
-    format!(
-        "E008 လိုင်း {} တွင် ပြောင်းလဲရန် တန်ဖိုး လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
-        line
-    )
-}
-
-fn convert_missing_type_err(line: usize) -> String {
-    format!(
-        "E009 လိုင်း {} တွင် ပြောင်းလဲရန် အမျိုးအစား လိုအပ်ပါသည်။ အသုံးပြုပုံ — <value> ကို <type> သို့ ပြောင်းပါ။",
-        line
-    )
+/// Error for a line still using the removed `<value> ကို <type> သို့
+/// ပြောင်းပါ။` sentence. When the type it asked for is recognizable, E008
+/// names the conversion function that replaced it; otherwise E009 lists all
+/// of them. E008/E009 were this sentence's own error codes before it was
+/// removed, so old programs keep landing on the same code.
+fn convert_removed_err(line: usize, target: Option<(&'static str, &'static str)>) -> String {
+    match target {
+        Some((mm, eng)) => format!(
+            "E008 လိုင်း {} တွင် \"ပြောင်းပါ\" ကို ဖယ်ရှားလိုက်ပါပြီ။ <value> ကို {}(x) / {}(x) ဖြင့် ပြောင်းပါ။",
+            line, mm, eng
+        ),
+        None => format!(
+            "E009 လိုင်း {} တွင် \"ပြောင်းပါ\" ကို ဖယ်ရှားလိုက်ပါပြီ။ ပြောင်းရန်မှာ — ကိန်း(x)/digits(x), ကိန်းပြည့်(x)/int(x), ဒဿမ(x)/float(x), ဘူးလ်(x)/bool(x), စာ(x)/str(x)။",
+            line
+        ),
+    }
 }
 
 fn math_missing_value_err(line: usize, fname: &str) -> String {
@@ -880,7 +887,7 @@ fn class_missing_constructor_err(line: usize, name: &str) -> String {
 
 fn new_obj_missing_class_err(line: usize) -> String {
     format!(
-        "E029 လိုင်း {} တွင် object အသစ်ဖန်တီးမည့် class ကို ရေးပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
+        "E029 လိုင်း {} တွင် object ဖန်တီးသည့် class ရေးပုံ မှားနေပါသည်။ \"အသစ်\" မလိုအပ်တော့ပါ။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
         line
     )
 }
@@ -1404,12 +1411,14 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
             "မှန်" => Ok((Expr::BoolLit(true), pos + 1)),
             "မှား" => Ok((Expr::BoolLit(false), pos + 1)),
             _ => {
-                // Object instantiation. Two accepted orderings for the
-                // optional "အသစ်" (new) marker, since both are seen in the
-                // wild: "<ClassName> အသစ် (args)" and "<ClassName>(args) အသစ်".
-                let mut next = pos + 1;
+                // Object instantiation: "<ClassName>(args)". There is only
+                // this one spelling. The old optional "အသစ်" (new) marker --
+                // written before the argument list or after it -- is refused
+                // with a pointer to the accepted form rather than being
+                // silently skipped.
+                let next = pos + 1;
                 if next < tokens.len() && ident_eq(&tokens[next].tok, KW_NEW) {
-                    next += 1;
+                    return Err(new_obj_missing_class_err(tokens[pos].line));
                 }
                 if next < tokens.len() && matches!(tokens[next].tok, Tok::LParen) {
                     let close = find_close(tokens, next, tokens[next].line)?;
@@ -1419,9 +1428,9 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
                     for p in parts {
                         args.push(parse_expr(p, line)?);
                     }
-                    let mut after = close + 1;
+                    let after = close + 1;
                     if after < tokens.len() && ident_eq(&tokens[after].tok, KW_NEW) {
-                        after += 1;
+                        return Err(new_obj_missing_class_err(tokens[pos].line));
                     }
                     return Ok((Expr::NewObj(s.clone(), args, tokens[pos].line), after));
                 }
@@ -3260,46 +3269,24 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
     }
 
-    // --- Convert statement (standalone): value ကို <type> သို့ ပြောင်းပါ။ ---
-    if let Some(conv_idx) = find_kw(&body, KW_CONVERT) {
-        if conv_idx == 0 || !ident_eq(&body[conv_idx - 1].tok, KW_TO) {
-            return Err(generic_syntax_err(line));
-        }
-        let to_idx = conv_idx - 1;
-        if to_idx == 0 {
-            return Err(convert_missing_type_err(line));
-        }
-        let type_idx = to_idx - 1;
-
-        if ident_eq(&body[type_idx].tok, KW_PARTICLE) {
-            return Err(convert_missing_type_err(line));
-        }
-
-        let type_name = match &body[type_idx].tok {
-            Tok::Ident(s) if is_type_keyword(s) => s.clone(),
-            _ => return Err(convert_missing_type_err(line)),
-        };
-
-        if type_idx == 0 || !ident_eq(&body[type_idx - 1].tok, KW_PARTICLE) {
-            return Err(convert_missing_value_err(line));
-        }
-        let ko_idx = type_idx - 1;
-        let value_tokens = &body[..ko_idx];
-        if value_tokens.is_empty() {
-            return Err(convert_missing_value_err(line));
-        }
-        let value = parse_expr(value_tokens, line)?;
-        if !end_present {
-            return Err(missing_period_err(line));
-        }
-        if conv_idx + 1 != body.len() {
-            return Err(generic_syntax_err(line));
-        }
-        return Ok(Stmt::ConvertStmt {
-            value,
-            target_type: type_name,
-            line,
-        });
+    // --- The conversion sentence that used to live here ----
+    //     value ကို <type> သို့ ပြောင်းပါ။
+    // Conversion is now a plain function in both spellings -- `စာ(x)` /
+    // `str(x)`, and the rest of `convert_hint` below -- so a line still
+    // written with the old verb is diagnosed with its replacement instead of
+    // falling through to the generic syntax error. `သို့` itself stays: the
+    // condition operator `(သို့)` and the request library's send sentence
+    // still use it.
+    if find_kw(&body, KW_CONVERT).is_some() {
+        let target = body
+            .iter()
+            .position(|t| ident_eq(&t.tok, KW_TO))
+            .and_then(|to_idx| to_idx.checked_sub(1))
+            .and_then(|type_idx| match &body[type_idx].tok {
+                Tok::Ident(s) => convert_hint(s),
+                _ => None,
+            });
+        return Err(convert_removed_err(line, target));
     }
 
     // --- Math assignment: <var/value> ကို <amount> <fn>ပါ။  OR  <var> အတွက် <amount> <fn>ပါ။ ---
