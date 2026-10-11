@@ -1,7 +1,8 @@
 use crate::library::LibraryLoader;
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
 use std::collections::HashMap;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -51,6 +52,10 @@ struct ClassInfo {
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
 const TYPE_STR: &str = "စာသား";
+/// "number" -- int or float, the same family the `<value> သည် ကိန်း`
+/// type-check tests for (numeric-looking text included).
+const TYPE_NUM: &str = "ကိန်း";
+const TYPE_BOOL: &str = "မှန်/မှား";
 
 fn type_name_mm(v: &Value) -> &'static str {
     match v {
@@ -203,6 +208,132 @@ fn http_response_to_value(r: crate::request_library::HttpResponse) -> Value {
             (RESP_OK.to_string(), Value::Bool(r.ok)),
         ],
     )
+}
+
+// --- "server" backend library ---
+//
+// The one library is importable under two names, `server` (English) and
+// `ဆာဗာ` (Myanmar), and every function has a spelling in each language; all of
+// them reach the same implementation (`eval_server_call`). A handler is named
+// by text -- the same convention the App library uses for callbacks -- and has
+// to be a function the program has already defined.
+//
+// The request a handler is called with is a Value::Object tagged
+// "server-request". Each field carries both spellings, so a handler can read
+// whichever it writes:
+//     method  / နည်းလမ်း    -- "GET", "POST", ...
+//     path    / လမ်း         -- the requested path, e.g. "/hello"
+//     query   / မေးခွန်း     -- the raw text after "?", or ""
+//     body    / ကိုယ်ထည်     -- the request body as text
+//     headers / ခေါင်းစီး    -- the header block as received, one per line
+//
+// A handler answers with `reply(status, body)` (`အဖြေ`), with plain text
+// (a 200), or with nothing (an empty 200); anything else becomes its printed
+// form at 200.
+const LIB_SERVER_NAME: &str = "server";
+const LIB_SERVER_NAME_MM: &str = "ဆာဗာ";
+const SERVER_REQUEST_CLASS: &str = "server-request";
+const SERVER_RESPONSE_CLASS: &str = "server-response";
+const SERVER_STATUS: &str = "status";
+const SERVER_STATUS_MM: &str = "အခြေအနေကုဒ်";
+const SERVER_BODY: &str = "body";
+const SERVER_BODY_MM: &str = "အကြောင်းအရာ";
+
+/// One registered route: an exact method + path, the handler function to call
+/// for it, and the line the route was registered on (used for errors that only
+/// show up when a request arrives).
+struct ServerRoute {
+    method: String,
+    path: String,
+    handler: String,
+    line: usize,
+}
+
+/// The request object an Akkhara handler is handed (see the block above).
+fn server_request_value(req: &crate::server_library::Request) -> Value {
+    let pair = |name: &str, mm: &str, text: &str| -> Vec<(String, Value)> {
+        vec![
+            (name.to_string(), Value::Str(text.to_string())),
+            (mm.to_string(), Value::Str(text.to_string())),
+        ]
+    };
+    let mut fields: Vec<(String, Value)> = Vec::with_capacity(10);
+    fields.extend(pair("method", "နည်းလမ်း", &req.method));
+    fields.extend(pair("path", "လမ်း", &req.path));
+    fields.extend(pair("query", "မေးခွန်း", &req.query));
+    fields.extend(pair("body", "ကိုယ်ထည်", &req.body));
+    fields.extend(pair("headers", "ခေါင်းစီး", &req.headers));
+    Value::Object(SERVER_REQUEST_CLASS.to_string(), fields)
+}
+
+/// The value `reply(status, body)` produces, readable the same way the
+/// `request` library's response object is (`အခြေအနေကုဒ်` / `အကြောင်းအရာ`).
+fn server_reply_value(status: i64, body: &str) -> Value {
+    Value::Object(
+        SERVER_RESPONSE_CLASS.to_string(),
+        vec![
+            (SERVER_STATUS.to_string(), Value::Int(status)),
+            (SERVER_STATUS_MM.to_string(), Value::Int(status)),
+            (SERVER_BODY.to_string(), Value::Str(body.to_string())),
+            (SERVER_BODY_MM.to_string(), Value::Str(body.to_string())),
+        ],
+    )
+}
+
+/// What a handler's return value means, as (status, body).
+fn server_response_of(value: Option<Value>) -> (u16, String) {
+    match value {
+        None => (200, String::new()),
+        Some(Value::Str(body)) => (200, body),
+        Some(Value::Object(class, fields)) if class == SERVER_RESPONSE_CLASS => {
+            let status = fields
+                .iter()
+                .find(|(k, _)| k == SERVER_STATUS)
+                .and_then(|(_, v)| as_i64(v))
+                .filter(|s| (100..=599).contains(s))
+                .unwrap_or(500);
+            let body = fields
+                .iter()
+                .find(|(k, _)| k == SERVER_BODY)
+                .map(|(_, v)| display(v))
+                .unwrap_or_default();
+            (status as u16, body)
+        }
+        Some(other) => (200, display(&other)),
+    }
+}
+
+// --- Errors for the "server" backend library. ---
+
+fn server_arg_err(fn_name: &str, wants: &str, line: usize) -> String {
+    format!(
+        "E129 လိုင်း {} တွင် server ၏ \"{}\" function သည် {} လိုအပ်ပါသည်။",
+        line, fn_name, wants
+    )
+}
+
+fn server_route_err(msg: &str, line: usize) -> String {
+    format!("E130 လိုင်း {} တွင် {}", line, msg)
+}
+
+fn server_listen_err(msg: &str, line: usize) -> String {
+    format!(
+        "E131 လိုင်း {} တွင် server သည် port ကို ဖွင့်၍မရပါ - {}",
+        line, msg
+    )
+}
+
+/// A text argument of a server function: paths, methods, handler names and
+/// bodies are text, never numbers.
+fn server_text_arg(v: &Value, fn_name: &str, what: &str, line: usize) -> Result<String, String> {
+    match v {
+        Value::Str(s) => Ok(s.clone()),
+        _ => Err(server_arg_err(
+            fn_name,
+            &format!("{} ကို စာသား (str) အဖြစ်", what),
+            line,
+        )),
+    }
 }
 
 // --- "App" GUI library handles ---
@@ -550,13 +681,20 @@ impl std::hash::Hasher for FxHasher {
 /// The variable table: `FxHasher` instead of the default SipHash.
 type VarMap = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
+/// A user function: its parameter names and its body.
+type FnDef = (Vec<String>, Vec<Stmt>);
+/// Functions are stored behind an `Rc` so calling one bumps a refcount
+/// instead of deep-cloning its whole body (the body was cloned on every
+/// single call before, which is what made a call cost ~2us).
+type FnMap = HashMap<String, Rc<FnDef>>;
+
 pub struct Interpreter {
     env: VarMap,
     /// Names declared with the eng library's `pin` form (`pin name :bool =
     /// true;`). Assigning to a name here -- through either syntax family --
     /// is an error; `pin` values are immutable for the rest of the program.
     consts: std::collections::HashSet<String>,
-    functions: HashMap<String, (Vec<String>, Vec<Stmt>)>,
+    functions: FnMap,
     classes: HashMap<String, ClassInfo>,
     /// Stack of in-progress object constructions. While non-empty, a
     /// "တန်ဖိုး <field> သည် <value> ဖြစ်၏။" statement writes into the field
@@ -595,13 +733,30 @@ pub struct Interpreter {
     /// as shown on stdout, so `akk` can save the run's output next to the
     /// program as a `<file_name>.akop` file. `None` disables the capture.
     output_log: Option<String>,
-    /// Buffered writer for program output. `print!` goes through the global
-    /// `io::Stdout` line writer, which flushes to the OS on every newline, so
-    /// a program printing in a loop paid one write per line. Holding the
-    /// lock and buffering keeps the same bytes in the same order (the buffer
-    /// is flushed before anything is read, and once the run ends) while
-    /// turning those writes into a handful of large ones.
-    out: BufWriter<io::StdoutLock<'static>>,
+    /// Routes registered by the "server" library, in registration order.
+    /// Matched exactly (method + path); only the interpreter can call the
+    /// handler functions they name, so the table lives here rather than in
+    /// the library's own module.
+    routes: Vec<ServerRoute>,
+    /// Program output, held as std's stdout lock rather than re-locking on
+    /// every `print`.
+    ///
+    /// This deliberately stays line-flushed: `io::Stdout` is a `LineWriter`,
+    /// so a newline reaching it is written out immediately -- to a terminal,
+    /// a pipe, a redirected file, everything. A `BufWriter` here would be much
+    /// faster for output-heavy programs (7x on 100k printed lines to a file),
+    /// but it also means a program that prints and then keeps working shows
+    /// nothing for seconds, and loses that output entirely if it is killed or
+    /// its consumer is tailing the stream. Log lines, progress output and
+    /// prompts are only useful if they appear when they are produced, so that
+    /// speedup is declined -- see `benchmarks/README.md`.
+    out: io::StdoutLock<'static>,
+    /// Recycled argument buffers for function calls: `invoke_looked_up`
+    /// takes one, `invoke_function` empties it and hands it back, so the
+    /// usual call builds its argument values without allocating. Bounded,
+    /// so a recursion that never returns cannot retain buffers without
+    /// limit.
+    arg_bufs: Vec<Vec<Value>>,
 }
 
 impl Interpreter {
@@ -624,7 +779,9 @@ impl Interpreter {
             break_signal: None,
             loop_depth: 0,
             output_log: None,
-            out: BufWriter::new(io::stdout().lock()),
+            routes: Vec::new(),
+            arg_bufs: Vec::new(),
+            out: io::stdout().lock(),
         }
     }
 
@@ -679,17 +836,16 @@ impl Interpreter {
         self.emit(&format!("{}\n", text));
     }
 
-    /// Prompts are written without a trailing newline, so flush the output
-    /// buffer explicitly before the program blocks on input.
+    /// Prompts are written without a trailing newline, so flush them
+    /// explicitly before the program blocks on input.
     fn flush_stdout(&mut self) {
         let _ = self.out.flush();
     }
 
-    /// Flushes everything the program has printed but that is still buffered.
-    /// `akk` calls this once the run is over -- before printing the closing
-    /// `Interpreted in ...` line or an error, so the terminal shows the
-    /// program's output ahead of them exactly as it did when each line was
-    /// written out as it was produced.
+    /// Flushes the output that is not newline-terminated yet (the last line
+    /// of a program that ends without one). `akk` calls this once the run is
+    /// over, before printing the closing `Interpreted in ...` line or an
+    /// error, so the program's output is never misplaced behind them.
     pub fn flush_output(&mut self) {
         let _ = self.out.flush();
     }
@@ -942,15 +1098,6 @@ impl Interpreter {
                 self.env.insert(name.clone(), inferred);
                 Ok(())
             }
-            Stmt::ConvertStmt {
-                value,
-                target_type,
-                line,
-            } => {
-                let v = self.eval(value, *line, None)?;
-                convert_value(&v, target_type, *line)?;
-                Ok(())
-            }
             Stmt::ExprStmt { value, line } => {
                 self.eval(value, *line, None)?;
                 Ok(())
@@ -1039,21 +1186,31 @@ impl Interpreter {
                 ..
             } => {
                 self.functions
-                    .insert(name.clone(), (params.clone(), body.clone()));
+                    .insert(name.clone(), Rc::new((params.clone(), body.clone())));
                 Ok(())
             }
             Stmt::FuncCall { name, args, line } => {
-                // A user function wins; otherwise a variable bound to a
-                // first-class library function (`TOOL`) is callable, so the
+                // A user function wins; otherwise a builtin, then a variable
+                // bound to a first-class library function (`TOOL`), so the
                 // Myanmar form `<name> ကို လုပ်ရန် <args> ဖြင့်။` works for
-                // either.
-                if !self.functions.contains_key(name) {
-                    if let Some(Value::Callable(kind)) = self.env.get(name).cloned() {
-                        self.invoke_callable(&kind, args, *line)?;
-                        return Ok(());
+                // all three. The function is looked up once and handed over,
+                // so the usual call hashes the name once, not twice.
+                match self.functions.get(name).cloned() {
+                    Some(function) => {
+                        self.invoke_looked_up(name, &function, args, *line)?;
+                    }
+                    None => {
+                        if is_eng_builtin(name) {
+                            self.call_builtin(name, args, *line)?;
+                        } else if let Some(Value::Callable(kind)) = self.env.get(name).cloned() {
+                            self.invoke_callable(&kind, args, *line)?;
+                        } else {
+                            // Nothing callable by that name: report the
+                            // missing-function error.
+                            self.call_function(name, args, *line)?;
+                        }
                     }
                 }
-                self.call_function(name, args, *line)?;
                 Ok(())
             }
             Stmt::FuncCallAssign {
@@ -1062,15 +1219,22 @@ impl Interpreter {
                 args,
                 line,
             } => {
-                let result = if !self.functions.contains_key(fn_name) {
-                    match self.env.get(fn_name).cloned() {
-                        Some(Value::Callable(kind)) => {
-                            Some(self.invoke_callable(&kind, args, *line)?)
+                let result = match self.functions.get(fn_name).cloned() {
+                    // The function was already found, so its argument count
+                    // is checked and its body runs without a second lookup.
+                    Some(function) => self.invoke_looked_up(fn_name, &function, args, *line)?,
+                    None => {
+                        if is_eng_builtin(fn_name) {
+                            Some(self.call_builtin(fn_name, args, *line)?)
+                        } else {
+                            match self.env.get(fn_name).cloned() {
+                                Some(Value::Callable(kind)) => {
+                                    Some(self.invoke_callable(&kind, args, *line)?)
+                                }
+                                _ => self.call_function(fn_name, args, *line)?,
+                            }
                         }
-                        _ => self.call_function(fn_name, args, *line)?,
                     }
-                } else {
-                    self.call_function(fn_name, args, *line)?
                 };
                 let value = result.ok_or_else(|| {
                     format!(
@@ -1131,7 +1295,7 @@ impl Interpreter {
                     )
                 })?;
                 for alias in aliases {
-                    self.functions.insert(alias.clone(), def.clone());
+                    self.functions.insert(alias.clone(), Rc::clone(&def));
                 }
                 Ok(())
             }
@@ -1595,6 +1759,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// native functions that library exposes:
     ///
     ///   request   get(<url>) -> response, post(<url>, <data>) -> response
+    ///   server    get/ရယူ(<path>, <handler>), post/ပို့(<path>, <handler>),
+    ///             route/လမ်းကြောင်း(<method>, <path>, <handler>),
+    ///             reply/အဖြေ(<status>, <body>) -> response,
+    ///             serve/ဆောင်ရွက်(<port>) -> no value (blocks)
     ///   ကျပန်း     ကိန်း/ကိန်ပြည့်(<min>, <max>) -> int, ဒဿမ(<min>, <max>) -> float,
     ///             တန်ဖိုး(<collection>) -> a random element of it
     ///   အချိန်     စောင့်(<seconds>) -> no value
@@ -1698,6 +1866,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.require_library_loaded(LIB_APP_NAME, line)?;
                 self.eval_app_call(fn_name, args, line)
             }
+            LIB_SERVER_NAME | LIB_SERVER_NAME_MM => self.eval_server_call(fn_name, args, line),
             // Not a built-in: a script/package imported with
             // `နည်းပညာများ <name> ကို အသုံးပြုပါ။` registers its functions
             // globally, so `<lib> ၏ <fn>` / `<lib>.<fn>` reaches the one
@@ -1716,6 +1885,202 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     return Err(lib_fn_unknown_err(lib, fn_name, line));
                 }
                 Err(lib_unknown_err(lib, line))
+            }
+        }
+    }
+
+    /// Call one of the "server" library's functions
+    /// (`Stmt::LibCall` / `Stmt::LibCallAssign` / `Expr::LibCall`).
+    ///
+    /// Both spellings of every function arrive here, so `server.get(...)` and
+    /// `ဆာဗာ ၏ ရယူ(...)` are the same call. `serve` blocks on the accept loop
+    /// and dispatches each request back into `invoke_function` -- the
+    /// interpreter stays the only thing that runs Akkhara code.
+    fn eval_server_call(
+        &mut self,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        self.require_library_loaded(LIB_SERVER_NAME, line)?;
+        match fn_name {
+            "get" | "ရယူ" => self.register_server_route("GET", fn_name, args, line),
+            "post" | "ပို့" => self.register_server_route("POST", fn_name, args, line),
+            "route" | "လမ်းကြောင်း" => {
+                lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 3, line)?;
+                let method_v = self.eval(&args[0], line, None)?;
+                let path_v = self.eval(&args[1], line, None)?;
+                let handler_v = self.eval(&args[2], line, None)?;
+                let method = server_text_arg(&method_v, fn_name, "method", line)?;
+                let path = server_text_arg(&path_v, fn_name, "path", line)?;
+                let handler = server_text_arg(&handler_v, fn_name, "handler အမည်", line)?;
+                self.add_server_route(&method, &path, &handler, line)?;
+                Ok(None)
+            }
+            "reply" | "အဖြေ" => {
+                lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 2, line)?;
+                let status_v = self.eval(&args[0], line, None)?;
+                let body_v = self.eval(&args[1], line, None)?;
+                let status = as_i64(&status_v).ok_or_else(|| {
+                    server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line)
+                })?;
+                if !(100..=599).contains(&status) {
+                    return Err(server_arg_err(
+                        fn_name,
+                        "100 မှ 599 အတွင်း HTTP status ကုဒ်",
+                        line,
+                    ));
+                }
+                Ok(Some(server_reply_value(status, &display(&body_v))))
+            }
+            "serve" | "ဆောင်ရွက်" => {
+                lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 1, line)?;
+                let port_v = self.eval(&args[0], line, None)?;
+                let port = as_i64(&port_v).ok_or_else(|| {
+                    server_arg_err(fn_name, "port ကို ကိန်းပြည့် (int) အဖြစ်", line)
+                })?;
+                if !(1..=65535).contains(&port) {
+                    return Err(server_arg_err(fn_name, "1 မှ 65535 အတွင်း port", line));
+                }
+                self.serve_server(port as u16, line)?;
+                Ok(None)
+            }
+            _ => Err(lib_fn_unknown_err(LIB_SERVER_NAME, fn_name, line)),
+        }
+    }
+
+    /// `server.get(path, handler)` / `server.post(path, handler)`: the two
+    /// argument shorthands for `route(<METHOD>, path, handler)`.
+    fn register_server_route(
+        &mut self,
+        method: &str,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 2, line)?;
+        let path_v = self.eval(&args[0], line, None)?;
+        let handler_v = self.eval(&args[1], line, None)?;
+        let path = server_text_arg(&path_v, fn_name, "path", line)?;
+        let handler = server_text_arg(&handler_v, fn_name, "handler အမည်", line)?;
+        self.add_server_route(method, &path, &handler, line)?;
+        Ok(None)
+    }
+
+    /// Register one exact method + path -> handler route.
+    ///
+    /// The handler has to be a function the program has already defined: a
+    /// typo would otherwise only surface as a 500 on the first matching
+    /// request, which is much harder to notice than a startup error. The same
+    /// method + path twice is an error rather than a silent override.
+    fn add_server_route(
+        &mut self,
+        method: &str,
+        path: &str,
+        handler: &str,
+        line: usize,
+    ) -> Result<(), String> {
+        if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(server_route_err(
+                &format!(
+                    "\"{}\" သည် HTTP method မဟုတ်ပါ - \"GET\", \"POST\" စသည်ဖြင့် စာလုံးကြီးဖြင့် ရေးပါ။",
+                    method
+                ),
+                line,
+            ));
+        }
+        if !path.starts_with('/') {
+            return Err(server_route_err(
+                &format!("route path \"{}\" သည် \"/\" ဖြင့် စရပါမည်။", path),
+                line,
+            ));
+        }
+        if !self.functions.contains_key(handler) {
+            return Err(server_route_err(
+                &format!(
+                    "\"{}\" ဆိုသော handler function ကို ရှာမတွေ့ပါ။ route မမှတ်ခင် function ကို အရင်ရေးပါ။",
+                    handler
+                ),
+                line,
+            ));
+        }
+        if self
+            .routes
+            .iter()
+            .any(|r| r.method == method && r.path == path)
+        {
+            return Err(server_route_err(
+                &format!("{} {} route ကို နှစ်ခါ မှတ်ထားပါသည်။", method, path),
+                line,
+            ));
+        }
+        self.routes.push(ServerRoute {
+            method: method.to_string(),
+            path: path.to_string(),
+            handler: handler.to_string(),
+            line,
+        });
+        Ok(())
+    }
+
+    /// `server.serve(port)`: bind, then answer requests until the process
+    /// ends (there is no stop function yet -- a test harness ends the process,
+    /// exactly like any other long-running program).
+    ///
+    /// What reaches a handler: the request object described next to
+    /// `LIB_SERVER_NAME`. What comes back: the handler's value as a response, a
+    /// 404 for an unrouted path, a 400/413 from the library for a request it
+    /// could not read, and a 500 with the error text when a handler itself
+    /// fails -- one failed request never stops the server. Every request logs
+    /// one line, so a running server leaves a trail on stdout and in the
+    /// `.akop` file.
+    fn serve_server(&mut self, port: u16, line: usize) -> Result<(), String> {
+        let listener =
+            crate::server_library::Listener::bind(port).map_err(|e| server_listen_err(&e, line))?;
+        self.emit_line(&format!("server listening on port {}", port));
+        loop {
+            let mut pending = listener.accept().map_err(|e| server_listen_err(&e, line))?;
+            // A request that could not be read never reaches a handler: the
+            // library's own status is the answer.
+            if let Some((status, body)) = pending.problem.take() {
+                self.emit_line(&format!("bad request -> {}", status));
+                if let Err(e) = pending.respond(status, &body) {
+                    self.emit_line(&format!("could not answer: {}", e));
+                }
+                continue;
+            }
+            let request = match pending.request.take() {
+                Some(request) => request,
+                None => continue,
+            };
+            let route = self
+                .routes
+                .iter()
+                .find(|r| r.method == request.method && r.path == request.path)
+                .map(|r| (r.handler.clone(), r.line));
+            let (status, body) = match route {
+                None => (
+                    404,
+                    format!("no route: {} {}", request.method, request.path),
+                ),
+                Some((handler, route_line)) => match self.lookup_function(&handler, 1, route_line)
+                {
+                    Err(e) => (500, e),
+                    Ok(function) => {
+                        let args = vec![server_request_value(&request)];
+                        match self.invoke_function(&function, args) {
+                            Ok(value) => server_response_of(value),
+                            Err(e) => {
+                                self.emit_line(&format!("handler error: {}", e));
+                                (500, e)
+                            }
+                        }
+                    }
+                },
+            };
+            self.emit_line(&format!("{} {} -> {}", request.method, request.path, status));
+            if let Err(e) = pending.respond(status, &body) {
+                self.emit_line(&format!("could not answer: {}", e));
             }
         }
     }
@@ -2147,6 +2512,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             self.libraries.mark_loaded(name);
             return Ok(());
         }
+        // The server library answers to two names for the same implementation,
+        // so importing either one makes both call spellings work.
+        if name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM {
+            self.libraries.mark_loaded(LIB_SERVER_NAME);
+            self.libraries.mark_loaded(LIB_SERVER_NAME_MM);
+            return Ok(());
+        }
         let src = self
             .libraries
             .find_dynamic_source(name)
@@ -2208,6 +2580,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// built-in, a downloaded package, or a plain `<name>.akk` script.
     fn is_known_library(&self, name: &str) -> bool {
         name == "request" || name == "ကျပန်း" || name == "အချိန်" || name == LIB_APP_NAME
+            || name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM
             || self.libraries.find_dynamic_source(name).is_some()
             || self.libraries.find_script_source(name).is_some()
     }
@@ -2263,10 +2636,6 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         type_name_mm(&other)
                     )),
                 }
-            }
-            Expr::Convert(inner, target_type, cline) => {
-                let iv = self.eval(inner, line, var_ctx)?;
-                convert_value(&iv, target_type, *cline)
             }
             Expr::ListLit(items) => {
                 let mut vals = Vec::with_capacity(items.len());
@@ -2354,8 +2723,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 // wins, then a user function, then an eng builtin. Anything
                 // else falls through to the class-not-found error.
                 if !self.classes.contains_key(class_name) {
-                    if self.functions.contains_key(class_name) {
-                        let result = self.call_function(class_name, arg_exprs, *new_line)?;
+                    if let Some(function) = self.functions.get(class_name).cloned() {
+                        let result =
+                            self.invoke_looked_up(class_name, &function, arg_exprs, *new_line)?;
                         return result
                             .ok_or_else(|| eng_no_return_err(class_name, *new_line));
                     }
@@ -2424,43 +2794,130 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         args: &[Expr],
         line: usize,
     ) -> Result<Option<Value>, String> {
-        let (params, body) = match self.functions.get(name) {
-            Some(v) => v.clone(),
-            None => {
-                return Err(format!(
-                    "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
-                    line, name
-                ));
-            }
-        };
-        if args.len() != params.len() {
+        // Look the function up (and check its argument count) *before*
+        // evaluating the arguments: a call with the wrong number of
+        // arguments must not run their side effects.
+        let function = self.lookup_function(name, args.len(), line)?;
+        self.invoke_looked_up(name, &function, args, line)
+    }
+
+    /// The parameter list and body of the function `name`, with `E031` when
+    /// there is no such function and `E033` when it does not take `argc`
+    /// arguments. Split out of `call_function` so a wrong argument count is
+    /// reported before any argument is evaluated, and so a caller that
+    /// already holds evaluated values (the `server` library's handler call)
+    /// can still check both conditions first.
+    fn lookup_function(
+        &self,
+        name: &str,
+        argc: usize,
+        line: usize,
+    ) -> Result<Rc<FnDef>, String> {
+        let function = self.find_function(name, line)?;
+        self.check_arity(name, &function, argc, line)?;
+        Ok(function)
+    }
+
+    /// The function `name` holds, or `E031` when there is no such function.
+    /// Split out so a caller that already found the function (the call
+    /// statements, which look it up to tell a user function from a builtin)
+    /// does not have to hash the name a second time.
+    fn find_function(&self, name: &str, line: usize) -> Result<Rc<FnDef>, String> {
+        match self.functions.get(name) {
+            Some(v) => Ok(Rc::clone(v)),
+            None => Err(format!(
+                "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                line, name
+            )),
+        }
+    }
+
+    /// `E033` when `function` does not take `argc` arguments.
+    fn check_arity(
+        &self,
+        name: &str,
+        function: &FnDef,
+        argc: usize,
+        line: usize,
+    ) -> Result<(), String> {
+        if argc != function.0.len() {
             return Err(format!(
                 "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                 line,
                 name,
-                params.len(),
-                args.len()
+                function.0.len(),
+                argc
             ));
         }
-        // Evaluate every argument in the caller's environment first, then
-        // bind the parameters -- remembering any globals they shadow so the
-        // bindings can be pushed back when the call returns. Without that,
-        // a call would clobber same-named globals, and recursion would see a
-        // sibling frame's parameters.
-        let mut arg_values = Vec::with_capacity(args.len());
+        Ok(())
+    }
+
+    /// Run a call whose function has already been looked up -- the argument
+    /// count is checked before any argument is evaluated, exactly as
+    /// `call_function` does it.
+    fn invoke_looked_up(
+        &mut self,
+        name: &str,
+        function: &Rc<FnDef>,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        self.check_arity(name, function, args.len(), line)?;
+        // Evaluate into a recycled buffer: `invoke_function` empties it and
+        // pushes it back, so the usual call allocates no `Vec` of its own.
+        let mut arg_values = self.arg_bufs.pop().unwrap_or_default();
         for e in args {
             arg_values.push(self.eval(e, line, None)?);
         }
+        self.invoke_function(function, arg_values)
+    }
+
+    /// Run one already-looked-up function body with already-evaluated
+    /// arguments. `call_function` is the general entry point; the `server`
+    /// library uses this one because the request object it passes is built by
+    /// the interpreter rather than written as an argument expression.
+    fn invoke_function(
+        &mut self,
+        function: &FnDef,
+        mut arg_values: Vec<Value>,
+    ) -> Result<Option<Value>, String> {
+        let (params, body) = function;
+        // Bind the parameters -- remembering any globals they shadow so the
+        // bindings can be pushed back when the call returns. Without that,
+        // a call would clobber same-named globals, and recursion would see a
+        // sibling frame's parameters.
         // A function body is its own loop context: a `break` inside it belongs
         // to a loop written inside it, never to the caller's enclosing loop.
         let outer_loop_depth = self.loop_depth;
         self.loop_depth = 0;
-        let mut saved: Vec<(String, Option<Value>)> = Vec::with_capacity(params.len());
-        for (p, v) in params.iter().zip(arg_values.into_iter()) {
-            if !saved.iter().any(|(saved_name, _)| saved_name == p) {
-                saved.push((p.clone(), self.env.get(p).cloned()));
+        // Only parameters that shadow an existing variable need saving; the
+        // rest are removed again on the way out, which `remove` can do with a
+        // borrowed name -- so the usual call reuses the parameter name instead
+        // of allocating a second copy of it per argument. `remove` both clears
+        // the slot and hands back what was there, so a parameter that shadows
+        // a global costs one lookup and no clone, and one that shadows nothing
+        // adds no entry at all: the usual call allocates nothing here. A
+        // duplicated parameter name is still saved once, on the first
+        // occurrence.
+        let mut saved: Vec<(usize, Value)> = Vec::new();
+        for (i, (p, v)) in params.iter().zip(arg_values.drain(..)).enumerate() {
+            if saved.iter().any(|(saved_idx, _)| params[*saved_idx] == *p) {
+                // A duplicated parameter name: the first occurrence already
+                // saved whatever it shadowed, so only overwrite its binding.
+                self.env.insert(p.clone(), v);
+                continue;
             }
-            self.env.insert(p.clone(), v);
+            // One probe per parameter instead of remove-then-insert: an
+            // existing binding is captured and replaced in place, and a new
+            // one takes the vacant entry, so the name is hashed once.
+            match self.env.entry(p.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    saved.push((i, slot.insert(v)));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(v);
+                }
+            }
         }
         let mut return_value: Option<Value> = None;
         let mut failure: Option<String> = None;
@@ -2519,15 +2976,20 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         if let Some(signal) = self.return_signal.take() {
             return_value = signal;
         }
-        for (p, old) in saved {
-            match old {
-                Some(v) => {
-                    self.env.insert(p, v);
-                }
-                None => {
-                    self.env.remove(&p);
-                }
-            }
+        // Drop every parameter binding, then put back the ones that had
+        // shadowed a variable; removing is a borrowed-name lookup, so the
+        // common case restores without allocating.
+        for p in params.iter() {
+            self.env.remove(p.as_str());
+        }
+        for (i, old) in saved {
+            self.env.insert(params[i].clone(), old);
+        }
+        // Hand the emptied argument buffer back for the next call to reuse.
+        // Bounded, so a recursion that never returns cannot retain buffers
+        // without limit.
+        if self.arg_bufs.len() < 8 {
+            self.arg_bufs.push(arg_values);
         }
         if let Some(e) = failure {
             return Err(e);
@@ -2580,12 +3042,34 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         }
         // Constructor parameters shadow globals only for the duration of the
         // construction, same as function parameters.
-        let mut saved: Vec<(String, Option<Value>)> = Vec::with_capacity(params.len());
-        for (p, v) in params.iter().zip(arg_values.into_iter()) {
-            if !saved.iter().any(|(saved_name, _)| saved_name == p) {
-                saved.push((p.clone(), self.env.get(p).cloned()));
+        // Only parameters that shadow an existing variable need saving; the
+        // rest are removed again on the way out, which `remove` can do with a
+        // borrowed name -- so the usual call reuses the parameter name instead
+        // of allocating a second copy of it per argument. `remove` both clears
+        // the slot and hands back what was there, so a parameter that shadows
+        // a global costs one lookup and no clone, and one that shadows nothing
+        // adds no entry at all: the usual call allocates nothing here. A
+        // duplicated parameter name is still saved once, on the first
+        // occurrence.
+        let mut saved: Vec<(usize, Value)> = Vec::new();
+        for (i, (p, v)) in params.iter().zip(arg_values.into_iter()).enumerate() {
+            if saved.iter().any(|(saved_idx, _)| params[*saved_idx] == *p) {
+                // A duplicated parameter name: the first occurrence already
+                // saved whatever it shadowed, so only overwrite its binding.
+                self.env.insert(p.clone(), v);
+                continue;
             }
-            self.env.insert(p.clone(), v);
+            // One probe per parameter instead of remove-then-insert: an
+            // existing binding is captured and replaced in place, and a new
+            // one takes the vacant entry, so the name is hashed once.
+            match self.env.entry(p.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    saved.push((i, slot.insert(v)));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(v);
+                }
+            }
         }
 
         self.self_stack.push(Vec::new());
@@ -2611,15 +3095,14 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         self.loop_depth = outer_loop_depth;
         self.break_signal = None;
         self.call_depth -= 1;
-        for (p, old) in saved {
-            match old {
-                Some(v) => {
-                    self.env.insert(p, v);
-                }
-                None => {
-                    self.env.remove(&p);
-                }
-            }
+        // Drop every parameter binding, then put back the ones that had
+        // shadowed a variable; removing is a borrowed-name lookup, so the
+        // common case restores without allocating.
+        for p in params.iter() {
+            self.env.remove(p.as_str());
+        }
+        for (i, old) in saved {
+            self.env.insert(params[i].clone(), old);
         }
         let fields = self.self_stack.pop().unwrap_or_default();
         run_result?;
@@ -2858,7 +3341,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 };
                 Ok(Value::Bool(found))
             }
-            _ => Err(eng_unknown_fn_err(line, name)),
+            // The conversion builtins: one argument, converted by the same
+            // code the rest of the interpreter uses.
+            _ => match convert_target(name) {
+                Some(target) => {
+                    one_arg()?;
+                    convert_value(&args[0], target, line)
+                }
+                None => Err(eng_unknown_fn_err(line, name)),
+            },
         }
     }
 }
@@ -3216,7 +3707,23 @@ fn is_eng_builtin(name: &str) -> bool {
             | "lower"
             | "trim"
             | "contains"
-    )
+    ) || convert_target(name).is_some()
+}
+
+/// The conversion builtins that replaced the `<value> ကို <type> သို့
+/// ပြောင်းပါ။` sentence: `<value>` in, the converted value out. Both
+/// spellings of a conversion answer to the same target name, and every one
+/// of them runs through `convert_value` -- so `str(x)` and `စာ(x)` cannot
+/// drift apart, and a failure is always that function's E055.
+fn convert_target(name: &str) -> Option<&'static str> {
+    match name {
+        "ကိန်း" | "digits" => Some(TYPE_NUM),
+        "ကိန်းပြည့်" | "int" => Some(TYPE_INT),
+        "ဒဿမ" | "ဒဿမကိန်း" | "float" => Some(TYPE_FLOAT),
+        "ဘူးလ်" | "ဘူလ်" | "bool" => Some(TYPE_BOOL),
+        "စာ" | "စာသား" | "str" => Some(TYPE_STR),
+        _ => None,
+    }
 }
 
 /// Enforce an eng declaration's type rule on a value and coerce an int to
@@ -3374,10 +3881,14 @@ fn infer_value(s: &str) -> Value {
     Value::Str(s.to_string())
 }
 
+/// Convert one value into `target_type`. The conversion builtins are thin
+/// wrappers over this, which is why `<value> သည် ကိန်း` and `ကိန်း(<value>)`
+/// agree: both accept ints, floats and numeric-looking text, and reject
+/// everything else.
 fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, String> {
     let fail = || -> String {
         format!(
-            "E055 လိုင်း {} တွင် {} ကို {}သို့ ပြောင်းလဲ၍ မရပါ။",
+            "E055 လိုင်း {} တွင် {} ကို {} အဖြစ် ပြောင်းလဲ၍ မရပါ။",
             line,
             quoted_display(v),
             target_type
@@ -3386,6 +3897,20 @@ fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, Str
 
     match target_type {
         TYPE_STR => Ok(Value::Str(display(v))),
+        TYPE_NUM => match v {
+            Value::Int(_) | Value::Float(_) => Ok(v.clone()),
+            Value::Str(s) => {
+                let t = s.trim();
+                if let Ok(i) = t.parse::<i64>() {
+                    Ok(Value::Int(i))
+                } else if let Ok(f) = t.parse::<f64>() {
+                    Ok(Value::Float(f))
+                } else {
+                    Err(fail())
+                }
+            }
+            _ => Err(fail()),
+        },
         TYPE_INT => match v {
             Value::Int(i) => Ok(Value::Int(*i)),
             Value::Float(f) => Ok(Value::Int(*f as i64)),
@@ -3404,19 +3929,20 @@ fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, Str
                 .map_err(|_| fail()),
             _ => Err(fail()),
         },
-        _ => {
-            // bool-ish target
-            match v {
-                Value::Bool(b) => Ok(Value::Bool(*b)),
-                Value::Str(s) => match s.as_str() {
-                    "True" | "မှန်" => Ok(Value::Bool(true)),
-                    "False" | "မှား" => Ok(Value::Bool(false)),
-                    _ => Err(fail()),
-                },
-                Value::Int(i) => Ok(Value::Bool(*i != 0)),
-                Value::Float(f) => Ok(Value::Bool(*f != 0.0)),
+        TYPE_BOOL => match v {
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::Str(s) => match s.as_str() {
+                "True" | "မှန်" => Ok(Value::Bool(true)),
+                "False" | "မှား" => Ok(Value::Bool(false)),
                 _ => Err(fail()),
-            }
-        }
+            },
+            Value::Int(i) => Ok(Value::Bool(*i != 0)),
+            Value::Float(f) => Ok(Value::Bool(*f != 0.0)),
+            _ => Err(fail()),
+        },
+        // Nothing else is a conversion target: the old sentence accepted any
+        // type keyword and quietly answered a bool for the ones it did not
+        // really handle (`ကို စာရင်း သို့ ပြောင်းပါ။`).
+        _ => Err(fail()),
     }
 }
