@@ -6,27 +6,43 @@ mod ui;
 
 /// The Akkhara "အချိန်" (Time) library, compiled in from its own source
 /// under `libraries/အချိန်/main.rs`. Programs load it with:
-///     နည်းပညာများ အချိန် ကို အသုံးပြုပါ။
+///     နည်းပညာများ အချိန် ကို သုံးမည်။
 #[path = "../libraries/အချိန်/main.rs"]
 mod time_library;
 
 /// The Akkhara "ကျပန်း" (Random) library, compiled in from its own source
 /// under `libraries/ကျပန်း/main.rs`. Programs load it with:
-///     နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+///     နည်းပညာများ ကျပန်း ကို သုံးမည်။
 #[path = "../libraries/ကျပန်း/main.rs"]
 mod random_library;
 
 /// The Akkhara "request" library, compiled in from its own source under
 /// `libraries/request/main.rs`. Programs load it with:
-///     နည်းပညာများ request ကို အသုံးပြုပါ။
+///     နည်းပညာများ request ကို သုံးမည်။
 #[path = "../libraries/request/main.rs"]
 mod request_library;
 
 /// The Akkhara "App" GUI library, compiled in from its own source under
 /// `libraries/App/main.rs`. Programs load it with:
-///     နည်းပညာများ App ကို အသုံးပြုပါ။
+///     နည်းပညာများ App ကို သုံးမည်။
 #[path = "../libraries/App/main.rs"]
 mod app_library;
+
+/// The Akkhara "server" backend library, compiled in from its own source under
+/// `libraries/server/main.rs`. It answers to two names -- `server` and `ဆာဗာ` --
+/// and every function has a spelling in each language. Programs load it with
+/// `use server;` or:
+///     နည်းပညာများ ဆာဗာ ကို သုံးမည်။
+#[path = "../libraries/server/main.rs"]
+mod server_library;
+
+/// The Akkhara "json" library, compiled in from its own source under
+/// `libraries/json/main.rs`. It answers to two names -- `json` and `ဂျေဆန်` --
+/// and every function has a spelling in each language. Programs load it with
+/// `use json;` or:
+///     နည်းပညာများ ဂျေဆန် ကို သုံးမည်။
+#[path = "../libraries/json/main.rs"]
+mod json_library;
 
 use std::env;
 use std::fs;
@@ -61,7 +77,7 @@ fn library_raw_base() -> String {
 }
 
 /// Where `akk install` places downloaded packages, and where
-/// `နည်းပညာများ <name> ကို အသုံးပြုပါ။` looks for them at runtime: a
+/// `နည်းပညာများ <name> ကို သုံးမည်။` looks for them at runtime: a
 /// `libraries/` folder next to the akk binary itself (not the current
 /// working directory), so it works no matter where a script is run from.
 fn libraries_dir() -> PathBuf {
@@ -176,7 +192,7 @@ fn main() {
 
     let mut interp = interpreter::Interpreter::new(libraries_dir());
     // Let this program import a neighboring `<name>.akk` script with
-    // `နည်းပညာများ <name> ကို အသုံးပြုပါ။`: search the program's own folder
+    // `နည်းပညာများ <name> ကို သုံးမည်။`: search the program's own folder
     // first, then the current working directory, before the libraries/
     // folder next to the binary.
     let script_dir = PathBuf::from(filename)
@@ -196,9 +212,10 @@ fn main() {
     // once the program has finished successfully.
     let started = std::time::Instant::now();
     let result = interp.run(&stmts);
-    // The program's output is buffered; get it on screen before the closing
-    // line (or the error) that follows it. This stays inside the timed
-    // section, so `Interpreted in ...` still covers the cost of writing it.
+    // Output is line-flushed as the program runs; this only gets out a last
+    // line that has no newline of its own, before the closing line (or the
+    // error) that follows it. This stays inside the timed section, so
+    // `Interpreted in ...` still covers the cost of writing it.
     interp.flush_output();
     if let Err(e) = result {
         eprintln!("{}", e);
@@ -460,7 +477,7 @@ enum InstallDownload {
 
 /// `akk install <name>` -- downloads a library from the Akkhara library
 /// repo (`LIBRARY_REPO`) into the local `libraries/` folder next to the
-/// akk binary, so `နည်းပညာများ <name> ကို အသုံးပြုပါ။` can find it later.
+/// akk binary, so `နည်းပညာများ <name> ကို သုံးမည်။` can find it later.
 ///
 /// Libraries live at `<LIBRARY_PATH>/<name>/` in that repo: `main/`
 /// holds the library's source file(s) (plain Akkhara, so no recompiling
@@ -594,7 +611,7 @@ fn cmd_install(name: &str) {
     }
     println!();
     println!("    Use it in a program with:");
-    println!("        နည်းပညာများ {} ကို အသုံးပြုပါ။", name);
+    println!("        နည်းပညာများ {} ကို သုံးမည်။", name);
 }
 
 /// On an install miss, browses the repo's `index.json` (a flat list of
