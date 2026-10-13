@@ -10,10 +10,9 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    /// JSON's `null`. The language has no `null` keyword, so this value only
-    /// ever comes from `json.parse` -- printing it writes `null`, and it is
-    /// equal only to another `null` (a fast path in `value_eq`, ahead of the
-    /// repr comparison the other mixed cases use).
+    /// JSON's `null`, and the `null` / `ဗလာ` literals. Printing it writes
+    /// `null`, and it is equal only to another `null` (a fast path in
+    /// `value_eq`, ahead of the repr comparison the other mixed cases use).
     Null,
     List(Vec<Value>),
     Tuple(Vec<Value>),
@@ -994,8 +993,8 @@ pub struct Interpreter {
     consts: std::collections::HashSet<String>,
     functions: FnMap,
     classes: HashMap<String, ClassInfo>,
-    /// Stack of in-progress object constructions. While non-empty, a
-    /// "တန်ဖိုး <field> သည် <value> ဖြစ်၏။" statement writes into the field
+    /// Stack of in-progress object constructions. While non-empty, an
+    /// "အတု <field> သည် <value> ဖြစ်၏။" statement writes into the field
     /// list on top of this stack instead of the global environment.
     self_stack: Vec<Vec<(String, Value)>>,
     /// Loader that resolves and activates libraries imported with
@@ -1684,7 +1683,7 @@ impl Interpreter {
                         Ok(())
                     }
                     None => Err(format!(
-                        "E035 လိုင်း {} တွင် \"တန်ဖိုး\" (သို့မဟုတ် \"အတု\") ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+                        "E035 လိုင်း {} တွင် \"အတု\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
                         line
                     )),
                 }
@@ -1813,10 +1812,8 @@ impl Interpreter {
 
     /// Substitute "{VarName}" placeholders inside a string literal with the
     /// current value of that variable, e.g. "Hello!, {Name}".
-/// The two accepted spellings of the self keyword inside a `{...}`
-/// placeholder: "{တန်ဖိုး <field>}" and its synonym "{အတု <field>}".
-const SELF_PREFIX: &'static str = "တန်ဖိုး ";
-const SELF_PREFIX_ALT: &'static str = "အတု ";
+/// The self keyword inside a `{...}` placeholder: "{အတု <field>}".
+const SELF_PREFIX: &'static str = "အတု ";
 
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
         // The fast path is only for a string with nothing to look at: no
@@ -1861,13 +1858,10 @@ const SELF_PREFIX_ALT: &'static str = "အတု ";
                         line
                     ));
                 }
-                // "{တန်ဖိုး <field>}" (or its synonym "{အတု <field>}") reads
-                // the given field off the object currently under construction
-                // (inside a class method), rather than a plain global
-                // variable.
-                let self_field = trimmed
-                    .strip_prefix(Self::SELF_PREFIX)
-                    .or_else(|| trimmed.strip_prefix(Self::SELF_PREFIX_ALT));
+                // "{အတု <field>}" reads the given field off the object
+                // currently under construction (inside a class method), rather
+                // than a plain global variable.
+                let self_field = trimmed.strip_prefix(Self::SELF_PREFIX);
                 if let Some(field_name) = self_field {
                     let field_name = field_name.trim();
                     if field_name.is_empty() {
@@ -3214,6 +3208,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             }
             Expr::StrLit(s) => Ok(Value::Str(self.interpolate(s, line)?)),
             Expr::BoolLit(b) => Ok(Value::Bool(*b)),
+            Expr::NullLit => Ok(Value::Null),
             Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
                 format!(
                     "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
@@ -3487,42 +3482,23 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         mut arg_values: Vec<Value>,
     ) -> Result<Option<Value>, String> {
         let (params, body) = function;
-        // Bind the parameters -- remembering any globals they shadow so the
-        // bindings can be pushed back when the call returns. Without that,
-        // a call would clobber same-named globals, and recursion would see a
-        // sibling frame's parameters.
+        // A function body is its own scope: every binding it makes -- the
+        // parameters and any locals it declares -- is written into the shared
+        // `env`, so snapshot `env` on the way in and put it back on the way
+        // out. Without that, a local stayed bound after the call (it leaked
+        // into the globals), and a recursive call clobbered its caller's
+        // locals, because two frames shared one slot for the same name. The
+        // snapshot also undoes any global the body shadowed or overwrote.
+        let outer_env = self.env.clone();
         // A function body is its own loop context: a `break` inside it belongs
         // to a loop written inside it, never to the caller's enclosing loop.
         let outer_loop_depth = self.loop_depth;
         self.loop_depth = 0;
-        // Only parameters that shadow an existing variable need saving; the
-        // rest are removed again on the way out, which `remove` can do with a
-        // borrowed name -- so the usual call reuses the parameter name instead
-        // of allocating a second copy of it per argument. `remove` both clears
-        // the slot and hands back what was there, so a parameter that shadows
-        // a global costs one lookup and no clone, and one that shadows nothing
-        // adds no entry at all: the usual call allocates nothing here. A
-        // duplicated parameter name is still saved once, on the first
-        // occurrence.
-        let mut saved: Vec<(usize, Value)> = Vec::new();
-        for (i, (p, v)) in params.iter().zip(arg_values.drain(..)).enumerate() {
-            if saved.iter().any(|(saved_idx, _)| params[*saved_idx] == *p) {
-                // A duplicated parameter name: the first occurrence already
-                // saved whatever it shadowed, so only overwrite its binding.
-                self.env.insert(p.clone(), v);
-                continue;
-            }
-            // One probe per parameter instead of remove-then-insert: an
-            // existing binding is captured and replaced in place, and a new
-            // one takes the vacant entry, so the name is hashed once.
-            match self.env.entry(p.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    saved.push((i, slot.insert(v)));
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(v);
-                }
-            }
+        // Bind the parameters into the frame. They are dropped with it when
+        // `outer_env` is restored below, so no per-parameter save/restore is
+        // needed.
+        for (p, v) in params.iter().zip(arg_values.drain(..)) {
+            self.env.insert(p.clone(), v);
         }
         let mut return_value: Option<Value> = None;
         let mut failure: Option<String> = None;
@@ -3581,15 +3557,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         if let Some(signal) = self.return_signal.take() {
             return_value = signal;
         }
-        // Drop every parameter binding, then put back the ones that had
-        // shadowed a variable; removing is a borrowed-name lookup, so the
-        // common case restores without allocating.
-        for p in params.iter() {
-            self.env.remove(p.as_str());
-        }
-        for (i, old) in saved {
-            self.env.insert(params[i].clone(), old);
-        }
+        // Drop the frame: the parameter and local bindings, and every global
+        // the body shadowed or overwrote, are all back the way they were.
+        self.env = outer_env;
         // Hand the emptied argument buffer back for the next call to reuse.
         // Bounded, so a recursion that never returns cannot retain buffers
         // without limit.
