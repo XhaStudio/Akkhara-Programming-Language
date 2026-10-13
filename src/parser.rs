@@ -51,6 +51,9 @@ pub enum Expr {
     Float(f64),
     StrLit(String),
     BoolLit(bool),
+    /// `null` / `ဗလာ` -- JSON's null, now writable as a literal as well as
+    /// returned by `json.parse`.
+    NullLit,
     Ident(String),
     Binary(Box<Expr>, char, Box<Expr>, usize), // line of the operator
     Neg(Box<Expr>, usize),                     // unary minus, line
@@ -463,11 +466,9 @@ const KW_CALL: &str = "လုပ်ပါ";
 const KW_CALL_WITH: &str = "လုပ်ရန်";
 
 const KW_CLASS_DEF: &str = "ပုံသေ";
-const KW_SELF: &str = "တန်ဖိုး";
-/// `အတု` -- a synonym of `တန်ဖိုး` for the self keyword, so a class method may
-/// write either `တန်ဖိုး <field> သည် <value> ဖြစ်၏။` or
-/// `အတု <field> သည် <value> ဖြစ်၏။`.
-const KW_SELF_ALT: &str = "အတု";
+/// `အတု` -- the self keyword inside a class method:
+/// `အတု <field> သည် <value> ဖြစ်၏။` (the old `တန်ဖိုး` spelling is gone).
+const KW_SELF: &str = "အတု";
 /// `အသစ်` -- the removed marker of the object-creation expression, which is
 /// now just `<class name>(<argument>, ...)`. It stays a known word only so a
 /// line still using it reports its replacement (`E029`) instead of a generic
@@ -475,9 +476,9 @@ const KW_SELF_ALT: &str = "အတု";
 /// sentence.
 const KW_NEW: &str = "အသစ်";
 
-/// Either spelling of the self keyword.
+/// The self keyword.
 fn is_self_kw(tok: &Tok) -> bool {
-    ident_eq(tok, KW_SELF) || ident_eq(tok, KW_SELF_ALT)
+    ident_eq(tok, KW_SELF)
 }
 
 // Library system keywords.
@@ -571,7 +572,6 @@ fn is_reserved_word(name: &str) -> bool {
         KW_CALL_WITH,
         KW_CLASS_DEF,
         KW_SELF,
-        KW_SELF_ALT,
         KW_NEW,
         KW_USE,
         KW_LIBRARIES,
@@ -1537,6 +1537,7 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
             "False" => Ok((Expr::BoolLit(false), pos + 1)),
             "မှန်" => Ok((Expr::BoolLit(true), pos + 1)),
             "မှား" => Ok((Expr::BoolLit(false), pos + 1)),
+            "null" | "ဗလာ" => Ok((Expr::NullLit, pos + 1)),
             _ => {
                 // Object instantiation: "<ClassName>(args)". There is only
                 // this one spelling. The old optional "အသစ်" (new) marker --
@@ -3501,8 +3502,8 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         });
     }
 
-    // --- Self field assignment: တန်ဖိုး <field> သည် <value> ဖြစ်၏။ (inside a
-    //     class method). `အတု` is accepted as a synonym of `တန်ဖိုး`. ---
+    // --- Self field assignment: အတု <field> သည် <value> ဖြစ်၏။ (inside a
+    //     class method). ---
     if !body.is_empty() && is_self_kw(&body[0].tok) {
         // Quote back whichever spelling the program actually used.
         let self_kw = match &body[0].tok {
