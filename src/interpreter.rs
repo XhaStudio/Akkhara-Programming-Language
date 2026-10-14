@@ -1,6 +1,7 @@
 use crate::library::LibraryLoader;
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::rc::Rc;
 
@@ -113,79 +114,98 @@ fn op_name_mm(op: char) -> &'static str {
 }
 
 pub fn display(v: &Value) -> String {
+    let mut out = String::new();
+    display_into(v, &mut out);
+    out
+}
+
+/// `display`, aimed at an existing buffer. A value's text is written straight
+/// into the caller's string: building one `String` per piece, and then another
+/// one to append the newline, made every `print` several allocations where one
+/// (reused) buffer will do.
+pub fn display_into(v: &Value, out: &mut String) {
     match v {
-        Value::Str(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
+        Value::Str(s) => out.push_str(s),
+        Value::Int(i) => {
+            let _ = write!(out, "{}", i);
+        }
         Value::Float(f) => {
             if f.fract() == 0.0 {
-                format!("{:.1}", f)
+                let _ = write!(out, "{:.1}", f);
             } else {
-                let s = format!("{}", f);
-                s
+                let _ = write!(out, "{}", f);
             }
         }
-        Value::Bool(b) => {
-            if *b {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            }
-        }
-        Value::Null => "null".to_string(),
+        Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+        Value::Null => out.push_str("null"),
         Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_, _) => {
-            repr(v)
+            repr_into(v, out)
         }
-        Value::Callable(kind) => kind.label(),
+        Value::Callable(kind) => out.push_str(&kind.label()),
     }
 }
 
 /// Element-level representation used inside collections (quotes strings),
 /// and as the top-level rendering for collection values themselves.
 fn repr(v: &Value) -> String {
+    let mut out = String::new();
+    repr_into(v, &mut out);
+    out
+}
+
+/// `repr`, aimed at an existing buffer -- a nested collection no longer builds
+/// a `String` (and a `Vec` of them, to join) for every level.
+fn repr_into(v: &Value, out: &mut String) {
     match v {
-        Value::Str(s) => format!("\"{}\"", s),
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => display(v),
-        Value::List(items) => {
-            format!(
-                "[{}]",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
+        Value::Str(s) => {
+            out.push('"');
+            out.push_str(s);
+            out.push('"');
         }
-        Value::Tuple(items) => {
-            format!(
-                "({})",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
-        }
-        Value::Set(items) => {
-            format!(
-                "{{{}}}",
-                items.iter().map(repr).collect::<Vec<_>>().join(", ")
-            )
-        }
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => display_into(v, out),
+        Value::List(items) => repr_seq(items, '[', ']', out),
+        Value::Tuple(items) => repr_seq(items, '(', ')', out),
+        Value::Set(items) => repr_seq(items, '{', '}', out),
         Value::Dict(pairs) => {
-            format!(
-                "{{{}}}",
-                pairs
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", repr(k), repr(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            out.push('{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                repr_into(k, out);
+                out.push_str(": ");
+                repr_into(v, out);
+            }
+            out.push('}');
         }
         Value::Object(class_name, fields) => {
-            format!(
-                "{} {{{}}}",
-                class_name,
-                fields
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, repr(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            out.push_str(class_name);
+            out.push_str(" {");
+            for (i, (k, v)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(k);
+                out.push_str(": ");
+                repr_into(v, out);
+            }
+            out.push('}');
         }
-        Value::Callable(kind) => kind.label(),
+        Value::Callable(kind) => out.push_str(&kind.label()),
     }
+}
+
+/// `repr_into` for a list/tuple/set: the elements separated by ", " between
+/// the given brackets.
+fn repr_seq(items: &[Value], open: char, close: char, out: &mut String) {
+    out.push(open);
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        repr_into(item, out);
+    }
+    out.push(close);
 }
 
 fn quoted_display(v: &Value) -> String {
@@ -978,6 +998,142 @@ impl std::hash::Hasher for FxHasher {
 /// The variable table: `FxHasher` instead of the default SipHash.
 type VarMap = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
+/// The variable table plus the undo log that gives every function call its
+/// own scope.
+///
+/// A function body used to be run against a *copy* of the whole environment
+/// (`let outer_env = self.env.clone()`), which meant one deep clone of every
+/// variable in the program per call: 100k calls with 200 globals in scope
+/// spent 1.4s in that clone alone (see `benchmarks/`). A call is now a
+/// *frame* -- a mark into a shared undo log, filled in lazily by the first
+/// write to each name and replayed when the frame ends. A call that writes
+/// nothing allocates nothing at all, and one that only binds its parameters
+/// allocates a couple of small log entries instead of a table.
+///
+/// Only the first write to a name within a frame is logged, whatever the old
+/// value was: replaying that one entry either puts the previous value back or
+/// drops the binding the frame created, which is the whole of what the
+/// snapshot used to do. Writes made while no frame is active (top-level
+/// statements) are not logged and simply stay.
+struct Env {
+    map: VarMap,
+    /// Every frame's log entries, oldest first; `marks` says where the
+    /// innermost active frame's own entries start.
+    log: Vec<(String, Option<Value>)>,
+    /// The log length each active frame started at, outermost first.
+    marks: Vec<usize>,
+}
+
+impl Env {
+    fn new() -> Self {
+        Env {
+            map: VarMap::default(),
+            log: Vec::new(),
+            marks: Vec::new(),
+        }
+    }
+
+    /// Begins a new scope: every binding this frame creates or overwrites is
+    /// recorded until `pop_frame` puts the environment back.
+    fn push_frame(&mut self) {
+        self.marks.push(self.log.len());
+    }
+
+    /// Ends the innermost scope, restoring every binding it touched. The log
+    /// itself is only truncated, so its buffer serves the next call.
+    fn pop_frame(&mut self) {
+        let Some(mark) = self.marks.pop() else {
+            return;
+        };
+        while self.log.len() > mark {
+            if let Some((name, previous)) = self.log.pop() {
+                match previous {
+                    Some(value) => {
+                        self.map.insert(name, value);
+                    }
+                    None => {
+                        self.map.remove(name.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Records what `name` holds before the innermost frame writes to it, once
+    /// per frame. Nothing happens at top level, and a name this frame has
+    /// already recorded costs one scan of its own entries and no allocation.
+    ///
+    /// Deliberately not inlined: this is the branch an assignment *inside a
+    /// function* takes, and every assignment site in the interpreter has the
+    /// other branch -- the plain write a top-level loop does millions of
+    /// times. Folding a map lookup and a log push into all of them costs
+    /// instructions and cache lines on the path that never reaches here.
+    #[inline(never)]
+    fn note(&mut self, name: &str) {
+        let Some(&mark) = self.marks.last() else {
+            return;
+        };
+        if self.log[mark..].iter().any(|(logged, _)| logged == name) {
+            return;
+        }
+        let previous = self.map.get(name).cloned();
+        self.log.push((name.to_string(), previous));
+    }
+
+    #[inline]
+    fn get(&self, name: &str) -> Option<&Value> {
+        self.map.get(name)
+    }
+
+    #[inline]
+    fn contains_key(&self, name: &str) -> bool {
+        self.map.contains_key(name)
+    }
+
+    /// Bind `name` to `value`, reusing the key of an existing binding.
+    ///
+    /// `HashMap::insert` takes an owned key, so assigning to a variable that
+    /// already exists -- by far the common case for `x = ...;`, `x += ...;`,
+    /// the Myanmar assignment forms, and the loop variable of every `for`
+    /// iteration -- allocated a fresh copy of the name on every single
+    /// assignment just to look the same slot up again. `get_mut` updates that
+    /// slot in place; a name that isn't bound yet is inserted as before.
+    ///
+    /// The frame check comes first and stands alone: at top level -- where
+    /// every statement of a program that defines no functions runs, and where
+    /// a loop's `i += 1` lives -- the only cost this adds over a plain map
+    /// write is the emptiness test, and `note` stays out of line.
+    #[inline]
+    fn assign(&mut self, name: &str, value: Value) {
+        if !self.marks.is_empty() {
+            self.note(name);
+        }
+        if let Some(slot) = self.map.get_mut(name) {
+            *slot = value;
+        } else {
+            self.map.insert(name.to_string(), value);
+        }
+    }
+
+    /// Bind `name` to `value` without reusing a slot (a fresh declaration).
+    fn insert(&mut self, name: String, value: Value) {
+        self.note(&name);
+        self.map.insert(name, value);
+    }
+
+    /// `insert`, handing back what the name held before -- the class
+    /// constructor's parameter save/restore needs the old value.
+    fn insert_returning(&mut self, name: String, value: Value) -> Option<Value> {
+        self.note(&name);
+        self.map.insert(name, value)
+    }
+
+    fn remove(&mut self, name: &str) {
+        self.note(name);
+        self.map.remove(name);
+    }
+}
+
 /// A user function: its parameter names and its body.
 type FnDef = (Vec<String>, Vec<Stmt>);
 /// Functions are stored behind an `Rc` so calling one bumps a refcount
@@ -986,7 +1142,7 @@ type FnDef = (Vec<String>, Vec<Stmt>);
 type FnMap = HashMap<String, Rc<FnDef>>;
 
 pub struct Interpreter {
-    env: VarMap,
+    env: Env,
     /// Names declared with the eng library's `pin` form (`pin name :bool =
     /// true;`). Assigning to a name here -- through either syntax family --
     /// is an error; `pin` values are immutable for the rest of the program.
@@ -1048,6 +1204,10 @@ pub struct Interpreter {
     /// prompts are only useful if they appear when they are produced, so that
     /// speedup is declined -- see `benchmarks/README.md`.
     out: io::StdoutLock<'static>,
+    /// Scratch buffer for the value a `print` or an input prompt shows. It
+    /// keeps its capacity between statements, so only the first line of a
+    /// printing loop allocates.
+    line_buf: String,
     /// Recycled argument buffers for function calls: `invoke_looked_up`
     /// takes one, `invoke_function` empties it and hands it back, so the
     /// usual call builds its argument values without allocating. Bounded,
@@ -1063,7 +1223,7 @@ impl Interpreter {
     /// name that isn't one of the built-in libraries compiled into akk.
     pub fn new(libraries_dir: std::path::PathBuf) -> Self {
         Interpreter {
-            env: VarMap::default(),
+            env: Env::new(),
             consts: std::collections::HashSet::new(),
             functions: HashMap::new(),
             classes: HashMap::new(),
@@ -1077,6 +1237,7 @@ impl Interpreter {
             loop_depth: 0,
             output_log: None,
             routes: Vec::new(),
+            line_buf: String::new(),
             arg_bufs: Vec::new(),
             out: io::stdout().lock(),
         }
@@ -1092,20 +1253,10 @@ impl Interpreter {
         self.output_log.take()
     }
 
-    /// Bind `value` to `name`, reusing an existing binding's key.
-    ///
-    /// `HashMap::insert` takes an owned key, so assigning to a variable that
-    /// already exists -- by far the common case for `x = ...;`, `x += ...;`
-    /// and the Myanmar assignment forms -- allocated a fresh copy of the
-    /// name on every single assignment just to look the same slot up again.
-    /// `get_mut` updates that slot in place; a name that isn't bound yet is
-    /// inserted exactly as before.
+    /// Bind `value` to `name` (see `Env::assign`, which reuses the key of an
+    /// existing binding and logs the write for the active function frame).
     fn store(&mut self, name: &str, value: Value) {
-        if let Some(slot) = self.env.get_mut(name) {
-            *slot = value;
-        } else {
-            self.env.insert(name.to_string(), value);
-        }
+        self.env.assign(name, value);
     }
 
     /// Whether `name` is pinned (`pin` / a constant): assigning to one is an
@@ -1131,6 +1282,21 @@ impl Interpreter {
 
     fn emit_line(&mut self, text: &str) {
         self.emit(&format!("{}\n", text));
+    }
+
+    /// Write a value to the program's output -- with a newline for `print`,
+    /// without one for a prompt. The text is built in `line_buf`, which keeps
+    /// its capacity, so a program printing in a loop allocates for the first
+    /// line only instead of once for the display and again for the newline.
+    fn emit_value(&mut self, v: &Value, newline: bool) {
+        let mut text = std::mem::take(&mut self.line_buf);
+        text.clear();
+        display_into(v, &mut text);
+        if newline {
+            text.push('\n');
+        }
+        self.emit(&text);
+        self.line_buf = text;
     }
 
     /// Prompts are written without a trailing newline, so flush them
@@ -1220,12 +1386,12 @@ impl Interpreter {
             }
             Stmt::EngPrint { value, line } => {
                 let v = self.eval(value, *line, None)?;
-                self.emit_line(&display(&v));
+                self.emit_value(&v, true);
                 Ok(())
             }
             Stmt::EngInput { prompt, line } => {
                 let p = self.eval(prompt, *line, None)?;
-                self.emit(&display(&p));
+                self.emit_value(&p, false);
                 self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
@@ -1238,7 +1404,7 @@ impl Interpreter {
                 line,
             } => {
                 let p = self.eval(prompt, *line, None)?;
-                self.emit(&display(&p));
+                self.emit_value(&p, false);
                 self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
@@ -1383,12 +1549,12 @@ impl Interpreter {
             }
             Stmt::Print { value, line } => {
                 let v = self.eval(value, *line, None)?;
-                self.emit_line(&display(&v));
+                self.emit_value(&v, true);
                 Ok(())
             }
             Stmt::InputNoAssign { value, line } => {
                 let prompt = self.eval(value, *line, None)?;
-                self.emit(&display(&prompt));
+                self.emit_value(&prompt, false);
                 self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
@@ -1396,7 +1562,7 @@ impl Interpreter {
             }
             Stmt::InputAssign { name, value, line } => {
                 let prompt = self.eval(value, *line, None)?;
-                self.emit(&display(&prompt));
+                self.emit_value(&prompt, false);
                 self.flush_stdout();
                 let mut buf = String::new();
                 io::stdin().read_line(&mut buf).ok();
@@ -2009,10 +2175,12 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 let end_v = self.eval(end, line, None)?;
                 let step_v = self.eval(step, line, None)?;
 
+                // The end is loop-invariant, so its numeric check happens
+                // once instead of on every iteration.
+                let end_f = as_f64(&end_v).ok_or_else(|| loop_not_numeric_err(line))?;
                 let mut current = start_v;
                 loop {
                     let cur_f = as_f64(&current).ok_or_else(|| loop_not_numeric_err(line))?;
-                    let end_f = as_f64(&end_v).ok_or_else(|| loop_not_numeric_err(line))?;
                     let keep_going = match op {
                         '+' | '*' => cur_f < end_f,
                         '-' | '/' => cur_f > end_f,
@@ -2021,7 +2189,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     if !keep_going {
                         break;
                     }
-                    self.env.insert(var_name.to_string(), current.clone());
+                    self.env.assign(var_name, current.clone());
                     let broke = self.run_loop_body(body)?;
                     if broke.is_some() || self.return_signal.is_some() {
                         break;
@@ -2045,7 +2213,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             if cur_f >= end_f {
                                 break;
                             }
-                            self.env.insert(var_name.to_string(), current.clone());
+                            self.env.assign(var_name, current.clone());
                             let broke = self.run_loop_body(body)?;
                             if broke.is_some() || self.return_signal.is_some() {
                                 break;
@@ -2057,7 +2225,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     }
                     Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
                         for item in items {
-                            self.env.insert(var_name.to_string(), item);
+                            self.env.assign(var_name, item);
                             let broke = self.run_loop_body(body)?;
                             if broke.is_some() || self.return_signal.is_some() {
                                 break;
@@ -2067,7 +2235,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     }
                     Value::Dict(pairs) => {
                         for (k, _) in pairs {
-                            self.env.insert(var_name.to_string(), k);
+                            self.env.assign(var_name, k);
                             let broke = self.run_loop_body(body)?;
                             if broke.is_some() || self.return_signal.is_some() {
                                 break;
@@ -3484,18 +3652,20 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         let (params, body) = function;
         // A function body is its own scope: every binding it makes -- the
         // parameters and any locals it declares -- is written into the shared
-        // `env`, so snapshot `env` on the way in and put it back on the way
-        // out. Without that, a local stayed bound after the call (it leaked
-        // into the globals), and a recursive call clobbered its caller's
-        // locals, because two frames shared one slot for the same name. The
-        // snapshot also undoes any global the body shadowed or overwrote.
-        let outer_env = self.env.clone();
+        // `env`, and the frame opened here puts `env` back on the way out.
+        // Without that, a local stayed bound after the call (it leaked into
+        // the globals), and a recursive call clobbered its caller's locals,
+        // because two frames shared one slot for the same name. The frame
+        // also undoes any global the body shadowed or overwrote -- the same
+        // thing the whole-environment snapshot used to do, without copying
+        // the environment on every call (see `Env`).
+        self.env.push_frame();
         // A function body is its own loop context: a `break` inside it belongs
         // to a loop written inside it, never to the caller's enclosing loop.
         let outer_loop_depth = self.loop_depth;
         self.loop_depth = 0;
         // Bind the parameters into the frame. They are dropped with it when
-        // `outer_env` is restored below, so no per-parameter save/restore is
+        // the frame is popped below, so no per-parameter save/restore is
         // needed.
         for (p, v) in params.iter().zip(arg_values.drain(..)) {
             self.env.insert(p.clone(), v);
@@ -3559,7 +3729,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         }
         // Drop the frame: the parameter and local bindings, and every global
         // the body shadowed or overwrote, are all back the way they were.
-        self.env = outer_env;
+        self.env.pop_frame();
         // Hand the emptied argument buffer back for the next call to reuse.
         // Bounded, so a recursion that never returns cannot retain buffers
         // without limit.
@@ -3634,16 +3804,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 self.env.insert(p.clone(), v);
                 continue;
             }
-            // One probe per parameter instead of remove-then-insert: an
-            // existing binding is captured and replaced in place, and a new
-            // one takes the vacant entry, so the name is hashed once.
-            match self.env.entry(p.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    saved.push((i, slot.insert(v)));
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(v);
-                }
+            // One probe per parameter: an existing binding is captured and
+            // replaced in place, and a new one takes a vacant slot, so the
+            // name is hashed once.
+            if let Some(old) = self.env.insert_returning(p.clone(), v) {
+                saved.push((i, old));
             }
         }
 
