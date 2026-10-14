@@ -1,6 +1,6 @@
 [package]
 name = "akkhara"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2021"
 
 [[bin]]
@@ -47,3 +47,12 @@ image = { version = "0.25", default-features = false, features = [
 
 [profile.release]
 opt-level = 3
+# `akk` is a tree-walking interpreter, so nearly all of a program's time is
+# spent in the interpreter loop, inlining across the lexer/parser/interpreter
+# module boundaries. Fat LTO with one codegen unit lets the whole crate be
+# optimized as a single body of code. `strip` keeps the executable small,
+# which also matters on every run: the OS loads the binary before the first
+# statement executes. (Measured effect and how to reproduce: benchmarks/.)
+lto = "fat"
+codegen-units = 1
+strip = true
