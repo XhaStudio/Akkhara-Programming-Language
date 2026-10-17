@@ -4,9 +4,10 @@
 //     နည်းပညာများ အချိန် ကို အသုံးပြုပါ။
 //
 // This module provides the "wait" (စောင့်) capability backed by the
-// standard library thread-sleep. It is compiled into the akk binary as a
-// Rust module (see the `#[path]` include in src/main.rs) and registered
-// by the interpreter when a program imports the အချိန် library.
+// standard library thread-sleep, and "now" (ယခု), the current Unix time in
+// seconds. It is compiled into the akk binary as a Rust module (see the
+// `#[path]` include in src/main.rs) and registered by the interpreter when
+// a program imports the အချိန် library.
 //
 // Akkhara-level statements powered by this module:
 //     10s ကို စောင့်ပါ။   # wait 10 seconds
@@ -14,7 +15,7 @@
 //     10h ကို စောင့်ပါ။   # wait 10 hours
 //     1000 ကို စောင့်ပါ။  # wait 1000 seconds (no unit defaults to seconds)
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The unit suffix attached to a wait amount: `s`, `m`, or `h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,15 @@ impl WaitUnit {
 /// Sleep for `amount` of the given `unit`.
 pub fn wait(amount: f64, unit: WaitUnit) -> Result<(), String> {
     wait_seconds(amount * unit.to_seconds())
+}
+
+/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC), as a whole
+/// number. Read through `အချိန်.now()` / `အချိန်.ယခု()`.
+pub fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Sleep for an exact number of seconds.
