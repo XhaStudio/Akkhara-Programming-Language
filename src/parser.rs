@@ -129,7 +129,6 @@ pub enum Stmt {
     },
     If {
         branches: Vec<IfBranch>,
-        line: usize,
     },
     While {
         cond: CondChain,
@@ -141,7 +140,6 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
-        line: usize,
     },
     FuncCall {
         name: String,
@@ -211,7 +209,6 @@ pub enum Stmt {
         catch_var: Option<String>,
         catch_body: Option<Vec<Stmt>>,
         finally_body: Option<Vec<Stmt>>,
-        line: usize,
     },
     /// Library import:
     /// `နည်းပညာများ <lib name>[, <lib name>, ...][ အဖြစ် <alias>] ကို သုံးမည်။`
@@ -389,6 +386,11 @@ pub enum ForSource {
         step: Expr,
         op: char,
     },
+    /// `<var> အတွက် တစ်ခုစီ(<from>, <end>[, <step>])` -- the parenthesized
+    /// spelling of a numeric range. `<end>` is exclusive and the sign of
+    /// `<step>` (default `1`) picks the direction, so a negative step counts
+    /// down.
+    RangeSigned { start: Expr, end: Expr, step: Expr },
     /// No explicit step-function clause was given. Resolved at runtime:
     /// a number auto-ranges from 0 (step +1); a list/tuple/set/dict iterates
     /// its elements (keys, for dict).
@@ -805,13 +807,6 @@ fn if_condition_syntax_err(line: usize) -> String {
 fn if_missing_then_err(line: usize) -> String {
     format!(
         "E013 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
-        line
-    )
-}
-
-fn if_else_not_last_err(line: usize) -> String {
-    format!(
-        "E014 လိုင်း {} တွင် \"မဟုတ်လျှင်\" (else) ကို \"အကယ်၍\"/\"သို့မဟုတ်\" branch အားလုံးအပြီးမှာသာ တစ်ခုတည်း ထားနိုင်ပါသည်။",
         line
     )
 }
@@ -2562,7 +2557,7 @@ fn parse_eng_if(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     if cursor != tokens.len() {
         return Err(eng_block_form_err(line));
     }
-    Ok(Stmt::If { branches, line })
+    Ok(Stmt::If { branches })
 }
 
 /// `while (<cond>) { ... }`
@@ -2634,7 +2629,6 @@ fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         name,
         params,
         body: parse_block(body_tokens)?,
-        line,
     })
 }
 
@@ -2876,7 +2870,10 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 }
                 if !body.is_empty() && ident_eq(&body[0].tok, KW_TRY) {
                     let inner = body[1..].to_vec();
-                    return parse_try_catch(&inner, line);
+                    return parse_try_catch(&inner);
+                }
+                if is_for_each_header(&body) {
+                    return parse_for_each_loop(&body, line);
                 }
                 return parse_for_loop(&body, line);
             }
@@ -3636,6 +3633,53 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     Err(generic_syntax_err(line))
 }
 
+/// Does a block's tokens open a `<var> အတွက် တစ်ခုစီ(<args>)` loop header?
+/// `တစ်ခုစီ` is reserved, so no other statement can hold that slot.
+fn is_for_each_header(tokens: &[Token]) -> bool {
+    matches!(tokens.first().map(|t| &t.tok), Some(Tok::Ident(_)))
+        && ident_eq_opt(tokens.get(1), KW_FOR)
+        && ident_eq_opt(tokens.get(2), KW_LOOP_EACH)
+        && matches!(tokens.get(3).map(|t| &t.tok), Some(Tok::LParen))
+}
+
+/// Parse a `<var> အတွက် တစ်ခုစီ(<args>)` loop, the parenthesized spelling of
+/// the for loop. The argument count picks the source:
+///
+///   - one: a collection, or a number (which ranges from 0, exclusive)
+///   - two: `<from>, <end>`, stepping by 1
+///   - three: `<from>, <end>, <step>`
+///
+/// `<end>` is exclusive and the sign of `<step>` picks the direction, so
+/// `i အတွက် တစ်ခုစီ(10, 0, -1)` counts down. The trailing "ပြီး" marker has
+/// already been stripped by the caller.
+fn parse_for_each_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    let var_name = match &inner[0].tok {
+        Tok::Ident(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    let close = find_close(inner, 3, line)?;
+    let source = match split_top_level(&inner[4..close], |t| matches!(t, Tok::Comma)).as_slice() {
+        [src] => ForSource::Auto(parse_expr(src, line)?),
+        [start, end] => ForSource::RangeSigned {
+            start: parse_expr(start, line)?,
+            end: parse_expr(end, line)?,
+            step: Expr::Int(1),
+        },
+        [start, end, step] => ForSource::RangeSigned {
+            start: parse_expr(start, line)?,
+            end: parse_expr(end, line)?,
+            step: parse_expr(step, line)?,
+        },
+        _ => return Err(generic_syntax_err(line)),
+    };
+    Ok(Stmt::ForLoop {
+        var_name,
+        source,
+        body: parse_block(&inner[close + 1..])?,
+        line,
+    })
+}
+
 /// Parse a for-loop's inner tokens: the header (variable, source, optional
 /// step+fn) followed by the loop body's own statement tokens. The trailing
 /// "ပြီး" marker has already been stripped by the caller.
@@ -3719,7 +3763,7 @@ fn parse_for_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
 
 /// Parse a try/catch/finally block. `inner` has the leading `စမ်းရန်` and
 /// trailing `ပြီး` already stripped by the caller.
-fn parse_try_catch(inner: &[Token], line: usize) -> Result<Stmt, String> {
+fn parse_try_catch(inner: &[Token]) -> Result<Stmt, String> {
     // Find `နောက်ဆုံးတွင်` (finally) at block level.
     let finally_rel = find_first_at_block_level(inner, &[KW_FINALLY]);
     let (try_catch_tokens, finally_tokens) = match finally_rel {
@@ -3790,7 +3834,6 @@ fn parse_try_catch(inner: &[Token], line: usize) -> Result<Stmt, String> {
         catch_var,
         catch_body,
         finally_body,
-        line,
     })
 }
 
@@ -3984,18 +4027,13 @@ fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<Con
 fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
     let mut branches: Vec<IfBranch> = Vec::new();
     let mut cursor = 0usize;
-    let mut seen_else = false;
 
     loop {
         if !branches.is_empty() {
             if cursor >= inner.len() {
                 break;
             }
-            if seen_else {
-                return Err(if_else_not_last_err(line));
-            }
             if is_else(&inner[cursor].tok) {
-                seen_else = true;
                 cursor += 1;
                 let body_stmts = parse_block(&inner[cursor..])?;
                 branches.push(IfBranch {
@@ -4003,7 +4041,6 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
                     negate: false,
                     body: body_stmts,
                 });
-                cursor = inner.len();
                 break;
             } else if is_elif(&inner[cursor].tok) {
                 cursor += 1;
@@ -4049,7 +4086,7 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(if_missing_condition_err(line));
     }
 
-    Ok(Stmt::If { branches, line })
+    Ok(Stmt::If { branches })
 }
 
 /// Parse a while-loop. `inner` is everything between the leading "အခြေအနေ"
@@ -4107,7 +4144,6 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
             name,
             params: Vec::new(),
             body,
-            line,
         });
     }
 
@@ -4144,7 +4180,6 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
             name,
             params,
             body,
-            line,
         });
     }
 
@@ -4181,7 +4216,6 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         name,
         params,
         body,
-        line,
     })
 }
 
