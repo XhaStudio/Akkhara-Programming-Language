@@ -19,11 +19,27 @@ pub enum Value {
     Tuple(Vec<Value>),
     Set(Vec<Value>),
     Dict(Vec<(Value, Value)>),
-    Object(String, Vec<(String, Value)>),
+    /// A class object: its class name plus its fields, behind an `Rc` (see
+    /// `ObjectValue` for why it is not held inline).
+    Object(Rc<ObjectValue>),
     /// A library function bound as a value (a first-class library
     /// function) -- e.g. the `Tools.add` in `TOOL = Tools.add;`. Calling
     /// the binding (`TOOL(1, 100)`) forwards to the library function.
-    Callable(Callable),
+    Callable(Rc<Callable>),
+}
+
+/// A class object's class name and its fields.
+///
+/// Held behind an `Rc` because a `Value` is copied constantly -- it is what
+/// every evaluated expression returns, and what every read hands back -- and
+/// inline this pair (a `String` plus a `Vec`) was 48 bytes: wide enough to
+/// make `Value` 56 bytes and `Result<Value, _>` 64, so every move of either
+/// copied roughly twice what the next-largest variant needs. Objects are
+/// built once and only ever read afterwards, so the indirection is free.
+#[derive(Debug, Clone)]
+pub struct ObjectValue {
+    pub class: String,
+    pub fields: Vec<(String, Value)>,
 }
 
 /// What a `Value::Callable` refers to. Kept as a name pair rather than a
@@ -73,7 +89,7 @@ fn type_name_mm(v: &Value) -> &'static str {
         Value::Tuple(_) => "အစု",
         Value::Set(_) => "အုပ်စု",
         Value::Dict(_) => "အဘိဓာန်",
-        Value::Object(_, _) => "class object",
+        Value::Object(_) => "class object",
         Value::Callable(_) => "function",
     }
 }
@@ -138,7 +154,7 @@ pub fn display_into(v: &Value, out: &mut String) {
         }
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         Value::Null => out.push_str("null"),
-        Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_, _) => {
+        Value::List(_) | Value::Tuple(_) | Value::Set(_) | Value::Dict(_) | Value::Object(_) => {
             repr_into(v, out)
         }
         Value::Callable(kind) => out.push_str(&kind.label()),
@@ -178,10 +194,10 @@ fn repr_into(v: &Value, out: &mut String) {
             }
             out.push('}');
         }
-        Value::Object(class_name, fields) => {
-            out.push_str(class_name);
+        Value::Object(o) => {
+            out.push_str(&o.class);
             out.push_str(" {");
-            for (i, (k, v)) in fields.iter().enumerate() {
+            for (i, (k, v)) in o.fields.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -227,14 +243,14 @@ const RESP_BODY: &str = "အကြောင်းအရာ";
 const RESP_OK: &str = "အောင်မြင်မှု";
 
 fn http_response_to_value(r: crate::request_library::HttpResponse) -> Value {
-    Value::Object(
-        RESP_CLASS.to_string(),
-        vec![
+    Value::Object(Rc::new(ObjectValue {
+        class: RESP_CLASS.to_string(),
+        fields: vec![
             (RESP_STATUS.to_string(), Value::Int(r.status_code)),
             (RESP_BODY.to_string(), Value::Str(r.body)),
             (RESP_OK.to_string(), Value::Bool(r.ok)),
         ],
-    )
+    }))
 }
 
 // --- "server" backend library ---
@@ -413,7 +429,10 @@ fn server_request_value(
         fields.push((name.to_string(), dict.clone()));
         fields.push((mm.to_string(), dict));
     }
-    Value::Object(SERVER_REQUEST_CLASS.to_string(), fields)
+    Value::Object(Rc::new(ObjectValue {
+        class: SERVER_REQUEST_CLASS.to_string(),
+        fields,
+    }))
 }
 
 /// The value `reply(status, body[, content_type])` produces, readable the same
@@ -426,9 +445,9 @@ fn server_reply_value(
     headers: Vec<(String, String)>,
 ) -> Value {
     let header_dict = pairs_to_dict(&headers);
-    Value::Object(
-        SERVER_RESPONSE_CLASS.to_string(),
-        vec![
+    Value::Object(Rc::new(ObjectValue {
+        class: SERVER_RESPONSE_CLASS.to_string(),
+        fields: vec![
             (SERVER_STATUS.to_string(), Value::Int(status)),
             (SERVER_STATUS_MM.to_string(), Value::Int(status)),
             (SERVER_BODY.to_string(), Value::Str(body.to_string())),
@@ -444,7 +463,7 @@ fn server_reply_value(
             (SERVER_HEADERS.to_string(), header_dict.clone()),
             (SERVER_HEADERS_MM.to_string(), header_dict),
         ],
-    )
+    }))
 }
 
 /// Set one field of a response object, keeping both spellings of that field in
@@ -484,19 +503,19 @@ fn server_response_of(value: Option<Value>) -> (u16, String, String, Vec<(String
     match value {
         None => (200, String::new(), SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
         Some(Value::Str(body)) => (200, body, SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
-        Some(Value::Object(class, fields)) if class == SERVER_RESPONSE_CLASS => {
-            let status = server_field(&fields, SERVER_STATUS, SERVER_STATUS_MM)
+        Some(Value::Object(o)) if o.class == SERVER_RESPONSE_CLASS => {
+            let status = server_field(&o.fields, SERVER_STATUS, SERVER_STATUS_MM)
                 .and_then(as_i64)
                 .filter(|s| (100..=599).contains(s))
                 .unwrap_or(500);
-            let body = server_field(&fields, SERVER_BODY, SERVER_BODY_MM)
+            let body = server_field(&o.fields, SERVER_BODY, SERVER_BODY_MM)
                 .map(display)
                 .unwrap_or_default();
             let content_type =
-                server_field(&fields, SERVER_CONTENT_TYPE, SERVER_CONTENT_TYPE_MM)
+                server_field(&o.fields, SERVER_CONTENT_TYPE, SERVER_CONTENT_TYPE_MM)
                     .map(display)
                     .unwrap_or_else(|| SERVER_DEFAULT_CONTENT_TYPE.to_string());
-            (status as u16, body, content_type, server_headers_of(&fields))
+            (status as u16, body, content_type, server_headers_of(&o.fields))
         }
         Some(other) => (
             200,
@@ -597,8 +616,8 @@ fn value_to_json_tree(v: &Value) -> Result<crate::json_library::Json, String> {
                 .map(|(k, val)| Ok((display(k), value_to_json_tree(val)?)))
                 .collect::<Result<Vec<_>, String>>()?,
         ),
-        Value::Object(_, fields) => Json::Obj(
-            fields
+        Value::Object(o) => Json::Obj(
+            o.fields
                 .iter()
                 .map(|(k, val)| Ok((k.clone(), value_to_json_tree(val)?)))
                 .collect::<Result<Vec<_>, String>>()?,
@@ -637,32 +656,32 @@ const APP_WINDOW_CLASS: &str = "App-window";
 const APP_WIDGET_CLASS: &str = "App-widget";
 
 fn app_window_handle(id: u64) -> Value {
-    Value::Object(
-        APP_WINDOW_CLASS.to_string(),
-        vec![
+    Value::Object(Rc::new(ObjectValue {
+        class: APP_WINDOW_CLASS.to_string(),
+        fields: vec![
             ("id".to_string(), Value::Int(id as i64)),
             ("class".to_string(), Value::Str("window".to_string())),
         ],
-    )
+    }))
 }
 
 fn app_widget_handle(id: u64, kind: &str) -> Value {
-    Value::Object(
-        APP_WIDGET_CLASS.to_string(),
-        vec![
+    Value::Object(Rc::new(ObjectValue {
+        class: APP_WIDGET_CLASS.to_string(),
+        fields: vec![
             ("id".to_string(), Value::Int(id as i64)),
             ("class".to_string(), Value::Str("widget".to_string())),
             ("kind".to_string(), Value::Str(kind.to_string())),
         ],
-    )
+    }))
 }
 
 /// Pulls the id out of an App handle, with `E120` when the value is not one
 /// (`App.get(42)`, `App.move("x", 0, 0)`, ...).
 fn app_handle_id(v: &Value, fn_name: &str, line: usize) -> Result<u64, String> {
-    if let Value::Object(class, fields) = v {
-        if class == APP_WINDOW_CLASS || class == APP_WIDGET_CLASS {
-            if let Some(Value::Int(id)) = fields.iter().find(|(k, _)| k == "id").map(|(_, v)| v) {
+    if let Value::Object(o) = v {
+        if o.class == APP_WINDOW_CLASS || o.class == APP_WIDGET_CLASS {
+            if let Some(Value::Int(id)) = o.fields.iter().find(|(k, _)| k == "id").map(|(_, v)| v) {
                 if *id > 0 {
                     return Ok(*id as u64);
                 }
@@ -1466,7 +1485,7 @@ impl Interpreter {
                     None => Value::Int(0),
                 };
                 let amt = self.eval(amount, *line, Some(name))?;
-                let result = binary_op(&current, &amt, *op, *line, Some(name))?;
+                let result = arith(&current, &amt, *op, *line, Some(name))?;
                 self.store(name, result);
                 Ok(())
             }
@@ -1589,7 +1608,7 @@ impl Interpreter {
                         }
                         // Undeclared variables default to 0 in math-assignment context.
                         let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
-                        let result = binary_op(&current, &amt, *op, *line, Some(name))?;
+                        let result = arith(&current, &amt, *op, *line, Some(name))?;
                         self.store(name, result);
                         Ok(())
                     }
@@ -1860,7 +1879,6 @@ impl Interpreter {
                 catch_var,
                 catch_body,
                 finally_body,
-                line: _,
             } => {
                 let try_result = self.run(try_body);
                 match try_result {
@@ -2096,6 +2114,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     }
 }
 
+    #[inline]
     fn eval_cond_atom(&mut self, atom: &CondAtom) -> Result<bool, String> {
         let lv = self.eval(&atom.lhs, atom.line, None)?;
         let result = if let Some(type_name) = &atom.type_check {
@@ -2123,6 +2142,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         Ok(if atom.negate { !result } else { result })
     }
 
+    #[inline]
     fn eval_cond_chain(&mut self, chain: &CondChain) -> Result<bool, String> {
         let mut result = self.eval_cond_atom(&chain.first)?;
         for (op, atom) in &chain.rest {
@@ -2194,7 +2214,34 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     if broke.is_some() || self.return_signal.is_some() {
                         break;
                     }
-                    current = binary_op(&current, &step_v, *op, line, Some(var_name))?;
+                    current = arith(&current, &step_v, *op, line, Some(var_name))?;
+                }
+                Ok(())
+            }
+            ForSource::RangeSigned { start, end, step } => {
+                let mut current = self.eval(start, line, None)?;
+                let end_f = as_f64(&self.eval(end, line, None)?)
+                    .ok_or_else(|| loop_not_numeric_err(line))?;
+                let step_v = self.eval(step, line, None)?;
+                let step_f = as_f64(&step_v).ok_or_else(|| loop_not_numeric_err(line))?;
+                loop {
+                    let cur_f = as_f64(&current).ok_or_else(|| loop_not_numeric_err(line))?;
+                    // The step's sign picks the direction, and neither it nor
+                    // the end moves, so the test stays loop-invariant.
+                    let keep_going = if step_f >= 0.0 {
+                        cur_f < end_f
+                    } else {
+                        cur_f > end_f
+                    };
+                    if !keep_going {
+                        break;
+                    }
+                    self.env.assign(var_name, current.clone());
+                    let broke = self.run_loop_body(body)?;
+                    if broke.is_some() || self.return_signal.is_some() {
+                        break;
+                    }
+                    current = arith(&current, &step_v, '+', line, Some(var_name))?;
                 }
                 Ok(())
             }
@@ -2218,8 +2265,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             if broke.is_some() || self.return_signal.is_some() {
                                 break;
                             }
-                            current =
-                                binary_op(&current, &Value::Int(1), '+', line, Some(var_name))?;
+                            current = arith(&current, &Value::Int(1), '+', line, Some(var_name))?;
                         }
                         Ok(())
                     }
@@ -2460,12 +2506,19 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 let value_v = self.eval(&args[2], line, None)?;
                 let name = server_text_arg(&name_v, fn_name, "header အမည်", line)?;
                 match response_v {
-                    Value::Object(class, mut fields) if class == SERVER_RESPONSE_CLASS => {
-                        let mut headers = server_headers_of(&fields);
+                    Value::Object(o) if o.class == SERVER_RESPONSE_CLASS => {
+                        let mut headers = server_headers_of(&o.fields);
                         headers.push((name, display(&value_v)));
                         let dict = pairs_to_dict(&headers);
+                        // The fields are copied before the header is added, so
+                        // the response value the program still holds keeps the
+                        // headers it already had.
+                        let mut fields = o.fields.clone();
                         server_set_field(&mut fields, SERVER_HEADERS, SERVER_HEADERS_MM, dict);
-                        Ok(Some(Value::Object(class, fields)))
+                        Ok(Some(Value::Object(Rc::new(ObjectValue {
+                            class: o.class.clone(),
+                            fields,
+                        }))))
                     }
                     _ => Err(server_arg_err(
                         fn_name,
@@ -2825,9 +2878,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         .iter()
                         .find(|(k, _)| value_eq(k, &key))
                         .map(|(_, v)| v.clone()),
-                    Value::Object(_, fields) => {
+                    Value::Object(o) => {
                         let name = display(&key);
-                        fields
+                        o.fields
                             .iter()
                             .find(|(k, _)| *k == name)
                             .map(|(_, v)| v.clone())
@@ -3357,12 +3410,24 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// Evaluate an expression.
     fn eval(&mut self, expr: &Expr, line: usize, var_ctx: Option<&str>) -> Result<Value, String> {
         match expr {
-            // Literals already parsed by the parser -- no per-evaluation
-            // string parsing.
             Expr::Int(i) => Ok(Value::Int(*i)),
             Expr::Float(f) => Ok(Value::Float(*f)),
+            Expr::BoolLit(b) => Ok(Value::Bool(*b)),
+            Expr::NullLit => Ok(Value::Null),
+            Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
+                format!(
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    line, name
+                )
+            }),
+            Expr::Binary(l, op, r, op_line) => {
+                let lv = self.eval(l, line, var_ctx)?;
+                let rv = self.eval(r, line, var_ctx)?;
+                arith(&lv, &rv, *op, *op_line, var_ctx)
+            }
             Expr::NumLit(s) => {
                 if s.contains('.') {
                     s.parse::<f64>()
@@ -3375,19 +3440,6 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
             }
             Expr::StrLit(s) => Ok(Value::Str(self.interpolate(s, line)?)),
-            Expr::BoolLit(b) => Ok(Value::Bool(*b)),
-            Expr::NullLit => Ok(Value::Null),
-            Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
-                format!(
-                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
-                    line, name
-                )
-            }),
-            Expr::Binary(l, op, r, op_line) => {
-                let lv = self.eval(l, line, var_ctx)?;
-                let rv = self.eval(r, line, var_ctx)?;
-                binary_op(&lv, &rv, *op, *op_line, var_ctx)
-            }
             Expr::Neg(inner, neg_line) => {
                 let iv = self.eval(inner, line, var_ctx)?;
                 match iv {
@@ -3480,10 +3532,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         return Err(lib_unknown_err(lib, *refline));
                     }
                 }
-                Ok(Value::Callable(Callable::Library {
+                Ok(Value::Callable(Rc::new(Callable::Library {
                     lib: lib.to_string(),
                     fn_name: fn_name.clone(),
-                }))
+                })))
             }
             Expr::NewObj(class_name, arg_exprs, new_line) => {
                 // `name(args)` in an expression reaches here (the parser uses
@@ -3531,7 +3583,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Expr::FieldAccess(obj_expr, field, fline) => {
                 let ov = self.eval(obj_expr, line, var_ctx)?;
                 match &ov {
-                    Value::Object(_, fields) => fields
+                    Value::Object(o) => o
+                        .fields
                         .iter()
                         .find(|(k, _)| k == field)
                         .map(|(_, v)| v.clone())
@@ -3847,7 +3900,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         let fields = self.self_stack.pop().unwrap_or_default();
         run_result?;
 
-        Ok(Value::Object(class_name.to_string(), fields))
+        Ok(Value::Object(Rc::new(ObjectValue {
+            class: class_name.to_string(),
+            fields,
+        })))
     }
 
     /// Run a condition-tested loop body -- the `while (<cond>) { ... }`
@@ -4227,32 +4283,87 @@ fn cmp_type_err(line: usize, t1: &str, t2: &str, op: &str) -> String {
 /// already-evaluated values. Equality/inequality works for any pair of
 /// values (structural comparison); ordering comparisons require both sides
 /// to be numeric, or both sides to be strings (lexicographic order).
+#[inline]
 fn compare_values(lhs: &Value, rhs: &Value, op: &str, line: usize) -> Result<bool, String> {
     match op {
-        "==" => Ok(value_eq(lhs, rhs)),
-        "!=" => Ok(!value_eq(lhs, rhs)),
-        "<" | ">" | "<=" | ">=" => {
-            if let (Some(a), Some(b)) = (as_f64(lhs), as_f64(rhs)) {
-                return Ok(match op {
-                    "<" => a < b,
-                    ">" => a > b,
-                    "<=" => a <= b,
-                    ">=" => a >= b,
-                    _ => unreachable!(),
-                });
-            }
-            if let (Value::Str(a), Value::Str(b)) = (lhs, rhs) {
-                return Ok(match op {
-                    "<" => a < b,
-                    ">" => a > b,
-                    "<=" => a <= b,
-                    ">=" => a >= b,
-                    _ => unreachable!(),
-                });
-            }
-            Err(cmp_type_err(line, type_name_mm(lhs), type_name_mm(rhs), op))
+        "==" => return Ok(value_eq(lhs, rhs)),
+        "!=" => return Ok(!value_eq(lhs, rhs)),
+        _ => {}
+    }
+    // "<" ">" "<=" ">=": numbers order numerically, strings
+    // lexicographically. The number pair is taken apart in one match instead
+    // of two `as_f64` calls plus the ordering match, which is what a loop
+    // condition does on every iteration.
+    match (lhs, rhs) {
+        (Value::Int(a), Value::Int(b)) => return Ok(ord(*a as f64, *b as f64, op)),
+        (Value::Float(a), Value::Float(b)) => return Ok(ord(*a, *b, op)),
+        (Value::Int(a), Value::Float(b)) => return Ok(ord(*a as f64, *b, op)),
+        (Value::Float(a), Value::Int(b)) => return Ok(ord(*a, *b as f64, op)),
+        (Value::Str(a), Value::Str(b)) => {
+            return Ok(match op {
+                "<" => a < b,
+                ">" => a > b,
+                "<=" => a <= b,
+                ">=" => a >= b,
+                _ => unreachable!(),
+            })
         }
+        _ => {}
+    }
+    Err(cmp_type_err(line, type_name_mm(lhs), type_name_mm(rhs), op))
+}
+
+/// One ordering comparison on two numbers; the operator was checked by the
+/// caller (`compare_values`), which only forwards "<", ">", "<=" and ">=".
+#[inline]
+fn ord(a: f64, b: f64, op: &str) -> bool {
+    match op {
+        "<" => a < b,
+        ">" => a > b,
+        "<=" => a <= b,
+        ">=" => a >= b,
         _ => unreachable!(),
+    }
+}
+
+/// The arithmetic `arith` answers without calling `binary_op`: the `+ - *`
+/// of two ints or two floats. Their result is exactly what `binary_op`
+/// produces for the same pair (including its release-mode overflow
+/// behavior), and `None` sends everything else -- strings, mixed types,
+/// division, remainder, powers, floor-division -- to `binary_op`, which owns
+/// those cases and their error messages.
+#[inline]
+fn numeric_fold(lv: &Value, rv: &Value, op: char) -> Option<Value> {
+    match (lv, rv) {
+        (Value::Int(a), Value::Int(b)) => match op {
+            '+' => Some(Value::Int(a + b)),
+            '-' => Some(Value::Int(a - b)),
+            '*' => Some(Value::Int(a * b)),
+            _ => None,
+        },
+        (Value::Float(a), Value::Float(b)) => match op {
+            '+' => Some(Value::Float(a + b)),
+            '-' => Some(Value::Float(a - b)),
+            '*' => Some(Value::Float(a * b)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Two-operand arithmetic for the interpreter's hot paths: the common pairs
+/// are answered inline, everything else is `binary_op`.
+#[inline]
+fn arith(
+    lv: &Value,
+    rv: &Value,
+    op: char,
+    line: usize,
+    var_ctx: Option<&str>,
+) -> Result<Value, String> {
+    match numeric_fold(lv, rv, op) {
+        Some(v) => Ok(v),
+        None => binary_op(lv, rv, op, line, var_ctx),
     }
 }
 
