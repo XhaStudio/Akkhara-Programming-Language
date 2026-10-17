@@ -70,6 +70,22 @@ struct ClassInfo {
     methods: Vec<(String, Vec<String>, Vec<Stmt>)>,
 }
 
+/// How one run through a loop body ended.
+enum LoopFlow {
+    /// The body ran to its end.
+    Normal,
+    /// `continue` was reached: skip the rest of this iteration.
+    Continue,
+    /// `break` was reached, with its optional value.
+    Break(Option<Value>),
+}
+
+/// The most function calls that may be in flight at once. The interpreter
+/// gets a 64 MB thread stack (`src/main.rs`), which holds roughly 12,000 of
+/// its frames, so this limit stops a runaway recursion with a catchable
+/// Akkhara error well before the stack itself runs out.
+const MAX_CALL_DEPTH: usize = 5_000;
+
 const TYPE_INT: &str = "ကိန်းပြည့်";
 const TYPE_FLOAT: &str = "ဒဿမကိန်း";
 const TYPE_STR: &str = "စာသား";
@@ -1198,6 +1214,10 @@ pub struct Interpreter {
     /// `return_signal`: `Some(None)` is a bare `break`, `Some(Some(v))` is
     /// `break <value>`. Consumed by the innermost enclosing loop.
     break_signal: Option<Option<Value>>,
+    /// A pending `continue`: the rest of the current loop iteration is
+    /// skipped and the loop goes on to its next one. Consumed by the
+    /// innermost enclosing loop.
+    continue_signal: bool,
     /// How many loops are currently running (eng `loop`, `while`, `for`). A
     /// `break` while this is 0 has no loop to stop (E116).
     loop_depth: usize,
@@ -1253,6 +1273,7 @@ impl Interpreter {
             return_signal: None,
             call_depth: 0,
             break_signal: None,
+            continue_signal: false,
             loop_depth: 0,
             output_log: None,
             routes: Vec::new(),
@@ -1346,7 +1367,10 @@ impl Interpreter {
             // `break` is heading for the innermost loop): stop running
             // statements here -- the try/catch and library bodies use this
             // same entry point.
-            if self.return_signal.is_some() || self.break_signal.is_some() {
+            if self.return_signal.is_some()
+                || self.break_signal.is_some()
+                || self.continue_signal
+            {
                 break;
             }
             self.exec(stmt)?;
@@ -1354,18 +1378,31 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Run one loop body. Returns `Some(v)` when a `break` ended the
-    /// iteration -- `v` being the break's value (`None` for a bare `break`) --
-    /// and `None` when the body ran to completion. A pending `return` is left
-    /// in place so the enclosing function call can unwind.
-    fn run_loop_body(&mut self, body: &[Stmt]) -> Result<Option<Option<Value>>, String> {
+    /// Run one loop body. Returns what ended it: a `Break` with its optional
+    /// value, a `Continue`, or `Normal` when the body ran to completion. A
+    /// pending `return` is left in place so the enclosing function call can
+    /// unwind.
+    fn run_loop_body(&mut self, body: &[Stmt]) -> Result<LoopFlow, String> {
         for s in body {
             self.exec(s)?;
-            if self.return_signal.is_some() || self.break_signal.is_some() {
+            if self.return_signal.is_some()
+                || self.break_signal.is_some()
+                || self.continue_signal
+            {
                 break;
             }
         }
-        Ok(self.break_signal.take())
+        if self.return_signal.is_some() {
+            return Ok(LoopFlow::Normal);
+        }
+        if let Some(value) = self.break_signal.take() {
+            return Ok(LoopFlow::Break(value));
+        }
+        if self.continue_signal {
+            self.continue_signal = false;
+            return Ok(LoopFlow::Continue);
+        }
+        Ok(LoopFlow::Normal)
     }
 
     fn exec(&mut self, stmt: &Stmt) -> Result<(), String> {
@@ -1373,7 +1410,10 @@ impl Interpreter {
         // enclosing function/loop consumes it -- this keeps `return` inside
         // if/while/for and try bodies from executing the statements that
         // follow it.
-        if self.return_signal.is_some() || self.break_signal.is_some() {
+        if self.return_signal.is_some()
+            || self.break_signal.is_some()
+            || self.continue_signal
+        {
             return Ok(());
         }
         match stmt {
@@ -1500,12 +1540,19 @@ impl Interpreter {
                 self.break_signal = Some(v);
                 Ok(())
             }
+            Stmt::Continue { line } => {
+                if self.loop_depth == 0 {
+                    return Err(eng_continue_outside_loop_err(*line));
+                }
+                self.continue_signal = true;
+                Ok(())
+            }
             Stmt::EngLoop { body } => {
                 self.loop_depth += 1;
                 let result = (|| -> Result<(), String> {
                     loop {
-                        let broke = self.run_loop_body(body)?;
-                        if broke.is_some() || self.return_signal.is_some() {
+                        let flow = self.run_loop_body(body)?;
+                        if matches!(flow, LoopFlow::Break(_)) || self.return_signal.is_some() {
                             return Ok(());
                         }
                     }
@@ -1536,9 +1583,9 @@ impl Interpreter {
                 self.loop_depth += 1;
                 let outcome = (|| -> Result<Option<Option<Value>>, String> {
                     loop {
-                        let broke = self.run_loop_body(body)?;
-                        if broke.is_some() {
-                            return Ok(broke);
+                        match self.run_loop_body(body)? {
+                            LoopFlow::Break(value) => return Ok(Some(value)),
+                            LoopFlow::Continue | LoopFlow::Normal => {}
                         }
                         if self.return_signal.is_some() {
                             // A `return` inside the loop abandons the
@@ -1655,7 +1702,7 @@ impl Interpreter {
                 negate,
                 body,
                 line,
-            } => self.exec_condition_loop(cond, *negate, body, *line, "while loop"),
+            } => self.exec_condition_loop(cond, *negate, body, None, *line, "while loop"),
             Stmt::EngFor {
                 init,
                 cond,
@@ -1667,9 +1714,7 @@ impl Interpreter {
                 // loop body's last statement, so `break` and `return` inside
                 // the body leave the loop without running it.
                 self.exec(init)?;
-                let mut loop_body = body.clone();
-                loop_body.push((**step).clone());
-                self.exec_condition_loop(cond, false, &loop_body, *line, "for loop")
+                self.exec_condition_loop(cond, false, body, Some(step), *line, "for loop")
             }
             Stmt::FuncDef {
                 name,
@@ -2194,6 +2239,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 };
                 let end_v = self.eval(end, line, None)?;
                 let step_v = self.eval(step, line, None)?;
+                if matches!(op, '+' | '-' | '*')
+                    && as_f64(&step_v).map(|f| f == 0.0).unwrap_or(false)
+                {
+                    return Err(zero_step_err(line));
+                }
 
                 // The end is loop-invariant, so its numeric check happens
                 // once instead of on every iteration.
@@ -2210,8 +2260,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         break;
                     }
                     self.env.assign(var_name, current.clone());
-                    let broke = self.run_loop_body(body)?;
-                    if broke.is_some() || self.return_signal.is_some() {
+                    if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                        || self.return_signal.is_some()
+                    {
                         break;
                     }
                     current = arith(&current, &step_v, *op, line, Some(var_name))?;
@@ -2224,6 +2275,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     .ok_or_else(|| loop_not_numeric_err(line))?;
                 let step_v = self.eval(step, line, None)?;
                 let step_f = as_f64(&step_v).ok_or_else(|| loop_not_numeric_err(line))?;
+                if step_f == 0.0 {
+                    return Err(zero_step_err(line));
+                }
                 loop {
                     let cur_f = as_f64(&current).ok_or_else(|| loop_not_numeric_err(line))?;
                     // The step's sign picks the direction, and neither it nor
@@ -2237,8 +2291,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         break;
                     }
                     self.env.assign(var_name, current.clone());
-                    let broke = self.run_loop_body(body)?;
-                    if broke.is_some() || self.return_signal.is_some() {
+                    if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                        || self.return_signal.is_some()
+                    {
                         break;
                     }
                     current = arith(&current, &step_v, '+', line, Some(var_name))?;
@@ -2261,8 +2316,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                                 break;
                             }
                             self.env.assign(var_name, current.clone());
-                            let broke = self.run_loop_body(body)?;
-                            if broke.is_some() || self.return_signal.is_some() {
+                            if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                                || self.return_signal.is_some()
+                            {
                                 break;
                             }
                             current = arith(&current, &Value::Int(1), '+', line, Some(var_name))?;
@@ -2272,8 +2328,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
                         for item in items {
                             self.env.assign(var_name, item);
-                            let broke = self.run_loop_body(body)?;
-                            if broke.is_some() || self.return_signal.is_some() {
+                            if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                                || self.return_signal.is_some()
+                            {
                                 break;
                             }
                         }
@@ -2282,8 +2339,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     Value::Dict(pairs) => {
                         for (k, _) in pairs {
                             self.env.assign(var_name, k);
-                            let broke = self.run_loop_body(body)?;
-                            if broke.is_some() || self.return_signal.is_some() {
+                            if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                                || self.return_signal.is_some()
+                            {
                                 break;
                             }
                         }
@@ -2403,6 +2461,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
                         crate::time_library::wait(secs, crate::time_library::WaitUnit::Seconds)?;
                         Ok(None)
+                    }
+                    "ယခု" | "now" => {
+                        lib_fn_argc(lib, fn_name, args, 0, line)?;
+                        Ok(Some(Value::Int(crate::time_library::now())))
                     }
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
                 }
@@ -2808,7 +2870,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         Ok(function) => {
                             let args =
                                 vec![server_request_value(&request, &path_params, &query_params)];
-                            match self.invoke_function(&function, args) {
+                            match self.invoke_function(&function, args, route_line) {
                                 Ok(value) => server_response_of(value),
                                 Err(e) => {
                                     self.emit_line(&format!("handler error: {}", e));
@@ -3428,6 +3490,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 let rv = self.eval(r, line, var_ctx)?;
                 arith(&lv, &rv, *op, *op_line, var_ctx)
             }
+            Expr::Compare(l, op, r, op_line) => {
+                let lv = self.eval(l, line, var_ctx)?;
+                let rv = self.eval(r, line, var_ctx)?;
+                Ok(Value::Bool(compare_values(&lv, &rv, op, *op_line)?))
+            }
             Expr::NumLit(s) => {
                 if s.contains('.') {
                     s.parse::<f64>()
@@ -3690,7 +3757,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         for e in args {
             arg_values.push(self.eval(e, line, None)?);
         }
-        self.invoke_function(function, arg_values)
+        self.invoke_function(function, arg_values, line)
     }
 
     /// Run one already-looked-up function body with already-evaluated
@@ -3701,8 +3768,16 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         &mut self,
         function: &FnDef,
         mut arg_values: Vec<Value>,
+        line: usize,
     ) -> Result<Option<Value>, String> {
         let (params, body) = function;
+        // The interpreter's own frames are what a deep recursion exhausts,
+        // so the limit is checked here, before another frame is pushed. The
+        // error is an ordinary Akkhara error (E135), so try/catch can handle
+        // it instead of the process dying on a stack overflow.
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(recursion_depth_err(line, MAX_CALL_DEPTH));
+        }
         // A function body is its own scope: every binding it makes -- the
         // parameters and any locals it declares -- is written into the shared
         // `env`, and the frame opened here puts `env` back on the way out.
@@ -3774,9 +3849,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         self.call_depth -= 1;
         self.loop_depth = outer_loop_depth;
         // An explicit `return` overrides whatever the last statement yielded,
-        // and a `break` that couldn't find a loop in here must not leak out to
-        // the caller's.
+        // and a `break` or `continue` that couldn't find a loop in here must
+        // not leak out to the caller's.
         self.break_signal = None;
+        self.continue_signal = false;
         if let Some(signal) = self.return_signal.take() {
             return_value = signal;
         }
@@ -3908,12 +3984,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
 
     /// Run a condition-tested loop body -- the `while (<cond>) { ... }`
     /// spelling, and (through `Stmt::EngFor`) the C-style eng `for` loop,
-    /// which only differs in the label its iteration-cap error names.
+    /// which only differs in `step` (run after a completed or `continue`d
+    /// iteration, exactly as in C) and in the label its iteration-cap error
+    /// names.
     fn exec_condition_loop(
         &mut self,
         cond: &CondChain,
         negate: bool,
         body: &[Stmt],
+        step: Option<&Stmt>,
         line: usize,
         label: &str,
     ) -> Result<(), String> {
@@ -3937,9 +4016,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         line, label
                     ));
                 }
-                let broke = self.run_loop_body(body)?;
-                if broke.is_some() || self.return_signal.is_some() {
+                if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                    || self.return_signal.is_some()
+                {
                     break;
+                }
+                // A `continue` still runs the `for` loop's step, so the
+                // loop advances exactly as a completed iteration would.
+                if let Some(step) = step {
+                    self.exec(step)?;
                 }
             }
             Ok(())
@@ -4136,6 +4221,172 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     }
                 };
                 Ok(Value::Bool(found))
+            }
+            "split" => {
+                if args.len() != 2 {
+                    return Err(bad_arg(format!(
+                        "takes exactly two arguments, got {}",
+                        args.len()
+                    )));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Str(s), Value::Str(sep)) => {
+                        // An empty separator splits into characters -- the
+                        // useful reading for a learning language, and for
+                        // Myanmar text (one glyph cluster per item is not
+                        // attempted; each `char` is one item).
+                        let parts: Vec<Value> = if sep.is_empty() {
+                            s.chars()
+                                .map(|c| Value::Str(c.to_string()))
+                                .collect()
+                        } else {
+                            s.split(sep.as_str())
+                                .map(|p| Value::Str(p.to_string()))
+                                .collect()
+                        };
+                        Ok(Value::List(parts))
+                    }
+                    _ => Err(bad_arg(
+                        "needs a string to split and a string separator".to_string(),
+                    )),
+                }
+            }
+            "join" => {
+                if args.len() != 2 {
+                    return Err(bad_arg(format!(
+                        "takes exactly two arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let sep = match &args[1] {
+                    Value::Str(s) => s.clone(),
+                    other => {
+                        return Err(bad_arg(format!(
+                            "needs a string separator, got {}",
+                            type_name_mm(other)
+                        )))
+                    }
+                };
+                match &args[0] {
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                        let text = items
+                            .iter()
+                            .map(display)
+                            .collect::<Vec<String>>()
+                            .join(&sep);
+                        Ok(Value::Str(text))
+                    }
+                    other => Err(bad_arg(format!(
+                        "needs a collection first, got {}",
+                        type_name_mm(other)
+                    ))),
+                }
+            }
+            "replace" => {
+                if args.len() != 3 {
+                    return Err(bad_arg(format!(
+                        "takes exactly three arguments, got {}",
+                        args.len()
+                    )));
+                }
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::Str(s), Value::Str(from), Value::Str(to)) => {
+                        // An empty `from` would insert `to` between every
+                        // character; returning the text unchanged is the
+                        // least surprising answer.
+                        if from.is_empty() {
+                            Ok(Value::Str(s.clone()))
+                        } else {
+                            Ok(Value::Str(s.replace(from.as_str(), to)))
+                        }
+                    }
+                    _ => Err(bad_arg(
+                        "needs three strings: text, what to find, what to put there".to_string(),
+                    )),
+                }
+            }
+            "find" | "index_of" => {
+                if args.len() != 2 {
+                    return Err(bad_arg(format!(
+                        "takes exactly two arguments, got {}",
+                        args.len()
+                    )));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Str(s), Value::Str(needle)) => {
+                        // Character index, not a byte offset: Myanmar text is
+                        // multi-byte in UTF-8, but `len` counts characters, so
+                        // `find` has to count the same way.
+                        Ok(Value::Int(match s.find(needle.as_str()) {
+                            Some(byte) => s[..byte].chars().count() as i64,
+                            None => -1,
+                        }))
+                    }
+                    _ => Err(bad_arg(
+                        "needs a string to search and a string to look for".to_string(),
+                    )),
+                }
+            }
+            "starts_with" | "ends_with" => {
+                if args.len() != 2 {
+                    return Err(bad_arg(format!(
+                        "takes exactly two arguments, got {}",
+                        args.len()
+                    )));
+                }
+                match (&args[0], &args[1]) {
+                    (Value::Str(s), Value::Str(part)) => Ok(Value::Bool(if name == "starts_with" {
+                        s.starts_with(part.as_str())
+                    } else {
+                        s.ends_with(part.as_str())
+                    })),
+                    _ => Err(bad_arg(
+                        "needs a string and the text to look for".to_string(),
+                    )),
+                }
+            }
+            "keys" | "values" | "entries" => {
+                one_arg()?;
+                match &args[0] {
+                    Value::Dict(pairs) => {
+                        let items: Vec<Value> = match name {
+                            "keys" => pairs.iter().map(|(k, _)| k.clone()).collect(),
+                            "values" => pairs.iter().map(|(_, v)| v.clone()).collect(),
+                            _ => pairs
+                                .iter()
+                                .map(|(k, v)| Value::Tuple(vec![k.clone(), v.clone()]))
+                                .collect(),
+                        };
+                        Ok(Value::List(items))
+                    }
+                    other => Err(bad_arg(format!(
+                        "needs a dict, got {}",
+                        type_name_mm(other)
+                    ))),
+                }
+            }
+            "enumerate" => {
+                one_arg()?;
+                let items: Vec<Value> = match &args[0] {
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => items.clone(),
+                    Value::Str(s) => s
+                        .chars()
+                        .map(|c| Value::Str(c.to_string()))
+                        .collect(),
+                    other => {
+                        return Err(bad_arg(format!(
+                            "needs a collection or string, got {}",
+                            type_name_mm(other)
+                        )))
+                    }
+                };
+                Ok(Value::List(
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v]))
+                        .collect(),
+                ))
             }
             // The conversion builtins: one argument, converted by the same
             // code the rest of the interpreter uses.
@@ -4558,6 +4809,17 @@ fn is_eng_builtin(name: &str) -> bool {
             | "lower"
             | "trim"
             | "contains"
+            | "split"
+            | "join"
+            | "replace"
+            | "find"
+            | "index_of"
+            | "starts_with"
+            | "ends_with"
+            | "keys"
+            | "values"
+            | "entries"
+            | "enumerate"
     ) || convert_target(name).is_some()
 }
 
@@ -4637,6 +4899,28 @@ fn eng_pin_redeclare_err(name: &str, line: usize) -> String {
 /// `break` (eng or `ရပ်ပါ`) used where there is no loop to stop.
 fn eng_break_outside_loop_err(line: usize) -> String {
     format!("E116 line {}: 'break' outside a loop", line)
+}
+
+/// A `continue` with no enclosing loop to restart.
+fn eng_continue_outside_loop_err(line: usize) -> String {
+    format!("E134 line {}: 'continue' outside a loop", line)
+}
+
+/// A recursion deeper than `MAX_CALL_DEPTH`, reported as a catchable error
+/// instead of letting the interpreter's own stack overflow.
+fn recursion_depth_err(line: usize, limit: usize) -> String {
+    format!(
+        "E135 လိုင်း {} တွင် function ခေါ်ဆိုမှု အနက် (recursion) သည် ကန့်သတ်ချက် {} ကို ကျော်လွန်သွားပါသည်။ ထပ်ခါထပ်ခါ မခေါ်ဘဲ ပြန်လည်ရေးသားပါ။",
+        line, limit
+    )
+}
+
+/// A range `for` loop whose step is zero would never reach its end.
+fn zero_step_err(line: usize) -> String {
+    format!(
+        "E136 လိုင်း {} တွင် for loop ၏ အဆင့် (step) သည် သုည ဖြစ်၍မရပါ။ သုည ဖြင့် လည်ပတ်လျှင် အဆုံးသို့ ရောက်နိုင်မည် မဟုတ်ပါ။",
+        line
+    )
 }
 
 /// A `loop { ... }` used as a value ended with a bare `break`, so it has
