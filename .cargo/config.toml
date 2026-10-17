@@ -1,0 +1,46 @@
+# Windows-only link tweaks for the `akk` executable.
+#
+# `akk` compiles in the App GUI (egui/winit/glow), the file-open dialog (rfd)
+# and the networking stack (ureq/native-tls), so the linker records their DLLs
+# -- OPENGL32, GDI32, USER32, COM BASE, WS2_32, CRYPT32 and friends -- as
+# ordinary imports, and Windows loads and initialises all of them before
+# `main`, on every `akk prog.akk`, used or not. Measured on this machine that
+# was ~67ms of the ~76ms a trivial run took (a hello-world Rust binary that
+# imports the same six heavy DLLs goes from 9ms to 77ms; the binary's *size*
+# makes no difference -- a 6MB hello-world still starts in 9ms). `/DELAYLOAD`
+# resolves each import on its first call instead, so a program that never opens
+# a window, a file dialog or a socket never pays for them, and one that does
+# load them exactly as before.
+#
+# Only the Windows MSVC target is affected; the Linux and macOS builds in
+# `.github/workflows/release.yml` are untouched, and `delayimp.lib` (the helper
+# for delayed imports) ships with the Windows SDK that this toolchain needs
+# anyway.
+#
+# LNK4199: this crate's test and bench targets import none of these DLLs, so
+# the linker notes that a flag had nothing to delay. That says nothing about
+# the shipped binary, which is where the delay-loading happens.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "link-args=/DELAYLOAD:opengl32.dll",
+    "-C", "link-args=/DELAYLOAD:gdi32.dll",
+    "-C", "link-args=/DELAYLOAD:user32.dll",
+    "-C", "link-args=/DELAYLOAD:dwmapi.dll",
+    "-C", "link-args=/DELAYLOAD:uxtheme.dll",
+    "-C", "link-args=/DELAYLOAD:imm32.dll",
+    "-C", "link-args=/DELAYLOAD:shell32.dll",
+    "-C", "link-args=/DELAYLOAD:ole32.dll",
+    "-C", "link-args=/DELAYLOAD:combase.dll",
+    "-C", "link-args=/DELAYLOAD:ws2_32.dll",
+    "-C", "link-args=/DELAYLOAD:crypt32.dll",
+    "-C", "link-args=/DELAYLOAD:secur32.dll",
+    "-C", "link-args=/DELAYLOAD:bcrypt.dll",
+    "-C", "link-args=/DELAYLOAD:bcryptprimitives.dll",
+    "-C", "link-args=/DELAYLOAD:advapi32.dll",
+    "-C", "link-args=delayimp.lib",
+    # The flags above belong to the `akk` binary. A test or bench target of
+    # this crate imports none of those DLLs, so the linker notes that each
+    # flag had nothing to delay (LNK4199); that note says nothing about the
+    # shipped binary, which is where the delay-loading happens.
+    "-C", "link-args=/IGNORE:4199",
+]
