@@ -32,6 +32,25 @@ when it succeeds, the error message when it fails (a program that fails
 before printing anything leaves just the error). The file is written on every
 run, success or failure, and each run overwrites it.
 
+## Performance
+
+The interpreter is a Rust binary, and for anything with functions in it most of
+a run's cost is in the call and loop paths rather than in lexing or parsing.
+[`benchmarks/`](benchmarks/) holds four small programs written both in Akkhara
+and in Python, the harnesses that time them, and the numbers from the last
+optimization pass -- including what it did *not* manage to measure on a noisy
+desktop. If you change the interpreter, run them before and after:
+
+```
+cargo build --release
+python benchmarks/run.py
+```
+
+Time the program, not the process: the `Interpreted in ...` line covers only
+the run, while `akk prog.akk` also pays process startup on Windows -- ~17 ms
+since the Windows build stopped loading the GUI, dialog and networking
+libraries a script never calls (it was ~78 ms).
+
 ## Install the `akk` command (Windows / PowerShell)
 
 See the comment block at the top of `command.ps1` for full instructions —
@@ -88,9 +107,13 @@ same block.
 - While: `အခြေအနေ (<condition>) ဖြစ်နေစဉ်` ... `ပြီး။`, or
   `(<condition>) ဖြစ်နေစဥ်` ... `ပြီး။` -- the keyword is optional, and
   `မဖြစ်နေစဉ်` / `မဖြစ်နေစဥ်` loops while the condition is not true.
-- For, over a range: `i သည် 0, 10 ထဲမှ တစ်ခုစီ 1 တိုးခြင်းဖြင့်` ... `ပြီး။`
-  (the end is exclusive; the step clause is `1 တိုးခြင်းဖြင့်` and may be any number).
-- For, over a collection: `x သည် xs ထဲမှ တစ်ခုစီ` ... `ပြီး။`.
+- For, over a collection: `x အတွက် တစ်ခုစီ(xs)` ... `ပြီး။`, or
+  `x သည် xs ထဲမှ တစ်ခုစီ` ... `ပြီး။` -- a dict yields its keys.
+- For, over a range: `i အတွက် တစ်ခုစီ(0, 10, 2)` ... `ပြီး။`, or
+  `i သည် 0, 10 ထဲမှ တစ်ခုစီ 1 တိုးခြင်းဖြင့်` ... `ပြီး။` -- the end is
+  exclusive; the step may be left out (`တစ်ခုစီ(0, 10)` steps by 1) and a
+  negative step counts down (`တစ်ခုစီ(10, 0, -1)`). One number ranges from
+  0: `i အတွက် တစ်ခုစီ(10)` runs 0..9.
 
 Conditions join with `and` / `or`, or with their own Myanmar groups
 `(နှင့်)` / `(သို့)`:
