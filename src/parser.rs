@@ -25,6 +25,7 @@ const ENG_LOOP: &str = "loop";
 const ENG_FOR: &str = "for";
 const ENG_IN: &str = "in";
 const ENG_BREAK: &str = "break";
+const ENG_CONTINUE: &str = "continue";
 const ENG_USE: &str = "use";
 const ENG_AS: &str = "as";
 
@@ -56,6 +57,9 @@ pub enum Expr {
     NullLit,
     Ident(String),
     Binary(Box<Expr>, char, Box<Expr>, usize), // line of the operator
+    /// A comparison used as a value: `x > y`, `name == "Aung"`. The same
+    /// operators a condition accepts, producing a `bool`.
+    Compare(Box<Expr>, String, Box<Expr>, usize), // line of the operator
     Neg(Box<Expr>, usize),                     // unary minus, line
     ListLit(Vec<Expr>),
     TupleLit(Vec<Expr>),
@@ -310,6 +314,11 @@ pub enum Stmt {
         value: Option<Expr>,
         line: usize,
     },
+    /// `continue;` / `ဆက်ပါ။` -- skips the rest of the innermost loop body
+    /// and starts the next iteration. Unlike `break`, it takes no value.
+    Continue {
+        line: usize,
+    },
     /// eng infinite loop statement: `loop { ... }` -- runs until a `break`
     /// (or a `return` unwinds out of the enclosing function).
     EngLoop { body: Vec<Stmt> },
@@ -431,6 +440,8 @@ const TC_BOOL: &str = "မှန်/မှား";
 const KW_LOOP_END: &str = "ပြီး";
 /// eng `break`, spelled as a Myanmar keyword: `ရပ်ပါ။`.
 const KW_BREAK: &str = "ရပ်ပါ";
+/// eng `continue`, spelled as a Myanmar keyword: `ဆက်ပါ။`.
+const KW_CONTINUE: &str = "ဆက်ပါ";
 const KW_TRY: &str = "စမ်းရန်";
 const KW_CATCH: &str = "ဖမ်းပါ";
 const KW_FINALLY: &str = "နောက်ဆုံးတွင်";
@@ -485,6 +496,9 @@ fn is_self_kw(tok: &Tok) -> bool {
 
 // Library system keywords.
 const KW_USE: &str = "သုံးမည်";
+/// `အသုံးပြုပါ` -- the other verb the import sentence is written with (the
+/// spelling the README and the library READMEs use).
+const KW_USE_ALT: &str = "အသုံးပြုပါ";
 const KW_LIBRARIES: &str = "နည်းပညာများ";
 const KW_WAIT: &str = "စောင့်ပါ";
 const KW_RANDOM: &str = "ကျပန်းကိန်း";
@@ -547,6 +561,7 @@ fn is_reserved_word(name: &str) -> bool {
         KW_LOOP_EACH,
         KW_LOOP_END,
         KW_BREAK,
+        KW_CONTINUE,
         KW_TRY,
         KW_CATCH,
         KW_FINALLY,
@@ -1385,6 +1400,14 @@ fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
             let (rhs, ni) = parse_term_at(tokens, i + 1, line)?;
             expr = Expr::Binary(Box::new(expr), *c, Box::new(rhs), op_line);
             i = ni;
+        } else if let Tok::Cmp(op) = &tokens[i].tok {
+            // A comparison is the lowest-precedence operator in an
+            // expression, so `x + 1 > y` compares the whole sum. It yields a
+            // bool, which `print`, a declaration or an `if` can all consume.
+            let op_line = tokens[i].line;
+            let (rhs, ni) = parse_term_at(tokens, i + 1, line)?;
+            expr = Expr::Compare(Box::new(expr), op.clone(), Box::new(rhs), op_line);
+            i = ni;
         } else {
             break;
         }
@@ -1938,6 +1961,14 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
             value: Some(value),
             line,
         });
+    }
+
+    // --- eng continue: `continue;` -- no value form ---
+    if !body.is_empty() && ident_eq(&body[0].tok, ENG_CONTINUE) {
+        if body.len() != 1 {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::Continue { line });
     }
 
     // --- eng return: `return;` / `return <value>;` ---
@@ -2814,6 +2845,15 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
 
     // --- break, spelled with the Myanmar keyword: `ရပ်ပါ။` stops the
     //     innermost loop; `<value> ကို ရပ်ပါ။` stops it with that value. ---
+    // --- continue, spelled with the Myanmar keyword: `ဆက်ပါ။` skips the
+    //     rest of the innermost loop body. It takes no value. ---
+    if !body.is_empty() && ident_eq(&body.last().unwrap().tok, KW_CONTINUE) {
+        if body.len() != 1 {
+            return Err(generic_syntax_err(line));
+        }
+        return Ok(Stmt::Continue { line });
+    }
+
     if !body.is_empty() && ident_eq(&body.last().unwrap().tok, KW_BREAK) {
         let fn_idx = body.len() - 1;
         if fn_idx == 0 {
@@ -2885,7 +2925,8 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         if !end_present {
             return Err(missing_period_err(line));
         }
-        let ends_with_use = ident_eq(&body.last().unwrap().tok, KW_USE);
+        let ends_with_use = ident_eq(&body.last().unwrap().tok, KW_USE)
+            || ident_eq(&body.last().unwrap().tok, KW_USE_ALT);
         if ends_with_use
             && body.len() >= 4
             && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
