@@ -3,6 +3,7 @@ mod lexer;
 mod library;
 mod parser;
 mod ui;
+mod warnings;
 
 /// The Akkhara "အချိန်" (Time) library, compiled in from its own source
 /// under `libraries/အချိန်/main.rs`. Programs load it with:
@@ -106,7 +107,8 @@ fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str)
 }
 
 fn print_usage() {
-    eprintln!("Usage: akk <file name>");
+    eprintln!("Usage: akk <file name> [--no-warn]");
+    eprintln!("       akk report [folder]        (runs every .akk in the folder)");
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
     eprintln!("       akk install <library>");
@@ -121,7 +123,12 @@ fn main() {
     // the install scripts alone.
     let _ = fs::create_dir_all(libraries_dir());
 
+    // `--no-warn` turns the static warnings off (see `warnings`). It is
+    // accepted before or after the file name / subcommand, so it is taken out
+    // of the argument list here rather than parsed per command.
     let args: Vec<String> = env::args().collect();
+    let no_warn = args.iter().any(|a| a == "--no-warn");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--no-warn").collect();
 
     if args.len() < 2 {
         print_usage();
@@ -139,6 +146,11 @@ fn main() {
         }
         "--check" | "check" => {
             cmd_check();
+            return;
+        }
+        "report" => {
+            let folder = args.get(2).map(String::as_str).unwrap_or("output");
+            cmd_report(folder, no_warn);
             return;
         }
         "install" => {
@@ -190,7 +202,15 @@ fn main() {
         }
     };
 
-    let mut interp = interpreter::Interpreter::new(libraries_dir());
+    // Static warnings: what the file declares but never uses. They are shown
+    // before the program starts (and saved into its `.akop` transcript), and
+    // they never change what the program does.
+    let warning_prefix = if no_warn {
+        String::new()
+    } else {
+        write_warnings(&warnings::check(&stmts))
+    };
+
     // Let this program import a neighboring `<name>.akk` script with
     // `နည်းပညာများ <name> ကို သုံးမည်။`: search the program's own folder
     // first, then the current working directory, before the libraries/
@@ -200,39 +220,260 @@ fn main() {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    interp.add_library_search_dir(script_dir);
-    if let Ok(cwd) = env::current_dir() {
-        interp.add_library_search_dir(cwd);
-    }
-    // Collect the program's output so it can be saved alongside the program
-    // (in addition to being shown on stdout).
-    interp.capture_output();
+    let cwd = env::current_dir().ok();
+    let libs_dir = libraries_dir();
 
-    // Time the interpretation itself (not the lex/parse step) and report it
-    // once the program has finished successfully.
-    let started = std::time::Instant::now();
-    let result = interp.run(&stmts);
-    // Output is line-flushed as the program runs; this only gets out a last
-    // line that has no newline of its own, before the closing line (or the
-    // error) that follows it. This stays inside the timed section, so
-    // `Interpreted in ...` still covers the cost of writing it.
-    interp.flush_output();
-    if let Err(e) = result {
+    let mut search_dirs = vec![script_dir];
+    if let Some(cwd) = cwd {
+        search_dirs.push(cwd);
+    }
+    let outcome = match interpret(stmts, libs_dir, search_dirs, false, no_warn) {
+        Ok(outcome) => outcome,
+        Err((message, code)) => {
+            eprintln!("{}", message);
+            process::exit(code);
+        }
+    };
+
+    if let Some(e) = outcome.error {
         eprintln!("{}", e);
         // A failing run still saves its transcript: what the program managed
         // to print, then the error the terminal showed.
-        let output = interp.take_output();
-        save_terminal_log(filename, output, &e);
+        save_terminal_log(filename, with_warnings(&warning_prefix, outcome.output), &e);
         process::exit(1);
     }
-    let elapsed = started.elapsed().as_secs_f64();
-    let closing_line = format!("Interpreted in {:.3}s", elapsed);
+    let closing_line = format!("Interpreted in {:.3}s", outcome.elapsed);
     println!("{}", closing_line);
 
     // Save everything the terminal showed next to the program as
-    // `<file_name>.akop`: the program's output and that closing line.
-    let output = interp.take_output();
-    save_terminal_log(filename, output, &closing_line);
+    // `<file_name>.akop`: the warnings, the program's output and that closing
+    // line.
+    save_terminal_log(
+        filename,
+        with_warnings(&warning_prefix, outcome.output),
+        &closing_line,
+    );
+}
+
+/// Run one parsed program on a thread with a large stack. A tree-walking
+/// interpreter uses several stack frames per Akkhara call, and the main
+/// thread's default stack (1 MB on Windows) overflowed at roughly 200
+/// recursive calls. 64 MB carries the frame budget `MAX_CALL_DEPTH` allows,
+/// and the interpreter's own limit (E135) stops a runaway recursion with a
+/// catchable error before the stack runs out. `silent` keeps the program's
+/// output in the transcript instead of writing it to the terminal, which is
+/// what `akk report` needs to print each program under its own heading, and
+/// `warnings_off` (`--no-warn`) drops the warnings the run itself would print.
+///
+/// `Err` carries the message to show and the exit code the run would have
+/// ended with: 1 when the interpreter thread could not start, 101 when it
+/// panicked.
+#[allow(clippy::result_large_err)]
+fn interpret(
+    stmts: Vec<parser::Stmt>,
+    libraries_dir: PathBuf,
+    search_dirs: Vec<PathBuf>,
+    silent: bool,
+    warnings_off: bool,
+) -> Result<RunOutcome, (String, i32)> {
+    let run = std::thread::Builder::new()
+        .name("akk-interpreter".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || -> RunOutcome {
+            let mut interp = interpreter::Interpreter::new(libraries_dir);
+            for dir in search_dirs {
+                interp.add_library_search_dir(dir);
+            }
+            // Collect the program's output so it can be saved alongside the
+            // program (in addition to being shown on stdout).
+            interp.capture_output();
+            if silent {
+                interp.silence_output();
+            }
+            if warnings_off {
+                interp.suppress_warnings();
+            }
+
+            // Time the interpretation itself (not the lex/parse step) and
+            // report it once the program has finished successfully.
+            let started = std::time::Instant::now();
+            let result = interp.run(&stmts);
+            // Output is line-flushed as the program runs; this only gets out
+            // a last line that has no newline of its own, before the closing
+            // line (or the error) that follows it. This stays inside the
+            // timed section, so `Interpreted in ...` still covers the cost of
+            // writing it.
+            interp.flush_output();
+            let elapsed = started.elapsed().as_secs_f64();
+            let output = interp.take_output();
+            RunOutcome {
+                elapsed,
+                output,
+                error: result.err(),
+            }
+        });
+
+    let outcome = match run {
+        Ok(handle) => handle.join().map_err(|_| {
+            (
+                "akk: the interpreter thread panicked".to_string(),
+                101i32,
+            )
+        })?,
+        Err(e) => {
+            return Err((
+                format!("akk: could not start the interpreter thread - {}", e),
+                1,
+            ))
+        }
+    };
+    Ok(outcome)
+}
+
+/// Show the static warnings on stderr and hand back the lines they contribute
+/// to the run's `.akop` transcript, so a saved transcript holds everything the
+/// terminal showed. Warnings are printed before the program runs.
+fn write_warnings(warnings: &[String]) -> String {
+    let mut text = String::new();
+    for warning in warnings {
+        eprintln!("{}", warning);
+        text.push_str(warning);
+        text.push('\n');
+    }
+    text
+}
+
+/// The transcript `save_terminal_log` writes: the static warnings first (they
+/// are shown before the program starts), then the program's own output.
+fn with_warnings(prefix: &str, output: Option<String>) -> Option<String> {
+    if prefix.is_empty() {
+        return output;
+    }
+    Some(format!("{}{}", prefix, output.unwrap_or_default()))
+}
+
+/// What the interpreter thread produced: the timed section's duration, the
+/// output captured for the `.akop` transcript, and the error (if any).
+struct RunOutcome {
+    elapsed: f64,
+    output: Option<String>,
+    error: Option<String>,
+}
+
+/// `akk report [folder]` -- runs every `.akk` program in `folder` (default:
+/// `output`) and prints, one heading per program, what each one produced: its
+/// warnings, its error when it failed, and its own output -- then a count of
+/// how many succeeded and failed. The programs run with their output captured,
+/// so everything stays under its own heading; `--no-warn` silences the static
+/// warnings. Exits 0 when every program succeeded and 1 when one did not.
+fn cmd_report(folder: &str, no_warn: bool) {
+    let dir = PathBuf::from(folder);
+    let mut files: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "akk"))
+            .collect(),
+        Err(e) => {
+            eprintln!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", dir.display(), e);
+            process::exit(1);
+        }
+    };
+    files.sort();
+
+    println!("==> {} ထဲရှိ .akk program {} ခု", dir.display(), files.len());
+
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+    let mut warning_count = 0usize;
+
+    for file in &files {
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.display().to_string());
+        println!();
+        println!("--- {} ---", name);
+
+        let src = match fs::read_to_string(file) {
+            Ok(src) => src,
+            Err(e) => {
+                println!("[ERROR] warning 0၊ error 1");
+                println!("    {}", e);
+                failures += 1;
+                continue;
+            }
+        };
+
+        // Parse, check, run -- the same order and the same checks a plain
+        // `akk <file>` does, so the report sees exactly what a run shows.
+        let stmts = match lexer::lex(&src).and_then(|tokens| parser::parse(&tokens)) {
+            Ok(stmts) => stmts,
+            Err(e) => {
+                println!("[ERROR] warning 0၊ error 1");
+                println!("    {}", e);
+                failures += 1;
+                continue;
+            }
+        };
+        let found_warnings: Vec<String> = if no_warn {
+            Vec::new()
+        } else {
+            warnings::check(&stmts)
+        };
+        let mut search_dirs = Vec::new();
+        if let Some(parent) = file.parent() {
+            search_dirs.push(parent.to_path_buf());
+        }
+        let outcome = match interpret(stmts, libraries_dir(), search_dirs, true, no_warn) {
+            Ok(outcome) => outcome,
+            Err((message, _)) => {
+                println!("[ERROR] warning {}၊ error 1", found_warnings.len());
+                println!("    {}", message);
+                failures += 1;
+                continue;
+            }
+        };
+
+        // The heading comes first and the lines under it are its details:
+        // the static warnings, then whatever the program itself printed (a
+        // runtime warning such as E046 sits where it was printed), then the
+        // error that ended a failing run.
+        if outcome.error.is_some() {
+            println!(
+                "[ERROR] warning {}၊ error 1၊ run {:.3}s",
+                found_warnings.len(),
+                outcome.elapsed
+            );
+            failures += 1;
+        } else {
+            println!(
+                "[SUCCESS] warning {}၊ error 0၊ run {:.3}s",
+                found_warnings.len(),
+                outcome.elapsed
+            );
+            successes += 1;
+        }
+        for warning in &found_warnings {
+            println!("{}", warning);
+        }
+        warning_count += found_warnings.len();
+        if let Some(output) = &outcome.output {
+            print!("{}", output);
+        }
+        if let Some(error) = &outcome.error {
+            println!("{}", error);
+        }
+    }
+
+    println!();
+    println!(
+        "==> စုစုပေါင်း: success {} ခု၊ error {} ခု၊ warning {} ခု",
+        successes, failures, warning_count
+    );
+    if failures > 0 {
+        process::exit(1);
+    }
 }
 
 /// `akk --check` -- looks up the latest GitHub release tag and compares it
