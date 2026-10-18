@@ -202,19 +202,11 @@ fn main() {
         }
     };
 
-    // Static warnings: what the file declares but never uses. They are shown
-    // before the program starts (and saved into its `.akop` transcript), and
-    // they never change what the program does.
-    let warning_prefix = if no_warn {
-        String::new()
-    } else {
-        write_warnings(&warnings::check(&stmts))
-    };
-
     // Let this program import a neighboring `<name>.akk` script with
     // `နည်းပညာများ <name> ကို သုံးမည်။`: search the program's own folder
     // first, then the current working directory, before the libraries/
-    // folder next to the binary.
+    // folder next to the binary. The static warning pass uses the same
+    // folders, so a script's own source is checked too.
     let script_dir = PathBuf::from(filename)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -227,6 +219,16 @@ fn main() {
     if let Some(cwd) = cwd {
         search_dirs.push(cwd);
     }
+
+    // Static warnings: what the program -- and every script it imports --
+    // declares but never uses. They are shown before the program starts (and
+    // saved into its `.akop` transcript), and they never change what the
+    // program does.
+    let warning_prefix = if no_warn {
+        String::new()
+    } else {
+        write_warnings(&library_warnings(&stmts, &search_dirs))
+    };
     let outcome = match interpret(stmts, libs_dir, search_dirs, false, no_warn) {
         Ok(outcome) => outcome,
         Err((message, code)) => {
@@ -330,6 +332,23 @@ fn interpret(
     Ok(outcome)
 }
 
+/// Check a program and the script/package libraries it imports, resolving an
+/// import the way a run does (a downloaded package first, then a plain
+/// `<name>.akk` script in one of `search_dirs`). A built-in library and a name
+/// that is not on disk add nothing: there is no source to read.
+fn library_warnings(stmts: &[parser::Stmt], search_dirs: &[PathBuf]) -> Vec<String> {
+    let mut loader = library::LibraryLoader::new(libraries_dir());
+    for dir in search_dirs {
+        loader.add_script_dir(dir.clone());
+    }
+    warnings::check_program(stmts, &|name| {
+        loader.find_source(name).map(|(path, source)| warnings::Library {
+            file: path.display().to_string(),
+            source,
+        })
+    })
+}
+
 /// Show the static warnings on stderr and hand back the lines they contribute
 /// to the run's `.akop` transcript, so a saved transcript holds everything the
 /// terminal showed. Warnings are printed before the program runs.
@@ -416,15 +435,15 @@ fn cmd_report(folder: &str, no_warn: bool) {
                 continue;
             }
         };
-        let found_warnings: Vec<String> = if no_warn {
-            Vec::new()
-        } else {
-            warnings::check(&stmts)
-        };
         let mut search_dirs = Vec::new();
         if let Some(parent) = file.parent() {
             search_dirs.push(parent.to_path_buf());
         }
+        let found_warnings: Vec<String> = if no_warn {
+            Vec::new()
+        } else {
+            library_warnings(&stmts, &search_dirs)
+        };
         let outcome = match interpret(stmts, libraries_dir(), search_dirs, true, no_warn) {
             Ok(outcome) => outcome,
             Err((message, _)) => {
