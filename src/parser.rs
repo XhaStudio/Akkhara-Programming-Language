@@ -1922,6 +1922,13 @@ fn eng_call_bad_form_err(line: usize, fn_name: &str) -> String {
     format!("E106 line {}: expected {}(...);", line, fn_name)
 }
 
+fn eng_func_alias_bad_form_err(line: usize) -> String {
+    format!(
+        "E137 line {}: expected `function() as alias;` or `function as alias;`",
+        line
+    )
+}
+
 /// Parse the single argument of `print(...)` / `input(...)`: exactly one
 /// parenthesized expression, nothing after the closing paren.
 fn parse_eng_call_arg(tokens: &[Token], fn_name: &str, line: usize) -> Result<Expr, String> {
@@ -2741,6 +2748,62 @@ fn try_parse_eng_call_stmt(body: &[Token], line: usize) -> Result<Option<Stmt>, 
     Ok(Some(Stmt::EngExprCall { name, args, line }))
 }
 
+/// Parse an eng function alias: `<fn>() as <alias>;` or `<fn> as <alias>;`,
+/// with a comma-separated alias list allowed -- the English spelling of
+/// `<fn> အဖြစ် <alias>။`. The empty `()` is optional, so both a
+/// definition-looking name (`calculate as c;`) and a call-looking one
+/// (`calculate() as c;`) work, and each alias is a callable name for the same
+/// function. `terminated` says whether the statement's ';' was present:
+/// without it, an alias-shaped statement is reported as the missing ';'
+/// rather than silently accepted. Returns `Ok(None)` for any other shape, so
+/// every other statement form falls through untouched.
+fn try_parse_eng_func_alias(
+    body: &[Token],
+    line: usize,
+    terminated: bool,
+) -> Result<Option<Stmt>, String> {
+    let original = match body.first().map(|t| &t.tok) {
+        Some(Tok::Ident(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let mut rest = &body[1..];
+    // An optional empty `()` between the name and `as`.
+    if matches!(rest.first().map(|t| &t.tok), Some(Tok::LParen)) {
+        if !matches!(rest.get(1).map(|t| &t.tok), Some(Tok::RParen)) {
+            return Ok(None);
+        }
+        rest = &rest[2..];
+    }
+    if !rest.first().is_some_and(|t| ident_eq(&t.tok, ENG_AS)) {
+        return Ok(None);
+    }
+    if !terminated {
+        return Err(missing_semicolon_err(line));
+    }
+    let alias_tokens = &rest[1..];
+    if alias_tokens.is_empty() {
+        return Err(eng_func_alias_bad_form_err(line));
+    }
+    let mut aliases = Vec::new();
+    for part in split_top_level(alias_tokens, |t| matches!(t, Tok::Comma)) {
+        match part {
+            [t] => match &t.tok {
+                Tok::Ident(alias) => aliases.push(alias.clone()),
+                _ => return Err(eng_func_alias_bad_form_err(line)),
+            },
+            _ => return Err(eng_func_alias_bad_form_err(line)),
+        }
+    }
+    if aliases.is_empty() {
+        return Err(eng_func_alias_bad_form_err(line));
+    }
+    Ok(Some(Stmt::FuncAlias {
+        original,
+        aliases,
+        line,
+    }))
+}
+
 /// True when a statement is shaped like an eng (English-spelled) statement,
 /// which ends with ';' rather than '။': `use ...`, `print(...)`,
 /// `input(...)`, `break`, `return`, `pin ...`, `name :<type> = <value>`,
@@ -2823,6 +2886,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     // --- eng loop as a value: `<name> [:<type>] = loop { ... }`, with or
     //     without the trailing ';'. ---
     if let Some(stmt) = try_parse_eng_loop_assign(decl_body, line)? {
+        return Ok(stmt);
+    }
+
+    // --- eng function alias: `calculate() as c;` / `calculate as c, d;` --
+    //     the English spelling of `calculate အဖြစ် c။`. Checked before the
+    //     call form below, which would otherwise read `calculate()` as a call
+    //     and stop at the `as`. ---
+    if let Some(stmt) = try_parse_eng_func_alias(decl_body, line, terminated)? {
         return Ok(stmt);
     }
 
