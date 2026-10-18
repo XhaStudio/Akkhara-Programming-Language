@@ -17,28 +17,119 @@
 //!
 //! The analysis is deliberately conservative -- anything that *might* be a use
 //! counts as one -- so a warning means the file really never uses the thing.
-//! It covers one file: a library's own source is not scanned when the program
-//! imports it, and neither is a script imported with
-//! `နည်းပညာများ <name> ကို သုံးမည်။`.
+//!
+//! Imports are followed: a script or package library the program brings in
+//! with `နည်းပညာများ <name> ကို သုံးမည်။` is checked too, and so is a library
+//! that library imports. Each file keeps its own variables, functions and
+//! imports, but the *uses* are pooled across all of them, because an
+//! imported library runs in the program's own global scope: a name a library
+//! assigns may be read by the program, and a function a library defines may
+//! be called from anywhere. A library's warnings are prefixed with the file
+//! they are in (`Tools.akk: W001 ...`); the program's own lines are not.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::parser::{CondChain, Expr, ForSource, IfBranch, Stmt};
 
+/// A script or package library an import resolves to: the file to name in a
+/// warning, and its source text.
+pub struct Library {
+    pub file: String,
+    pub source: String,
+}
+
 /// The self-field marker inside an interpolation placeholder -- the same
 /// spelling the interpreter uses (`{အတု <field>}`).
 const SELF_PLACEHOLDER: &str = "အတု";
 
-/// Check one parsed program, returning its warnings as finished lines, in
-/// source order (line, then the order the checks ran).
-pub fn check(stmts: &[Stmt]) -> Vec<String> {
-    let mut c = Collector::default();
-    c.block(stmts);
-    c.finish()
+/// Check a parsed program and every script or package library it imports,
+/// following imports through one library into the next. `resolve` turns an
+/// imported name into its source and file (`None` for a built-in library,
+/// whose code is in the binary, or a name that is not on disk). A library that
+/// cannot be read or parsed is skipped: the run itself reports that import as
+/// E066/E067, so there is nothing useful to add before it.
+pub fn check_program(stmts: &[Stmt], resolve: &dyn Fn(&str) -> Option<Library>) -> Vec<String> {
+    // Per-file findings, in the order the files were reached: the program
+    // first, then its libraries as their imports come up.
+    let mut analyses: Vec<Collector> = Vec::new();
+    // Names already resolved, and files already read, so a diamond (two
+    // libraries importing the same third one) or an import cycle is walked
+    // once instead of forever.
+    let mut resolved: HashSet<String> = HashSet::new();
+    let mut read_files: HashSet<String> = HashSet::new();
+    let mut pending: Vec<String> = Vec::new();
+
+    let mut root = Collector::default();
+    root.block(stmts);
+    pending.extend(root.imports.iter().map(|(lib, _, _)| lib.clone()));
+    analyses.push(root);
+
+    while let Some(name) = pending.pop() {
+        if !resolved.insert(name.clone()) {
+            continue;
+        }
+        let Some(library) = resolve(&name) else {
+            continue;
+        };
+        if !read_files.insert(library.file.clone()) {
+            continue;
+        }
+        let Ok(tokens) = crate::lexer::lex(&library.source) else {
+            continue;
+        };
+        let Ok(lib_stmts) = crate::parser::parse(&tokens) else {
+            continue;
+        };
+        let mut c = Collector::in_file(library.file);
+        c.block(&lib_stmts);
+        pending.extend(c.imports.iter().map(|(lib, _, _)| lib.clone()));
+        analyses.push(c);
+    }
+
+    // Uses are pooled across every file before anything is reported, so a
+    // function of one library that only another library calls is not called
+    // unused just because that file was walked later.
+    let mut shared = Shared::default();
+    for analysis in &analyses {
+        analysis.absorb(&mut shared);
+    }
+
+    analyses
+        .iter()
+        .flat_map(|analysis| {
+            let file = analysis.file.as_deref();
+            analysis
+                .finish(&shared)
+                .into_iter()
+                .map(move |line| match file {
+                    Some(file) => format!("{}: {}", file, line),
+                    None => line,
+                })
+        })
+        .collect()
+}
+
+/// Everything the pooled walk found: the reads, calls and library uses of all
+/// the files together.
+#[derive(Default)]
+struct Shared {
+    /// Every name read as a value in any file.
+    reads: HashSet<String>,
+    /// Every name used in a call position, or handed to an alias statement.
+    called: HashSet<String>,
+    /// Names that appear in a library position: `<lib> ၏ ...`, `<lib>.<fn>`,
+    /// an HTTP call through a library, and so on.
+    lib_uses: HashSet<String>,
+    /// `<lib> အဖြစ် <alias>` pairs from every file: alias -> the library it
+    /// stands for. Library aliases are global at run time, like imports.
+    lib_alias: HashMap<String, String>,
 }
 
 #[derive(Default)]
 struct Collector {
+    /// The file these findings belong to: `None` for the program itself, the
+    /// path for an imported library (whose lines are prefixed with it).
+    file: Option<String>,
     /// Every name read anywhere in the file, as a value.
     reads: HashSet<String>,
     /// The read sets of the function bodies currently being walked, innermost
@@ -69,6 +160,26 @@ struct Collector {
 }
 
 impl Collector {
+    /// A collector for an imported library's source, blamed on `file`.
+    fn in_file(file: String) -> Self {
+        Collector {
+            file: Some(file),
+            ..Collector::default()
+        }
+    }
+
+    /// Fold this file's uses into the pooled set. Only the *uses* travel
+    /// between files; what a file declares stays its own, so a warning always
+    /// points at the file the unused thing is written in.
+    fn absorb(&self, shared: &mut Shared) {
+        shared.reads.extend(self.reads.iter().cloned());
+        shared.called.extend(self.called.iter().cloned());
+        shared.lib_uses.extend(self.lib_uses.iter().cloned());
+        for (alias, original) in &self.lib_alias {
+            shared.lib_alias.insert(alias.clone(), original.clone());
+        }
+    }
+
     fn warn(&mut self, line: usize, code: u16, message: String) {
         self.out.push(Found { line, code, message });
     }
@@ -222,15 +333,23 @@ impl Collector {
                 self.write(name, *line);
                 self.args(args);
             }
-            Stmt::LibCall { lib, args, .. } => {
+            Stmt::LibCall {
+                lib, fn_name, args, ..
+            } => {
                 self.lib_uses.insert(lib.clone());
+                // `<lib> ၏ <fn>` calls a function the library defines, so the
+                // library's own `fn <fn>` is used. Which library (through an
+                // alias, say) is not resolved here, so any function of that
+                // name counts as called -- the conservative reading.
+                self.called.insert(fn_name.clone());
                 self.args(args);
             }
             Stmt::LibCallAssign {
-                name, lib, args, line, ..
+                name, lib, fn_name, args, line,
             } => {
                 self.write(name, *line);
                 self.lib_uses.insert(lib.clone());
+                self.called.insert(fn_name.clone());
                 self.args(args);
             }
             Stmt::FuncAlias {
@@ -437,8 +556,9 @@ impl Collector {
                 self.called.insert(name.clone());
                 self.args(args);
             }
-            Expr::LibCall(lib, _, args, _) => {
+            Expr::LibCall(lib, fn_name, args, _) => {
                 self.lib_uses.insert(lib.clone());
+                self.called.insert(fn_name.clone());
                 self.args(args);
             }
             Expr::LibFnRef(lib, _, _) => {
@@ -452,16 +572,17 @@ impl Collector {
         }
     }
 
-    /// Turn what the walk collected into the finished warning lines, in
-    /// source order.
-    fn finish(self) -> Vec<String> {
+    /// Turn what the walk collected into the finished warning lines for this
+    /// file, in source order. `shared` decides whether a name is used
+    /// somewhere in the program as a whole.
+    fn finish(&self, shared: &Shared) -> Vec<String> {
         // An import is used when its own name -- or an alias of it -- appears
         // in a library position. Aliases chain: `r` standing for `ကျပန်း`
         // makes `ကျပန်း ၏ ...` the used one.
-        let mut used = self.lib_uses.clone();
+        let mut used = shared.lib_uses.clone();
         loop {
             let before = used.len();
-            for (alias, original) in &self.lib_alias {
+            for (alias, original) in &shared.lib_alias {
                 if used.contains(alias) {
                     used.insert(original.clone());
                 }
@@ -474,7 +595,7 @@ impl Collector {
         let mut found: Vec<Found> = Vec::new();
         let mut seen: HashSet<&str> = HashSet::new();
         for (name, line) in &self.writes {
-            if self.params.contains(name) || self.reads.contains(name) {
+            if self.params.contains(name) || shared.reads.contains(name) {
                 continue;
             }
             if seen.insert(name.as_str()) {
@@ -498,7 +619,7 @@ impl Collector {
         }
         let mut seen_funcs: HashSet<&str> = HashSet::new();
         for (name, line) in &self.funcs {
-            if !self.called.contains(name) && seen_funcs.insert(name.as_str()) {
+            if !shared.called.contains(name) && seen_funcs.insert(name.as_str()) {
                 found.push(Found {
                     line: *line,
                     code: 5,
@@ -507,7 +628,7 @@ impl Collector {
             }
         }
 
-        found.extend(self.out);
+        found.extend(self.out.iter().cloned());
         // Source order, and by code when two warnings share a line, so the
         // report of a file always comes out the same way.
         found.sort_by_key(|f| (f.line, f.code));
@@ -517,6 +638,7 @@ impl Collector {
 
 /// One warning found: where it points, its code (1 for `W001`, ...) and the
 /// finished line to print.
+#[derive(Clone)]
 struct Found {
     line: usize,
     code: u16,
