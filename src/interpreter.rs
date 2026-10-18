@@ -1349,6 +1349,14 @@ pub struct Interpreter {
     /// so a recursion that never returns cannot retain buffers without
     /// limit.
     arg_bufs: Vec<Vec<Value>>,
+    /// When set, program output and warnings go into the transcript only,
+    /// never to the terminal. `akk report` turns this on so it can print each
+    /// program's output under its own heading.
+    silent: bool,
+    /// When set, warnings the run would print are dropped entirely. That is
+    /// `akk --no-warn`, which turns off the static pass *and* runtime
+    /// warnings such as a loop that crossed the iteration cap (E046).
+    warnings_off: bool,
 }
 
 impl Interpreter {
@@ -1376,12 +1384,26 @@ impl Interpreter {
             line_buf: String::new(),
             arg_bufs: Vec::new(),
             out: io::stdout().lock(),
+            silent: false,
+            warnings_off: false,
         }
     }
 
     /// Starts collecting the program's output (see `output_log`).
     pub fn capture_output(&mut self) {
         self.output_log = Some(String::new());
+    }
+
+    /// Collect the program's output without showing it (see `silent`). The
+    /// caller is expected to have called `capture_output` too, since the
+    /// transcript is the only place the output is kept.
+    pub fn silence_output(&mut self) {
+        self.silent = true;
+    }
+
+    /// Drop every warning this run would print (see `warnings_off`).
+    pub fn suppress_warnings(&mut self) {
+        self.warnings_off = true;
     }
 
     /// Returns the output collected so far, and stops capturing.
@@ -1408,8 +1430,10 @@ impl Interpreter {
     /// produces (that is what std's own print macro does), so a closed stdout
     /// still fails loudly.
     fn emit(&mut self, text: &str) {
-        if let Err(e) = self.out.write_all(text.as_bytes()) {
-            panic!("failed printing to stdout: {}", e);
+        if !self.silent {
+            if let Err(e) = self.out.write_all(text.as_bytes()) {
+                panic!("failed printing to stdout: {}", e);
+            }
         }
         if let Some(log) = self.output_log.as_mut() {
             log.push_str(text);
@@ -1418,6 +1442,29 @@ impl Interpreter {
 
     fn emit_line(&mut self, text: &str) {
         self.emit(&format!("{}\n", text));
+    }
+
+    /// A non-fatal diagnostic -- today, a loop that crossed the iteration
+    /// cap (E046). It is written the way an error message is (stderr, so it
+    /// stays out of the program's own output), but the run carries on.
+    ///
+    /// Anything the program printed without a trailing newline is flushed
+    /// first, so the warning lands after it rather than in front of it, and
+    /// the line joins the transcript as well, so the `.akop` file left behind
+    /// keeps everything the terminal showed -- not just stdout. In silent
+    /// mode (`akk report`) only the transcript gets it.
+    fn warn(&mut self, text: &str) {
+        if self.warnings_off {
+            return;
+        }
+        if !self.silent {
+            let _ = self.out.flush();
+            eprintln!("{}", text);
+        }
+        if let Some(log) = self.output_log.as_mut() {
+            log.push_str(text);
+            log.push('\n');
+        }
     }
 
     /// Write a value to the program's output -- with a newline for `print`,
@@ -4095,7 +4142,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// Run a condition-tested loop body -- the `while (<cond>) { ... }`
     /// spelling, and (through `Stmt::EngFor`) the C-style eng `for` loop,
     /// which only differs in `step` (run after a completed or `continue`d
-    /// iteration, exactly as in C) and in the label its iteration-cap error
+    /// iteration, exactly as in C) and in the label its iteration-cap warning
     /// names.
     fn exec_condition_loop(
         &mut self,
@@ -4106,6 +4153,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         line: usize,
         label: &str,
     ) -> Result<(), String> {
+        // A condition-tested loop that keeps going past this many iterations
+        // is usually an endless one whose loop variable is never advanced.
+        // That is reported as E046, but as a *warning*: the loop is not
+        // stopped, so a loop that legitimately runs ten million times (or
+        // more) still walks away with its result instead of the program dying
+        // on it. The warning is printed once per entry into the loop -- not on
+        // every iteration past the cap -- so a long-running loop doesn't flood
+        // the terminal. A genuinely endless loop now spins until it is killed
+        // (Ctrl+C) rather than ending itself with E046.
         const MAX_ITERS: u64 = 5_000_000;
         // `loop_depth` gates `break`: a `break` in here must find this loop,
         // and must be consumed on the way out (so an outer loop keeps
@@ -4113,6 +4169,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         self.loop_depth += 1;
         let result = (|| -> Result<(), String> {
             let mut iterations: u64 = 0;
+            let mut warned = false;
             loop {
                 let c = self.eval_cond_chain(cond)?;
                 let should_run = if negate { !c } else { c };
@@ -4120,8 +4177,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     break;
                 }
                 iterations += 1;
-                if iterations > MAX_ITERS {
-                    return Err(format!(
+                if !warned && iterations > MAX_ITERS {
+                    warned = true;
+                    self.warn(&format!(
                         "E046 လိုင်း {} ၏ {} သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
                         line, label
                     ));
