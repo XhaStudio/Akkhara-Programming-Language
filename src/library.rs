@@ -70,19 +70,15 @@ impl LibraryLoader {
         self.loading.remove(name);
     }
 
-    /// Reads a downloaded package's entry source file, if one exists.
-    /// Consults `<libraries_dir>/<name>/index.json`'s `entry` field for
-    /// the path to the entry file (relative to the package folder),
-    /// defaulting to `main/main.akk` when there's no manifest or no
-    /// `entry` field. Returns `None` if there's no such package, so the
-    /// caller can fall back to a "library not found" error.
+    /// Reads a downloaded package's entry file, together with the path it
+    /// was read from. Consults `<libraries_dir>/<name>/index.json`'s
+    /// `entry` field for the path to the entry file (relative to the
+    /// package folder), defaulting to `main/main.akk` when there's no
+    /// manifest or no `entry` field. Returns `None` if there's no such
+    /// package, so the caller can fall back to a "library not found" error.
     pub fn find_dynamic_source(&self, name: &str) -> Option<String> {
-        let pkg_dir = self.libraries_dir.join(name);
-        let entry = fs::read_to_string(pkg_dir.join("index.json"))
-            .ok()
-            .and_then(|manifest| crate::extract_json_string_field(&manifest, "entry"))
-            .unwrap_or_else(|| "main/main.akk".to_string());
-        fs::read_to_string(pkg_dir.join(entry)).ok()
+        let path = self.dynamic_source_path(name)?;
+        fs::read_to_string(path).ok()
     }
 
     /// Reads a plain `<name>.akk` script, looking in the program's own
@@ -90,16 +86,119 @@ impl LibraryLoader {
     /// akk binary. A `name` that already ends in `.akk` is used as-is.
     /// Returns `None` when no such script exists.
     pub fn find_script_source(&self, name: &str) -> Option<String> {
+        let path = self.script_path(name)?;
+        fs::read_to_string(path).ok()
+    }
+
+    /// Finds a library's Akkhara source and the file it came from, trying a
+    /// downloaded package first and then a plain `<name>.akk` script -- the
+    /// same order `import_library` uses. `None` for a built-in library (its
+    /// code lives in the binary, not in a file) and for an unknown name.
+    ///
+    /// The static warning pass uses this to check an imported script's own
+    /// source; a run uses `find_dynamic_source`/`find_script_source` and does
+    /// not need the path.
+    pub fn find_source(&self, name: &str) -> Option<(PathBuf, String)> {
+        let path = self
+            .dynamic_source_path(name)
+            .or_else(|| self.script_path(name))?;
+        fs::read_to_string(&path).ok().map(|src| (path, src))
+    }
+
+    /// The file a downloaded package's entry lives in, whether or not it can
+    /// be read.
+    fn dynamic_source_path(&self, name: &str) -> Option<PathBuf> {
+        let pkg_dir = self.libraries_dir.join(name);
+        let entry = fs::read_to_string(pkg_dir.join("index.json"))
+            .ok()
+            .and_then(|manifest| crate::extract_json_string_field(&manifest, "entry"))
+            .unwrap_or_else(|| "main/main.akk".to_string());
+        let path = pkg_dir.join(entry);
+        path.is_file().then_some(path)
+    }
+
+    /// The first `<name>.akk` file found in the script folders, whether or not
+    /// it can be read.
+    fn script_path(&self, name: &str) -> Option<PathBuf> {
         let file = if name.ends_with(".akk") {
             name.to_string()
         } else {
             format!("{}.akk", name)
         };
-        for dir in self.script_dirs.iter().chain(std::iter::once(&self.libraries_dir)) {
-            if let Ok(src) = fs::read_to_string(dir.join(&file)) {
-                return Some(src);
-            }
-        }
-        None
+        self.script_dirs
+            .iter()
+            .chain(std::iter::once(&self.libraries_dir))
+            .map(|dir| dir.join(&file))
+            .find(|path| path.is_file())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LibraryLoader;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A fresh empty folder for one test, under the system temp folder.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("akk-loader-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        dir
+    }
+
+    #[test]
+    fn find_source_reads_a_packages_entry_file() {
+        // A downloaded package: `<libraries>/<name>/index.json` says which file
+        // is the entry, and that file is what the warning pass reads.
+        let dir = temp_dir("pkg");
+        fs::create_dir_all(dir.join("Pkg").join("lib")).expect("package folder");
+        fs::write(
+            dir.join("Pkg").join("index.json"),
+            "{\"name\":\"Pkg\",\"entry\":\"lib/entry.akk\"}",
+        )
+        .expect("manifest");
+        fs::write(
+            dir.join("Pkg").join("lib").join("entry.akk"),
+            "fn one() {\n    return 1;\n}\n",
+        )
+        .expect("entry");
+
+        let loader = LibraryLoader::new(dir.clone());
+        let (path, src) = loader.find_source("Pkg").expect("package source");
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("entry.akk"));
+        assert!(src.contains("fn one()"), "{}", src);
+        // A built-in has no source file, so the pass has nothing to read.
+        assert!(loader.find_source("ကျပန်း").is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_source_searches_the_programs_folder_before_the_libraries_folder() {
+        // The program's own folder is searched first, so a sibling
+        // `<name>.akk` is the one a run imports -- and the one a warning names.
+        let dir = temp_dir("script");
+        let program_dir = dir.join("program");
+        fs::create_dir_all(&program_dir).expect("program folder");
+        fs::write(program_dir.join("Tools.akk"), "fn from_program() {\n}\n").expect("sibling");
+        fs::write(dir.join("Tools.akk"), "fn from_libraries() {\n}\n").expect("libraries");
+
+        let mut loader = LibraryLoader::new(dir.clone());
+        loader.add_script_dir(program_dir.clone());
+        let (path, src) = loader.find_source("Tools").expect("script source");
+        assert_eq!(path, program_dir.join("Tools.akk"));
+        assert!(src.contains("from_program"), "{}", src);
+
+        // The `.akk` spelling names the same file.
+        let named = loader.find_source("Tools.akk").expect("script by file name");
+        assert_eq!(named.0, path);
+
+        // Without the program folder, the libraries folder answers instead.
+        let plain = LibraryLoader::new(dir.clone());
+        let (fallback, _) = plain.find_source("Tools").expect("libraries script");
+        assert_eq!(fallback, dir.join("Tools.akk"));
+
+        assert!(loader.find_source("Missing").is_none());
+        fs::remove_dir_all(&dir).ok();
     }
 }
