@@ -144,6 +144,10 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        /// The line the `fn` / `အလုပ်` header is written on. The static
+        /// warning pass (`crate::warnings`) points the unused-function and
+        /// unused-argument warnings at it.
+        line: usize,
     },
     FuncCall {
         name: String,
@@ -2660,6 +2664,7 @@ fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         name,
         params,
         body: parse_block(body_tokens)?,
+        line,
     })
 }
 
@@ -4185,6 +4190,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
             name,
             params: Vec::new(),
             body,
+            line,
         });
     }
 
@@ -4221,6 +4227,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
             name,
             params,
             body,
+            line,
         });
     }
 
@@ -4257,6 +4264,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         name,
         params,
         body,
+        line,
     })
 }
 
