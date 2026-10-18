@@ -1030,8 +1030,13 @@ impl std::hash::Hasher for FxHasher {
     }
 }
 
-/// The variable table: `FxHasher` instead of the default SipHash.
-type VarMap = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
+/// The variable table: `FxHasher` instead of the default SipHash, and keys
+/// are *interned* `Rc<str>` (see `Env::intern`) so that binding the same
+/// name again -- above all a function's parameter on every single call --
+/// reuses one shared allocation instead of making a fresh `String` copy.
+/// `Rc<str>` hashes as its `str`, so a lookup by `&str` matches `String`
+/// keys exactly.
+type VarMap = HashMap<Rc<str>, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// The variable table plus the undo log that gives every function call its
 /// own scope.
@@ -1052,9 +1057,14 @@ type VarMap = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
 /// statements) are not logged and simply stay.
 struct Env {
     map: VarMap,
+    /// Every name the program has ever bound, held *once* as an interned
+    /// `Rc<str>`. A frame pop drops the binding but the interned key stays,
+    /// so the next call's parameter binding finds it again without
+    /// allocating: a name costs one allocation per program, not per call.
+    interner: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Every frame's log entries, oldest first; `marks` says where the
     /// innermost active frame's own entries start.
-    log: Vec<(String, Option<Value>)>,
+    log: Vec<(Rc<str>, Option<Value>)>,
     /// The log length each active frame started at, outermost first.
     marks: Vec<usize>,
 }
@@ -1063,6 +1073,7 @@ impl Env {
     fn new() -> Self {
         Env {
             map: VarMap::default(),
+            interner: Default::default(),
             log: Vec::new(),
             marks: Vec::new(),
         }
@@ -1087,7 +1098,7 @@ impl Env {
                         self.map.insert(name, value);
                     }
                     None => {
-                        self.map.remove(name.as_str());
+                        self.map.remove(name.as_ref());
                     }
                 }
             }
@@ -1108,11 +1119,24 @@ impl Env {
         let Some(&mark) = self.marks.last() else {
             return;
         };
-        if self.log[mark..].iter().any(|(logged, _)| logged == name) {
+        if self.log[mark..].iter().any(|(logged, _)| logged.as_ref() == name) {
             return;
         }
         let previous = self.map.get(name).cloned();
-        self.log.push((name.to_string(), previous));
+        let key = self.intern(name);
+        self.log.push((key, previous));
+    }
+
+    /// The interned key for `name`, creating it once and keeping it for the
+    /// rest of the program. Called only on the write path into the table,
+    /// so a name that is already bound never reaches here.
+    fn intern(&mut self, name: &str) -> Rc<str> {
+        if let Some(existing) = self.interner.get(name) {
+            return Rc::clone(existing);
+        }
+        let rc: Rc<str> = Rc::from(name);
+        self.interner.insert(Rc::clone(&rc));
+        rc
     }
 
     #[inline]
@@ -1146,26 +1170,93 @@ impl Env {
         if let Some(slot) = self.map.get_mut(name) {
             *slot = value;
         } else {
-            self.map.insert(name.to_string(), value);
+            let key = self.intern(name);
+            self.map.insert(key, value);
         }
     }
 
-    /// Bind `name` to `value` without reusing a slot (a fresh declaration).
-    fn insert(&mut self, name: String, value: Value) {
-        self.note(&name);
-        self.map.insert(name, value);
+    /// Bind `name` to `value`, reusing an interned key (a fresh declaration
+    /// or a parameter binding). The name is taken by reference: callers no
+    /// longer clone a `String` per binding.
+    fn insert(&mut self, name: &str, value: Value) {
+        if !self.marks.is_empty() {
+            self.note(name);
+        }
+        if let Some(slot) = self.map.get_mut(name) {
+            *slot = value;
+        } else {
+            let key = self.intern(name);
+            self.map.insert(key, value);
+        }
     }
 
     /// `insert`, handing back what the name held before -- the class
     /// constructor's parameter save/restore needs the old value.
-    fn insert_returning(&mut self, name: String, value: Value) -> Option<Value> {
-        self.note(&name);
-        self.map.insert(name, value)
+    fn insert_returning(&mut self, name: &str, value: Value) -> Option<Value> {
+        if !self.marks.is_empty() {
+            self.note(name);
+        }
+        let key = self.intern(name);
+        self.map.insert(key, value)
+    }
+
+    /// Reads `name`'s slot, applies `f` to it, and writes the result back
+    /// through the same slot: one hash probe instead of the
+    /// read-clone/arith/store-assign two, and no `Value` copy on the way.
+    /// A name with no binding starts from `0`, the undeclared-name rule of
+    /// both `x += ...;` spellings.
+    fn read_update(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&Value) -> Result<Value, String>,
+    ) -> Result<(), String> {
+        if !self.marks.is_empty() {
+            self.note(name);
+        }
+        match self.map.get_mut(name) {
+            Some(slot) => {
+                let next = f(&*slot)?;
+                *slot = next;
+            }
+            None => {
+                let next = f(&Value::Int(0))?;
+                self.assign(name, next);
+            }
+        }
+        Ok(())
     }
 
     fn remove(&mut self, name: &str) {
         self.note(name);
         self.map.remove(name);
+    }
+
+    /// Bind a function's parameter. The one write every call makes, so this
+    /// probes the table once instead of the `note`/`insert` pair's two: the
+    /// slot is read and overwritten in the same lookup, and only a name the
+    /// program binds for the first time takes the intern-and-insert path. A
+    /// repeated parameter name (the only case where the frame has already
+    /// recorded the name) still logs just once.
+    fn bind_param(&mut self, name: &str, value: Value) {
+        match self.map.get_mut(name) {
+            Some(slot) => {
+                let previous = std::mem::replace(slot, value);
+                if !self.marks.is_empty() {
+                    let mark = *self.marks.last().unwrap();
+                    if !self.log[mark..]
+                        .iter()
+                        .any(|(logged, _)| logged.as_ref() == name)
+                    {
+                        let key = self.intern(name);
+                        self.log.push((key, Some(previous)));
+                    }
+                }
+            }
+            None => {
+                let key = self.intern(name);
+                self.map.insert(key, value);
+            }
+        }
     }
 }
 
@@ -1174,7 +1265,10 @@ type FnDef = (Vec<String>, Vec<Stmt>);
 /// Functions are stored behind an `Rc` so calling one bumps a refcount
 /// instead of deep-cloning its whole body (the body was cloned on every
 /// single call before, which is what made a call cost ~2us).
-type FnMap = HashMap<String, Rc<FnDef>>;
+/// `FxHasher` here too: `calls` showed the *callee name is hashed on every
+/// single call*, not once per program, so the SipHash cost the comment
+/// above assumed away was on the hot path.
+type FnMap = HashMap<String, Rc<FnDef>, std::hash::BuildHasherDefault<FxHasher>>;
 
 pub struct Interpreter {
     env: Env,
@@ -1183,7 +1277,9 @@ pub struct Interpreter {
     /// is an error; `pin` values are immutable for the rest of the program.
     consts: std::collections::HashSet<String>,
     functions: FnMap,
-    classes: HashMap<String, ClassInfo>,
+    /// Type-checked on every call-shaped statement too, so it takes the
+    /// same fast hasher as `functions`.
+    classes: HashMap<String, ClassInfo, std::hash::BuildHasherDefault<FxHasher>>,
     /// Stack of in-progress object constructions. While non-empty, an
     /// "အတု <field> သည် <value> ဖြစ်၏။" statement writes into the field
     /// list on top of this stack instead of the global environment.
@@ -1264,8 +1360,8 @@ impl Interpreter {
         Interpreter {
             env: Env::new(),
             consts: std::collections::HashSet::new(),
-            functions: HashMap::new(),
-            classes: HashMap::new(),
+            functions: Default::default(),
+            classes: Default::default(),
             self_stack: Vec::new(),
             libraries: LibraryLoader::new(libraries_dir),
             lib_aliases: HashMap::new(),
@@ -1440,7 +1536,7 @@ impl Interpreter {
                     }
                     self.consts.insert(name.clone());
                 }
-                self.env.insert(name.clone(), v);
+                self.env.insert(name, v);
                 Ok(())
             }
             Stmt::EngPrint { value, line } => {
@@ -1469,7 +1565,7 @@ impl Interpreter {
                 io::stdin().read_line(&mut buf).ok();
                 let trimmed = buf.trim().to_string();
                 let v = coerce_eng_input(&trimmed, type_name, *line)?;
-                self.env.insert(name.clone(), v);
+                self.env.insert(name, v);
                 Ok(())
             }
             Stmt::EngReturn { value, line } => {
@@ -1490,7 +1586,8 @@ impl Interpreter {
                 // resolution (a function, then a builtin, then a variable bound
                 // to a callable), which tolerates a function that returns
                 // nothing -- `greet();` must not need a return value.
-                if self.classes.contains_key(name) {
+                // No classes defined: skip the table hash entirely.
+                if !self.classes.is_empty() && self.classes.contains_key(name) {
                     let _ = self.construct_object(name, args, *line)?;
                 } else {
                     self.call_named(name, args, *line)?;
@@ -1516,18 +1613,14 @@ impl Interpreter {
                 if self.is_pinned(name) {
                     return Err(eng_const_reassign_err(name, *line));
                 }
-                // An undeclared name starts from 0, the way the Myanmar
-                // `... ကို <n> တိုးပါ။` form does. Reading `current` before
-                // the amount keeps the old `x += <expr>` order: <expr> sees
-                // the value `x` had before this statement.
-                let current = match self.env.get(name) {
-                    Some(v) => v.clone(),
-                    None => Value::Int(0),
-                };
+                // The amount is evaluated first, against the unchanged
+                // value `name` holds (the slot is only written inside
+                // `read_update`), then read and updated in a single probe.
                 let amt = self.eval(amount, *line, Some(name))?;
-                let result = arith(&current, &amt, *op, *line, Some(name))?;
-                self.store(name, result);
-                Ok(())
+                let result = self
+                    .env
+                    .read_update(name, |current| arith(current, &amt, *op, *line, Some(name)));
+                result
             }
             Stmt::EngBreak { value, line } => {
                 if self.loop_depth == 0 {
@@ -1578,7 +1671,7 @@ impl Interpreter {
                 // the loop runs, so the body can accumulate into it
                 // (`x :int = loop { x += 1; ... }` starts at 0).
                 if let Some(t) = type_name {
-                    self.env.insert(name.clone(), eng_type_default(t));
+                    self.env.insert(name, eng_type_default(t));
                 }
                 self.loop_depth += 1;
                 let outcome = (|| -> Result<Option<Option<Value>>, String> {
@@ -1610,7 +1703,7 @@ impl Interpreter {
                 if *is_const {
                     self.consts.insert(name.clone());
                 }
-                self.env.insert(name.clone(), value);
+                self.env.insert(name, value);
                 Ok(())
             }
             Stmt::Print { value, line } => {
@@ -1634,7 +1727,7 @@ impl Interpreter {
                 io::stdin().read_line(&mut buf).ok();
                 let trimmed = buf.trim().to_string();
                 let inferred = infer_value(&trimmed);
-                self.env.insert(name.clone(), inferred);
+                self.env.insert(name, inferred);
                 Ok(())
             }
             Stmt::ExprStmt { value, line } => {
@@ -1647,17 +1740,17 @@ impl Interpreter {
                 amount,
                 line,
             } => {
+                // One hash probe: the slot's current value is fed straight
+                // into the arithmetic and the result written back through it.
                 let amt = self.eval(amount, *line, None)?;
                 match target {
                     Expr::Ident(name) => {
                         if self.is_pinned(name) {
                             return Err(eng_const_reassign_err(name, *line));
                         }
-                        // Undeclared variables default to 0 in math-assignment context.
-                        let current = self.env.get(name).cloned().unwrap_or(Value::Int(0));
-                        let result = arith(&current, &amt, *op, *line, Some(name))?;
-                        self.store(name, result);
-                        Ok(())
+                        self.env.read_update(name, |current| {
+                            arith(current, &amt, *op, *line, Some(name))
+                        })
                     }
                     other => {
                         let current = self.eval(other, *line, None)?;
@@ -1731,7 +1824,8 @@ impl Interpreter {
                 // same as it does in `Expr::NewObj`: `<class> ကို လုပ်ပါ။`
                 // builds the object (and discards it) instead of reporting a
                 // missing function.
-                if self.classes.contains_key(name) {
+                // No classes defined: skip the table hash entirely.
+                if !self.classes.is_empty() && self.classes.contains_key(name) {
                     let _ = self.construct_object(name, args, *line)?;
                     return Ok(());
                 }
@@ -1768,7 +1862,7 @@ impl Interpreter {
                 // sentence holds an object in either order:
                 // `<var> အတွက် Point(3, 4) ကို လုပ်ပါ။` and
                 // `<var> အတွက် (3, 4) Point ကို လုပ်ပါ။`.
-                let result = if self.classes.contains_key(fn_name) {
+                let result = if !self.classes.is_empty() && self.classes.contains_key(fn_name) {
                     Some(self.construct_object(fn_name, args, *line)?)
                 } else {
                     match self.functions.get(fn_name).cloned() {
@@ -1795,7 +1889,7 @@ impl Interpreter {
                         line, fn_name, name
                     )
                 })?;
-                self.env.insert(name.clone(), value);
+                self.env.insert(name, value);
                 Ok(())
             }
             Stmt::LibCall {
@@ -1821,7 +1915,7 @@ impl Interpreter {
                         line, lib, fn_name, name
                     )
                 })?;
-                self.env.insert(name.clone(), value);
+                self.env.insert(name, value);
                 Ok(())
             }
             Stmt::FuncAlias {
@@ -1940,7 +2034,7 @@ impl Interpreter {
                                 // "E" matches any error; otherwise must match exactly.
                                 if name == "E" || *name == err_code {
                                     if let Some(cv) = catch_var {
-                                        self.env.insert(cv.clone(), Value::Str(err_code));
+                                        self.env.insert(&cv, Value::Str(err_code));
                                     }
                                     self.run(cb)
                                 } else {
@@ -1983,7 +2077,7 @@ impl Interpreter {
                 })?;
 
                 let val = crate::random_library::random_int(min_i, max_i)?;
-                self.env.insert(name.clone(), Value::Int(val));
+                self.env.insert(name, Value::Int(val));
                 Ok(())
             }
             Stmt::Wait { amount, unit, line } => {
@@ -2033,7 +2127,7 @@ impl Interpreter {
                 let data_s = display(&data_v);
                 let resp = crate::request_library::post(&url_s, &data_s)
                     .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
-                self.env.insert(name.clone(), http_response_to_value(resp));
+                self.env.insert(name, http_response_to_value(resp));
                 Ok(())
             }
         }
@@ -3609,7 +3703,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 // this node for any call-shaped `<name>(...)`): a user class
                 // wins, then a user function, then an eng builtin. Anything
                 // else falls through to the class-not-found error.
-                if !self.classes.contains_key(class_name) {
+                if self.classes.is_empty() || !self.classes.contains_key(class_name) {
                     if let Some(function) = self.functions.get(class_name).cloned() {
                         let result =
                             self.invoke_looked_up(class_name, &function, arg_exprs, *new_line)?;
@@ -3796,7 +3890,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         // the frame is popped below, so no per-parameter save/restore is
         // needed.
         for (p, v) in params.iter().zip(arg_values.drain(..)) {
-            self.env.insert(p.clone(), v);
+            self.env.bind_param(p, v);
         }
         let mut return_value: Option<Value> = None;
         let mut failure: Option<String> = None;
@@ -3807,6 +3901,22 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             }
             if i + 1 == body.len() {
                 match s {
+                    // A body that ends in an explicit `return` comes straight
+                    // here: the value is evaluated and handed back without
+                    // routing through `exec` -- which would only set
+                    // `return_signal` so the code after the loop can take it
+                    // apart again. This is every function whose last line is
+                    // `return <expr>;`, so the saving is per call.
+                    Stmt::EngReturn { value, line: sline } => {
+                        match value {
+                            Some(e) => match self.eval(e, *sline, None) {
+                                Ok(v) => return_value = Some(v),
+                                Err(e_fail) => failure = Some(e_fail),
+                            },
+                            None => {}
+                        }
+                        continue;
+                    }
                     Stmt::ExprStmt { value, line: sline } => {
                         match self.eval(value, *sline, None) {
                             Ok(v) => {
@@ -3829,7 +3939,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         line: sline,
                     } => match self.eval(value, *sline, None) {
                         Ok(v) => {
-                            self.env.insert(var_name.clone(), v.clone());
+                            self.env.insert(var_name, v.clone());
                             return_value = Some(v);
                             continue;
                         }
@@ -3930,13 +4040,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             if saved.iter().any(|(saved_idx, _)| params[*saved_idx] == *p) {
                 // A duplicated parameter name: the first occurrence already
                 // saved whatever it shadowed, so only overwrite its binding.
-                self.env.insert(p.clone(), v);
+                self.env.insert(p, v);
                 continue;
             }
             // One probe per parameter: an existing binding is captured and
             // replaced in place, and a new one takes a vacant slot, so the
             // name is hashed once.
-            if let Some(old) = self.env.insert_returning(p.clone(), v) {
+            if let Some(old) = self.env.insert_returning(p, v) {
                 saved.push((i, old));
             }
         }
@@ -3971,7 +4081,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             self.env.remove(p.as_str());
         }
         for (i, old) in saved {
-            self.env.insert(params[i].clone(), old);
+            self.env.insert(&params[i], old);
         }
         let fields = self.self_stack.pop().unwrap_or_default();
         run_result?;
