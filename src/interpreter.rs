@@ -48,12 +48,17 @@ pub struct ObjectValue {
 pub enum Callable {
     /// A function of an imported library: `<lib> ၏ <fn>` / `<lib>.<fn>`.
     Library { lib: String, fn_name: String },
+    /// A function the program itself defined, referenced by its name. A name
+    /// (rather than a closure) keeps values `Clone`; `map(xs, double)` binds
+    /// `double` to this variant.
+    User(String),
 }
 
 impl Callable {
     fn label(&self) -> String {
         match self {
             Callable::Library { lib, fn_name } => format!("{}.{}", lib, fn_name),
+            Callable::User(name) => name.clone(),
         }
     }
 }
@@ -584,6 +589,57 @@ fn server_text_arg(v: &Value, fn_name: &str, what: &str, line: usize) -> Result<
 // the same rule the server library follows.
 const LIB_JSON_NAME: &str = "json";
 const LIB_JSON_NAME_MM: &str = "ဂျေဆန်";
+
+// --- "file" library ---
+//
+// The disk work lives in libraries/file/main.rs, which knows nothing about
+// language values; `eval_file_call` is the one entry point every spelling
+// reaches. Importing either name (`file`, `ဖိုင်`) makes both work, the same
+// rule the server and json libraries follow.
+const LIB_FILE_NAME: &str = "file";
+const LIB_FILE_NAME_MM: &str = "ဖိုင်";
+
+fn file_read_err(path: &str, detail: &str, line: usize) -> String {
+    format!(
+        "E140 လိုင်း {} တွင် ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}",
+        line, path, detail
+    )
+}
+
+fn file_write_err(path: &str, detail: &str, line: usize) -> String {
+    format!(
+        "E141 လိုင်း {} တွင် ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}",
+        line, path, detail
+    )
+}
+
+fn file_delete_err(path: &str, detail: &str, line: usize) -> String {
+    format!(
+        "E142 လိုင်း {} တွင် ဖိုင် \"{}\" ကို ဖျက်၍မရပါ - {}",
+        line, path, detail
+    )
+}
+
+fn file_list_err(path: &str, detail: &str, line: usize) -> String {
+    format!(
+        "E143 လိုင်း {} တွင် folder \"{}\" ထဲက စာရင်းကို ဖတ်၍မရပါ - {}",
+        line, path, detail
+    )
+}
+
+fn file_size_err(path: &str, detail: &str, line: usize) -> String {
+    format!(
+        "E145 လိုင်း {} တွင် ဖိုင် \"{}\" ၏ အရွယ်ကို ဖတ်၍မရပါ - {}",
+        line, path, detail
+    )
+}
+
+fn file_path_arg_err(fn_name: &str, got: &str, line: usize) -> String {
+    format!(
+        "E144 လိုင်း {} တွင် \"{}\" function ၏ ဖိုင် လမ်းကြောင်း (path) သည် စာသား (str) ဖြစ်ရပါမည်၊ {} ပေးထားပါသည်။",
+        line, fn_name, got
+    )
+}
 
 /// A parsed JSON tree as a language value: object -> dict (string keys),
 /// array -> list, `null` -> `Value::Null`, numbers to int or float as the text
@@ -1417,6 +1473,42 @@ impl Interpreter {
         self.env.assign(name, value);
     }
 
+    /// Write `value` through an index target (`xs[0]`, `table[1, 2]`,
+    /// `d["k"]`) into the variable that holds the collection. Lists, lists of
+    /// lists and dicts are writable; tuples and sets are refused, because
+    /// being fixed is their point.
+    fn assign_index(&mut self, target: &Expr, value: Value, line: usize) -> Result<(), String> {
+        let (base, indices) = match target {
+            Expr::Index(base, indices) => (base, indices),
+            _ => return Err(index_target_err(line)),
+        };
+        let name = match &**base {
+            Expr::Ident(name) => name.clone(),
+            _ => return Err(index_target_err(line)),
+        };
+        // `pin` freezes the binding, contents included: the write below is a
+        // store through the name, so it is refused like any other E104.
+        if self.is_pinned(&name) {
+            return Err(eng_const_reassign_err(&name, line));
+        }
+        let mut keys = Vec::with_capacity(indices.len());
+        for e in indices {
+            keys.push(self.eval(e, line, None)?);
+        }
+        let mut current = match self.env.get(&name) {
+            Some(v) => v.clone(),
+            None => {
+                return Err(format!(
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    line, name
+                ))
+            }
+        };
+        set_index(&mut current, &keys, value, line)?;
+        self.store(&name, current);
+        Ok(())
+    }
+
     /// Whether `name` is pinned (`pin` / a constant): assigning to one is an
     /// error. `consts` is empty for programs that never use `pin`, and an
     /// empty `HashSet` still hashes the key on every `contains`, so the
@@ -1502,6 +1594,12 @@ impl Interpreter {
     /// neighboring `Tools.akk`.
     pub fn add_library_search_dir(&mut self, dir: std::path::PathBuf) {
         self.libraries.add_script_dir(dir);
+    }
+
+    /// Registers a `[dependencies]` entry whose source is a `path` from
+    /// `akk.toml` (see `LibraryLoader::add_dependency`).
+    pub fn add_manifest_dependency(&mut self, name: &str, path: std::path::PathBuf) {
+        self.libraries.add_dependency(name, path);
     }
 
     pub fn run(&mut self, stmts: &[Stmt]) -> Result<(), String> {
@@ -1801,10 +1899,14 @@ impl Interpreter {
                     }
                     other => {
                         let current = self.eval(other, *line, None)?;
-                        binary_op(&current, &amt, *op, *line, None)?;
-                        Ok(())
+                        let next = binary_op(&current, &amt, *op, *line, None)?;
+                        self.assign_index(other, next, *line)
                     }
                 }
+            }
+            Stmt::IndexAssign { target, value, line } => {
+                let v = self.eval(value, *line, None)?;
+                self.assign_index(target, v, *line)
             }
             Stmt::ForLoop {
                 var_name,
@@ -2488,6 +2590,20 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         }
                         Ok(())
                     }
+                    // A for loop over text visits one character per turn,
+                    // the same unit `len` and `s[i]` use.
+                    Value::Str(s) => {
+                        for cluster in crate::text::clusters(&s) {
+                            self.env
+                                .assign(var_name, Value::Str(cluster.to_string()));
+                            if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                                || self.return_signal.is_some()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }
                     other => Err(loop_not_iterable_err(line, type_name_mm(&other))),
                 }
             }
@@ -2582,7 +2698,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                             Value::List(items) => items.clone(),
                             Value::Tuple(items) => items.clone(),
                             Value::Set(items) => items.clone(),
-                            Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
+                            Value::Str(s) => crate::text::clusters(s)
+                                .into_iter()
+                                .map(|c| Value::Str(c.to_string()))
+                                .collect(),
                             _ => return Err(lib_fn_collection_err(lib, fn_name, line)),
                         };
                         let picked = crate::random_library::random_value(&items)
@@ -2616,6 +2735,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             }
             LIB_SERVER_NAME | LIB_SERVER_NAME_MM => self.eval_server_call(fn_name, args, line),
             LIB_JSON_NAME | LIB_JSON_NAME_MM => self.eval_json_call(fn_name, args, line),
+            LIB_FILE_NAME | LIB_FILE_NAME_MM => self.eval_file_call(fn_name, args, line),
             // Not a built-in: a script/package imported with
             // `နည်းပညာများ <name> ကို သုံးမည်။` registers its functions
             // globally, so `<lib> ၏ <fn>` / `<lib>.<fn>` reaches the one
@@ -3096,6 +3216,90 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         }
     }
 
+    /// One entry point for every spelling of the file library: `file.read`,
+    /// `ဖိုင်.ဖတ်`, and the Myanmar call sentences all arrive here. The disk
+    /// work lives in `libraries/file/main.rs`; this is where a language value
+    /// crosses over and where a failure becomes a catchable error.
+    fn eval_file_call(
+        &mut self,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Value>, String> {
+        self.require_library_loaded(LIB_FILE_NAME, line)?;
+        match fn_name {
+            "read" | "ဖတ်" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let text = crate::file_library::read(&path)
+                    .map_err(|e| file_read_err(&path, &e, line))?;
+                Ok(Some(Value::Str(text)))
+            }
+            "lines" | "လိုင်းများ" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let lines = crate::file_library::lines(&path)
+                    .map_err(|e| file_read_err(&path, &e, line))?;
+                Ok(Some(Value::List(
+                    lines.into_iter().map(Value::Str).collect(),
+                )))
+            }
+            "write" | "ရေး" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 2, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let text = display(&self.eval(&args[1], line, None)?);
+                crate::file_library::write(&path, &text)
+                    .map_err(|e| file_write_err(&path, &e, line))?;
+                Ok(None)
+            }
+            "append" | "ထပ်" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 2, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let text = display(&self.eval(&args[1], line, None)?);
+                crate::file_library::append(&path, &text)
+                    .map_err(|e| file_write_err(&path, &e, line))?;
+                Ok(None)
+            }
+            "exists" | "ရှိ" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                Ok(Some(Value::Bool(crate::file_library::exists(&path))))
+            }
+            "list" | "စာရင်း" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let names = crate::file_library::list(&path)
+                    .map_err(|e| file_list_err(&path, &e, line))?;
+                Ok(Some(Value::List(
+                    names.into_iter().map(Value::Str).collect(),
+                )))
+            }
+            "size" | "အရွယ်" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                let size = crate::file_library::size(&path)
+                    .map_err(|e| file_size_err(&path, &e, line))?;
+                Ok(Some(Value::Int(size.min(i64::MAX as u64) as i64)))
+            }
+            "delete" | "ဖျက်" => {
+                lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
+                let path = self.file_path_arg(&args[0], fn_name, line)?;
+                crate::file_library::delete(&path)
+                    .map_err(|e| file_delete_err(&path, &e, line))?;
+                Ok(None)
+            }
+            _ => Err(lib_fn_unknown_err(LIB_FILE_NAME, fn_name, line)),
+        }
+    }
+
+    /// The path argument of a file call: a plain string, as written on disk.
+    fn file_path_arg(&mut self, e: &Expr, fn_name: &str, line: usize) -> Result<String, String> {
+        match self.eval(e, line, None)? {
+            Value::Str(path) => Ok(path),
+            other => Err(file_path_arg_err(fn_name, &display(&other), line)),
+        }
+    }
+
     /// Call one of the `App` GUI library's functions
     /// (`Stmt::LibCall` / `Stmt::LibCallAssign` / `Expr::LibCall`).
     ///
@@ -3519,21 +3723,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             // top-level statements and re-register everything it defines.
             return Ok(());
         }
-        if name == "ကျပန်း" || name == "အချိန်" || name == "request" || name == LIB_APP_NAME {
-            self.libraries.mark_loaded(name);
-            return Ok(());
-        }
-        // The server library answers to two names for the same implementation,
-        // so importing either one makes both call spellings work.
-        if name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM {
-            self.libraries.mark_loaded(LIB_SERVER_NAME);
-            self.libraries.mark_loaded(LIB_SERVER_NAME_MM);
-            return Ok(());
-        }
-        // The json library has two names for one implementation too.
-        if name == LIB_JSON_NAME || name == LIB_JSON_NAME_MM {
-            self.libraries.mark_loaded(LIB_JSON_NAME);
-            self.libraries.mark_loaded(LIB_JSON_NAME_MM);
+        // A built-in library is compiled in. Libraries that answer to two
+        // names (server/ဆာဗာ, json/ဂျေဆန်, file/ဖိုင်) mark every spelling
+        // loaded, so importing either one makes both call spellings work.
+        if let Some(names) = crate::library::builtin_names(name) {
+            for builtin in names {
+                self.libraries.mark_loaded(builtin);
+            }
             return Ok(());
         }
         let src = self
@@ -3596,9 +3792,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// `<fn> အဖြစ် <alias>` function alias. A name counts when it's a
     /// built-in, a downloaded package, or a plain `<name>.akk` script.
     fn is_known_library(&self, name: &str) -> bool {
-        name == "request" || name == "ကျပန်း" || name == "အချိန်" || name == LIB_APP_NAME
-            || name == LIB_SERVER_NAME || name == LIB_SERVER_NAME_MM
-            || name == LIB_JSON_NAME || name == LIB_JSON_NAME_MM
+        crate::library::is_builtin_library(name)
             || self.libraries.find_dynamic_source(name).is_some()
             || self.libraries.find_script_source(name).is_some()
     }
@@ -3620,12 +3814,20 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::BoolLit(b) => Ok(Value::Bool(*b)),
             Expr::NullLit => Ok(Value::Null),
-            Expr::Ident(name) => self.env.get(name).cloned().ok_or_else(|| {
-                format!(
+            Expr::Ident(name) => match self.env.get(name).cloned() {
+                Some(value) => Ok(value),
+                // A name that is not a variable but is a function is the
+                // function itself, the user-function half of `Tools.add`:
+                // `f = double;` then `f(3)` / `map(xs, f)` both work. A typo
+                // that matches no function or variable is still E030.
+                None if self.functions.contains_key(name) => {
+                    Ok(Value::Callable(Rc::new(Callable::User(name.clone()))))
+                }
+                None => Err(format!(
                     "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
                     line, name
-                )
-            }),
+                )),
+            },
             Expr::Binary(l, op, r, op_line) => {
                 let lv = self.eval(l, line, var_ctx)?;
                 let rv = self.eval(r, line, var_ctx)?;
@@ -3725,6 +3927,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     || lib == "အချိန်"
                     || lib == LIB_JSON_NAME
                     || lib == LIB_JSON_NAME_MM
+                    || lib == LIB_FILE_NAME
+                    || lib == LIB_FILE_NAME_MM
                 {
                     self.require_library_loaded(lib, *refline)?;
                 } else {
@@ -4235,6 +4439,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             Callable::Library { lib, fn_name } => self
                 .eval_lib_call(lib, fn_name, args, line)?
                 .ok_or_else(|| eng_lib_no_value_err(lib, fn_name, line)),
+            Callable::User(name) => {
+                let function = self.lookup_function(name, args.len(), line)?;
+                self.invoke_looked_up(name, &function, args, line)?
+                    .ok_or_else(|| eng_no_return_err(name, line))
+            }
         }
     }
 
@@ -4249,6 +4458,22 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         arg_exprs: &[Expr],
         line: usize,
     ) -> Result<Value, String> {
+        // The mutating list builtins write through their first argument,
+        // which has to be a variable: a value is a copy, so `push(xs, 4)` can
+        // only mean "append to the list `xs` holds". The higher-order ones
+        // take a *function name* rather than its value, which does not exist
+        // as a variable either -- so both groups are handled before the eager
+        // argument walk below, or their first argument would fail first.
+        if is_mutating_builtin(name) {
+            return self.call_mutating_builtin(name, arg_exprs, line);
+        }
+        if name == "reverse" {
+            return self.call_reverse(arg_exprs, line);
+        }
+        if matches!(name, "map" | "filter" | "reduce") {
+            return self.call_higher_order(name, arg_exprs, line);
+        }
+
         let mut args: Vec<Value> = Vec::with_capacity(arg_exprs.len());
         for e in arg_exprs {
             args.push(self.eval(e, line, None)?);
@@ -4271,7 +4496,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "len" => {
                 one_arg()?;
                 match &args[0] {
-                    Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    // Characters, not bytes and not scalar values: one
+                    // Myanmar syllable is one character (src/text.rs).
+                    Value::Str(s) => Ok(Value::Int(crate::text::len(s))),
                     Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
                         Ok(Value::Int(items.len() as i64))
                     }
@@ -4399,12 +4626,12 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
                 match (&args[0], &args[1]) {
                     (Value::Str(s), Value::Str(sep)) => {
-                        // An empty separator splits into characters -- the
-                        // useful reading for a learning language, and for
-                        // Myanmar text (one glyph cluster per item is not
-                        // attempted; each `char` is one item).
+                        // An empty separator splits into characters -- one
+                        // grapheme cluster per item, so a Myanmar syllable is
+                        // never cut in half.
                         let parts: Vec<Value> = if sep.is_empty() {
-                            s.chars()
+                            crate::text::clusters(s)
+                                .into_iter()
                                 .map(|c| Value::Str(c.to_string()))
                                 .collect()
                         } else {
@@ -4483,12 +4710,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 match (&args[0], &args[1]) {
                     (Value::Str(s), Value::Str(needle)) => {
                         // Character index, not a byte offset: Myanmar text is
-                        // multi-byte in UTF-8, but `len` counts characters, so
-                        // `find` has to count the same way.
-                        Ok(Value::Int(match s.find(needle.as_str()) {
-                            Some(byte) => s[..byte].chars().count() as i64,
-                            None => -1,
-                        }))
+                        // multi-byte in UTF-8 and one syllable spans several
+                        // scalar values, so `find` counts the same clusters
+                        // `len` and `s[i]` do.
+                        Ok(Value::Int(crate::text::find(s, needle)))
                     }
                     _ => Err(bad_arg(
                         "needs a string to search and a string to look for".to_string(),
@@ -4533,12 +4758,93 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     ))),
                 }
             }
+            "slice" => {
+                // `slice(xs, start)` / `slice(xs, start, end)` -- a copy, the
+                // end exclusive, and both ends clamped to the length (unlike
+                // `xs[i]`, which refuses an out-of-range index).
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(bad_arg(format!(
+                        "takes a collection, a start and an optional end, got {} arguments",
+                        args.len()
+                    )));
+                }
+                let len = match &args[0] {
+                    Value::Str(s) => crate::text::len(s),
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                        items.len() as i64
+                    }
+                    other => {
+                        return Err(bad_arg(format!(
+                            "needs a string or collection, got {}",
+                            type_name_mm(other)
+                        )))
+                    }
+                };
+                let start = index_as_int(&args[1], line)?;
+                let end = match args.get(2) {
+                    Some(v) => index_as_int(v, line)?,
+                    None => len,
+                };
+                if start < 0 || end < 0 {
+                    return Err(bad_arg(format!(
+                        "needs non-negative indices, got start {} and end {}",
+                        start, end
+                    )));
+                }
+                // Both ends are clamped, and a start past the end is an empty
+                // result rather than an error -- `slice(xs, 99)` on a short
+                // value is a reasonable "nothing there".
+                let start = start.min(len) as usize;
+                let end = end.min(len) as usize;
+                let start = start.min(end);
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::Str(crate::text::slice(s, start, end))),
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                        Ok(Value::List(items[start..end].to_vec()))
+                    }
+                    _ => unreachable!("the length match above rejected everything else"),
+                }
+            }
+            "sum" => {
+                one_arg()?;
+                let items = match &args[0] {
+                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => items,
+                    other => {
+                        return Err(bad_arg(format!(
+                            "needs a collection of numbers, got {}",
+                            type_name_mm(other)
+                        )))
+                    }
+                };
+                let mut total = 0.0f64;
+                let mut all_int = true;
+                for item in items {
+                    match item {
+                        Value::Int(i) => total += *i as f64,
+                        Value::Float(f) => {
+                            all_int = false;
+                            total += *f;
+                        }
+                        other => {
+                            return Err(bad_arg(format!(
+                                "needs numbers, got {}",
+                                type_name_mm(other)
+                            )))
+                        }
+                    }
+                }
+                Ok(if all_int {
+                    Value::Int(total as i64)
+                } else {
+                    Value::Float(total)
+                })
+            }
             "enumerate" => {
                 one_arg()?;
                 let items: Vec<Value> = match &args[0] {
                     Value::List(items) | Value::Tuple(items) | Value::Set(items) => items.clone(),
-                    Value::Str(s) => s
-                        .chars()
+                    Value::Str(s) => crate::text::clusters(s)
+                        .into_iter()
                         .map(|c| Value::Str(c.to_string()))
                         .collect(),
                     other => {
@@ -4565,6 +4871,306 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 }
                 None => Err(eng_unknown_fn_err(line, name)),
             },
+        }
+    }
+
+    /// Run one of the builtins that change the list their first argument
+    /// names: `push`, `append`, `pop`, `insert`, `remove`, `sort`, `reverse`.
+    /// The first argument must be a variable (`push(xs, 4);`), because a
+    /// collection has no identity of its own -- the interpreter stores the
+    /// updated list back through that name.
+    ///
+    /// The return value is the useful one: the new length for `push`/`insert`,
+    /// the removed element for `pop`/`remove`, and the list itself for
+    /// `sort`/`reverse` (so `ys = sort(xs);` works too).
+    fn call_mutating_builtin(
+        &mut self,
+        name: &str,
+        arg_exprs: &[Expr],
+        line: usize,
+    ) -> Result<Value, String> {
+        let var = match arg_exprs.first() {
+            Some(Expr::Ident(name)) => name.clone(),
+            _ => {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    "needs a list variable as its first argument, e.g. push(xs, 4)",
+                ))
+            }
+        };
+        if self.is_pinned(&var) {
+            return Err(eng_const_reassign_err(&var, line));
+        }
+        let current = match self.env.get(&var).cloned() {
+            Some(value) => value,
+            None => {
+                return Err(format!(
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    line, var
+                ))
+            }
+        };
+        let mut items = match current {
+            Value::List(items) => items,
+            other => {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!("needs a list, got {}", type_name_mm(&other)),
+                ))
+            }
+        };
+        let mut extra = Vec::with_capacity(arg_exprs.len().saturating_sub(1));
+        for e in &arg_exprs[1..] {
+            extra.push(self.eval(e, line, None)?);
+        }
+
+        let result = match name {
+            "push" | "append" => {
+                if extra.len() != 1 {
+                    return Err(eng_builtin_err(
+                        line,
+                        name,
+                        &format!("takes a list and one value, got {} values", extra.len()),
+                    ));
+                }
+                items.push(extra.pop().unwrap());
+                Value::Int(items.len() as i64)
+            }
+            "pop" => {
+                if !extra.is_empty() {
+                    return Err(eng_builtin_err(line, name, "takes a list and no other arguments"));
+                }
+                match items.pop() {
+                    Some(v) => v,
+                    None => {
+                        return Err(eng_builtin_err(line, name, "cannot pop from an empty list"))
+                    }
+                }
+            }
+            "insert" => {
+                if extra.len() != 2 {
+                    return Err(eng_builtin_err(
+                        line,
+                        name,
+                        &format!(
+                            "takes a list, an index and one value, got {} arguments after the list",
+                            extra.len()
+                        ),
+                    ));
+                }
+                let value = extra.pop().unwrap();
+                let at = index_as_int(&extra[0], line)?;
+                if at < 0 || at as usize > items.len() {
+                    return Err(format!(
+                        "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                        line, at
+                    ));
+                }
+                items.insert(at as usize, value);
+                Value::Int(items.len() as i64)
+            }
+            "remove" => {
+                if extra.len() != 1 {
+                    return Err(eng_builtin_err(
+                        line,
+                        name,
+                        &format!("takes a list and one index, got {} indices", extra.len()),
+                    ));
+                }
+                let at = index_as_int(&extra[0], line)?;
+                let slot = seq_slot(items.len(), at, line)?;
+                items.remove(slot)
+            }
+            "sort" => {
+                if !extra.is_empty() {
+                    return Err(eng_builtin_err(line, name, "takes a list and no other arguments"));
+                }
+                sort_items(&mut items, line, name)?;
+                Value::List(items.clone())
+            }
+            _ => unreachable!("is_mutating_builtin lists exactly these names"),
+        };
+        self.store(&var, Value::List(items));
+        Ok(result)
+    }
+
+    /// `reverse(x)`: a list variable is reversed in place (and returned, so
+    /// `ys = reverse(xs);` works); anything else is reversed as a value. Text
+    /// reverses by character, so a Myanmar syllable keeps its marks in order
+    /// (`မာ` becomes `မာ`, not `ာမ`).
+    fn call_reverse(&mut self, arg_exprs: &[Expr], line: usize) -> Result<Value, String> {
+        if arg_exprs.len() != 1 {
+            return Err(eng_builtin_err(
+                line,
+                "reverse",
+                &format!("takes one list or string, got {}", arg_exprs.len()),
+            ));
+        }
+        // A list variable is reversed in place, like `sort`.
+        if let Expr::Ident(var) = &arg_exprs[0] {
+            if let Some(Value::List(items)) = self.env.get(var).cloned() {
+                if self.is_pinned(var) {
+                    return Err(eng_const_reassign_err(var, line));
+                }
+                let mut items = items;
+                items.reverse();
+                self.store(var, Value::List(items.clone()));
+                return Ok(Value::List(items));
+            }
+        }
+        match self.eval(&arg_exprs[0], line, None)? {
+            Value::Str(s) => Ok(Value::Str(crate::text::reverse(&s))),
+            Value::List(mut items) => {
+                items.reverse();
+                Ok(Value::List(items))
+            }
+            Value::Tuple(mut items) => {
+                items.reverse();
+                Ok(Value::Tuple(items))
+            }
+            other => Err(eng_builtin_err(
+                line,
+                "reverse",
+                &format!("needs a list or string, got {}", type_name_mm(&other)),
+            )),
+        }
+    }
+
+    /// `map(xs, fn)`, `filter(xs, fn)` and `reduce(xs, fn, start)` -- the
+    /// higher-order builtins. The callback is a *name* (`double`), so the
+    /// argument is resolved here rather than by the usual eager walk.
+    fn call_higher_order(
+        &mut self,
+        name: &str,
+        arg_exprs: &[Expr],
+        line: usize,
+    ) -> Result<Value, String> {
+        let want = if name == "reduce" { 3 } else { 2 };
+        if arg_exprs.len() != want {
+            return Err(eng_builtin_err(
+                line,
+                name,
+                &format!("takes {want} arguments, got {}", arg_exprs.len()),
+            ));
+        }
+        let collection = self.eval(&arg_exprs[0], line, None)?;
+        let items: Vec<Value> = match &collection {
+            Value::List(items) | Value::Tuple(items) | Value::Set(items) => items.clone(),
+            // A dict maps over its keys, exactly as a `for` loop does.
+            Value::Dict(pairs) => pairs.iter().map(|(k, _)| k.clone()).collect(),
+            Value::Str(s) => crate::text::clusters(s)
+                .into_iter()
+                .map(|c| Value::Str(c.to_string()))
+                .collect(),
+            other => {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!(
+                        "needs a collection or string, got {}",
+                        type_name_mm(other)
+                    ),
+                ))
+            }
+        };
+        // Arguments are evaluated left to right: the collection, then the
+        // callback, then `reduce`'s starting value.
+        let callback = self.eval_callback(&arg_exprs[1], line, name)?;
+        let initial = if name == "reduce" {
+            Some(self.eval(&arg_exprs[2], line, None)?)
+        } else {
+            None
+        };
+
+        match name {
+            "map" => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.call_callback(&callback, vec![item], line)?);
+                }
+                Ok(Value::List(out))
+            }
+            "filter" => {
+                let mut out = Vec::new();
+                for item in items {
+                    let keep = self.call_callback(&callback, vec![item.clone()], line)?;
+                    match keep {
+                        Value::Bool(true) => out.push(item),
+                        Value::Bool(false) => {}
+                        other => {
+                            return Err(eng_builtin_err(
+                                line,
+                                name,
+                                &format!(
+                                    "needs a callback that returns True or False, got {}",
+                                    type_name_mm(&other)
+                                ),
+                            ))
+                        }
+                    }
+                }
+                Ok(Value::List(out))
+            }
+            _ => {
+                let mut acc = initial.expect("reduce always evaluated its start value");
+                for item in items {
+                    acc = self.call_callback(&callback, vec![acc, item], line)?;
+                }
+                Ok(acc)
+            }
+        }
+    }
+
+    /// Resolve a callback argument: a bare function name (`double`), a library
+    /// function reference (`Tools.add`), or a value already bound to a
+    /// callable. Akkhara has no lambdas, so a callback is a named function.
+    fn eval_callback(
+        &mut self,
+        expr: &Expr,
+        line: usize,
+        builtin: &str,
+    ) -> Result<Callable, String> {
+        if let Expr::Ident(name) = expr {
+            if self.env.get(name).is_none() && self.functions.contains_key(name) {
+                return Ok(Callable::User(name.clone()));
+            }
+        }
+        match self.eval(expr, line, None)? {
+            Value::Callable(kind) => Ok((*kind).clone()),
+            other => Err(eng_builtin_err(
+                line,
+                builtin,
+                &format!(
+                    "needs a function as its callback, got {}",
+                    type_name_mm(&other)
+                ),
+            )),
+        }
+    }
+
+    /// Call a callback with already-evaluated arguments. Library functions
+    /// cannot be callbacks: their arguments are written as expressions and
+    /// the library dispatch takes those, not values.
+    fn call_callback(
+        &mut self,
+        kind: &Callable,
+        args: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, String> {
+        match kind {
+            Callable::User(name) => {
+                let function = self.find_function(name, line)?;
+                self.check_arity(name, &function, args.len(), line)?;
+                self.invoke_function(&function, args, line)?
+                    .ok_or_else(|| eng_no_return_err(name, line))
+            }
+            Callable::Library { fn_name, .. } => Err(eng_builtin_err(
+                line,
+                fn_name,
+                "is a library function; a callback must be a function the program defines with fn",
+            )),
         }
     }
 }
@@ -4628,10 +5234,133 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
     }
 }
 
+/// A valid write position. Unlike reading a missing index (which is an
+/// error already), writing must not create a gap, so `idx` has to be in
+/// `0..len` -- `push` is the way to grow a list.
+fn seq_slot(len: usize, idx: i64, line: usize) -> Result<usize, String> {
+    if idx < 0 || idx as usize >= len {
+        return Err(format!(
+            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            line, idx
+        ));
+    }
+    Ok(idx as usize)
+}
+
+/// Write `value` into `base` at `keys`. A list takes one index, a
+/// `[row, column]` pair writes into a table's inner list, and a dict takes a
+/// key (updating the entry in place or appending a new one). A tuple or set is
+/// refused: those exist to be fixed.
+fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Result<(), String> {
+    match base {
+        Value::List(items) => match keys {
+            [only] => {
+                let idx = index_as_int(only, line)?;
+                let slot = seq_slot(items.len(), idx, line)?;
+                items[slot] = value;
+                Ok(())
+            }
+            [row_key, rest @ ..] => {
+                let row = index_as_int(row_key, line)?;
+                let slot = seq_slot(items.len(), row, line)?;
+                set_index(&mut items[slot], rest, value, line)
+            }
+            [] => Err(format!(
+                "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
+                line
+            )),
+        },
+        Value::Dict(pairs) => {
+            if keys.len() != 1 {
+                return Err(format!(
+                    "E052 လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
+                    line
+                ));
+            }
+            let key = &keys[0];
+            if let Some(slot) = pairs.iter_mut().find(|(k, _)| value_eq(k, key)) {
+                slot.1 = value;
+            } else {
+                pairs.push((key.clone(), value));
+            }
+            Ok(())
+        }
+        Value::Str(_) => Err(format!(
+            "E139 လိုင်း {} တွင် စာသား (string) ၏ အက္ခရာကို ပြောင်း၍မရပါ။ စာသားအသစ်တစ်ခု ဖန်တီးပါ။",
+            line
+        )),
+        Value::Tuple(_) | Value::Set(_) => Err(format!(
+            "E139 လိုင်း {} တွင် {} ၏ element ကို ပြောင်း၍မရပါ။ ပြောင်းလဲနိုင်သော စာရင်း (list) ကို အသုံးပြုပါ။",
+            line,
+            type_name_mm(base)
+        )),
+        other => Err(format!(
+            "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
+            line,
+            type_name_mm(other)
+        )),
+    }
+}
+
+/// Sorts a list in place, in ascending order. `sort_by` cannot return an
+/// error, so the first comparison failure is parked and reported after the
+/// pass instead of aborting in the middle of it.
+fn sort_items(items: &mut [Value], line: usize, name: &str) -> Result<(), String> {
+    let mut failure: Option<String> = None;
+    items.sort_by(|a, b| {
+        if failure.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match value_ordering(a, b, line, name) {
+            Ok(ordering) => ordering,
+            Err(e) => {
+                failure = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn index_target_err(line: usize) -> String {
+    format!(
+        "E138 လိုင်း {} တွင် ဤနေရာ၌ index ကို သတ်မှတ်၍မရပါ။ ပြောင်းလိုသော စာရင်းကို variable တစ်ခုတွင် ထားပါ။",
+        line
+    )
+}
+
 fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, String> {
     match base {
         Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
             index_seq(items, keys, line)
+        }
+        // One index picks one character -- a grapheme cluster, so `s[0]` of
+        // `မြန်မာ` is `မြ` rather than the consonant alone.
+        Value::Str(s) => {
+            if keys.len() != 1 {
+                return Err(format!(
+                    "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
+                    line
+                ));
+            }
+            let idx = index_as_int(&keys[0], line)?;
+            if idx < 0 {
+                return Err(format!(
+                    "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                    line, idx
+                ));
+            }
+            crate::text::at(s, idx as usize)
+                .map(|c| Value::Str(c.to_string()))
+                .ok_or_else(|| {
+                    format!(
+                        "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                        line, idx
+                    )
+                })
         }
         Value::Dict(pairs) => {
             if keys.len() != 1 {
@@ -4988,7 +5717,28 @@ fn is_eng_builtin(name: &str) -> bool {
             | "values"
             | "entries"
             | "enumerate"
+            | "slice"
+            | "sum"
+            | "map"
+            | "filter"
+            | "reduce"
+            | "push"
+            | "append"
+            | "pop"
+            | "insert"
+            | "remove"
+            | "sort"
+            | "reverse"
     ) || convert_target(name).is_some()
+}
+
+/// The builtins that change the list their first argument names, rather than
+/// returning a new one. See `call_mutating_builtin`.
+fn is_mutating_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "push" | "append" | "pop" | "insert" | "remove" | "sort"
+    )
 }
 
 /// The conversion builtins that replaced the `<value> ကို <type> သို့
