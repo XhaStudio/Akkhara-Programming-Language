@@ -1,6 +1,6 @@
 [package]
 name = "akkhara"
-version = "0.4.15"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -8,10 +8,19 @@ name = "akk"
 path = "src/main.rs"
 
 [dependencies]
+# `akk.toml` (src/manifest.rs) is TOML, read into a typed manifest with
+# serde. Both crates are already in the dependency graph through eframe.
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 rand = "0.8"
 ureq = { version = "2.9", default-features = false, features = ["native-tls", "gzip"] }
 native-tls = { version = "0.2", features = ["vendored"] }
 crossterm = "0.27"
+
+# String indexing and len count grapheme clusters, not Unicode scalar values,
+# so one Myanmar syllable (a consonant plus its medials, vowels and tone
+# marks) is one character to a program -- see src/text.rs.
+unicode-segmentation = "1"
 
 # The App GUI library (libraries/App/main.rs). eframe's glow (OpenGL)
 # renderer is used instead of the default wgpu one: a smaller dependency
