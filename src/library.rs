@@ -31,6 +31,47 @@ pub struct LibraryLoader {
     /// Populated with the folder of the program being run, so a script can
     /// import a sibling script.
     script_dirs: Vec<PathBuf>,
+    /// `[dependencies]` entries that name a `path` (from `akk.toml`), as
+    /// `(library name, folder or .akk file)`. They are searched before any
+    /// sibling script or downloaded package, so a project's own copy of a
+    /// library is the one it imports.
+    dependencies: Vec<(String, PathBuf)>,
+}
+
+/// What a manifest dependency resolved to: a built-in library (no source
+/// file -- its code is compiled into `akk`), or the source file to run.
+pub enum DependencyResolution {
+    Builtin,
+    Source(PathBuf),
+}
+
+/// The names the interpreter recognizes as libraries compiled into this
+/// binary, in the spelling(s) each answers to. Every name in a group marks
+/// the whole group loaded, so `server` and `ဆာဗာ` are one library.
+pub fn builtin_names(name: &str) -> Option<&'static [&'static str]> {
+    const RANDOM: &[&str] = &["ကျပန်း"];
+    const TIME: &[&str] = &["အချိန်"];
+    const REQUEST: &[&str] = &["request"];
+    const APP: &[&str] = &["App"];
+    const SERVER: &[&str] = &["server", "ဆာဗာ"];
+    const JSON: &[&str] = &["json", "ဂျေဆန်"];
+    const FILE: &[&str] = &["file", "ဖိုင်"];
+
+    match name {
+        "ကျပန်း" => Some(RANDOM),
+        "အချိန်" => Some(TIME),
+        "request" => Some(REQUEST),
+        "App" => Some(APP),
+        "server" | "ဆာဗာ" => Some(SERVER),
+        "json" | "ဂျေဆန်" => Some(JSON),
+        "file" | "ဖိုင်" => Some(FILE),
+        _ => None,
+    }
+}
+
+/// Does `name` name a library compiled into this binary?
+pub fn is_builtin_library(name: &str) -> bool {
+    builtin_names(name).is_some()
 }
 
 impl LibraryLoader {
@@ -40,6 +81,7 @@ impl LibraryLoader {
             loading: HashSet::new(),
             libraries_dir,
             script_dirs: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -57,6 +99,45 @@ impl LibraryLoader {
         if !self.script_dirs.contains(&dir) {
             self.script_dirs.push(dir);
         }
+    }
+
+    /// Registers a `[dependencies]` entry written as `{ path = "..." }`.
+    /// `path` may name a folder (whose `main.akk` or `<name>.akk` is the
+    /// entry) or a `.akk` file directly.
+    pub fn add_dependency(&mut self, name: &str, path: PathBuf) {
+        if !self.dependencies.iter().any(|(n, _)| n == name) {
+            self.dependencies.push((name.to_string(), path));
+        }
+    }
+
+    /// The source file a `{ path = ... }` dependency names, when it has one.
+    fn dependency_path(&self, name: &str) -> Option<PathBuf> {
+        let (_, path) = self.dependencies.iter().find(|(n, _)| n == name)?;
+        if path.is_file() {
+            return Some(path.clone());
+        }
+        let main = path.join("main.akk");
+        if main.is_file() {
+            return Some(main);
+        }
+        let named = path.join(format!("{}.akk", name));
+        named.is_file().then_some(named)
+    }
+
+    /// Resolve a `[dependencies]` name in the order `akk.toml` documents:
+    /// a `path` entry, then a sibling `<name>.akk`, then a downloaded package
+    /// under `libraries/<name>/`, then a built-in library.
+    pub fn resolve_dependency(&self, name: &str) -> Option<DependencyResolution> {
+        if let Some(path) = self.dependency_path(name) {
+            return Some(DependencyResolution::Source(path));
+        }
+        if let Some(path) = self.script_path(name) {
+            return Some(DependencyResolution::Source(path));
+        }
+        if let Some(path) = self.dynamic_source_path(name) {
+            return Some(DependencyResolution::Source(path));
+        }
+        is_builtin_library(name).then_some(DependencyResolution::Builtin)
     }
 
     /// Marks `name` as being loaded and returns `true`; returns `false` when
@@ -77,7 +158,9 @@ impl LibraryLoader {
     /// manifest or no `entry` field. Returns `None` if there's no such
     /// package, so the caller can fall back to a "library not found" error.
     pub fn find_dynamic_source(&self, name: &str) -> Option<String> {
-        let path = self.dynamic_source_path(name)?;
+        let path = self
+            .dependency_path(name)
+            .or_else(|| self.dynamic_source_path(name))?;
         fs::read_to_string(path).ok()
     }
 
@@ -86,7 +169,7 @@ impl LibraryLoader {
     /// akk binary. A `name` that already ends in `.akk` is used as-is.
     /// Returns `None` when no such script exists.
     pub fn find_script_source(&self, name: &str) -> Option<String> {
-        let path = self.script_path(name)?;
+        let path = self.dependency_path(name).or_else(|| self.script_path(name))?;
         fs::read_to_string(path).ok()
     }
 
@@ -100,7 +183,8 @@ impl LibraryLoader {
     /// not need the path.
     pub fn find_source(&self, name: &str) -> Option<(PathBuf, String)> {
         let path = self
-            .dynamic_source_path(name)
+            .dependency_path(name)
+            .or_else(|| self.dynamic_source_path(name))
             .or_else(|| self.script_path(name))?;
         fs::read_to_string(&path).ok().map(|src| (path, src))
     }
