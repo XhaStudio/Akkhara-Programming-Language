@@ -497,6 +497,15 @@ const KW_WHILE_NEG_ALT: &str = "မဖြစ်နေစဥ်";
 const KW_WHILE_NEG_ALT2: &str = "မဖြစ်နေရင်";
 
 const KW_FUNC_DEF: &str = "အလုပ်";
+/// `လုပ်ငန်း` -- the older spelling of the function keyword, still used by
+/// the README and by existing programs. Both spellings open a definition.
+const KW_FUNC_DEF_ALT: &str = "လုပ်ငန်း";
+
+/// Is this token the keyword that starts a function definition (`အလုပ်` or
+/// its older spelling `လုပ်ငန်း`)?
+fn is_func_def_kw(tok: &Tok) -> bool {
+    ident_eq(tok, KW_FUNC_DEF) || ident_eq(tok, KW_FUNC_DEF_ALT)
+}
 const KW_BY: &str = "ဖြင့်";
 const KW_CALL: &str = "လုပ်ပါ";
 const KW_CALL_WITH: &str = "လုပ်ရန်";
@@ -627,6 +636,7 @@ fn is_reserved_word(name: &str) -> bool {
         KW_WHILE_NEG_ALT,
         KW_WHILE_NEG_ALT2,
         KW_FUNC_DEF,
+        KW_FUNC_DEF_ALT,
         KW_BY,
         KW_CALL,
         KW_CALL_WITH,
@@ -1833,7 +1843,7 @@ fn advance_block_depth(tok: &Tok, depth: &mut i32, pending_header: &mut i32) {
     } else if is_close(tok) {
         *depth -= 1;
     } else if ident_eq(tok, KW_LOOP_EACH)
-        || ident_eq(tok, KW_FUNC_DEF)
+        || is_func_def_kw(tok)
         || ident_eq(tok, KW_CLASS_DEF)
         || ident_eq(tok, KW_TRY)
     {
@@ -3075,7 +3085,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                     }
                     return parse_if_statement(&body, line);
                 }
-                if !body.is_empty() && ident_eq(&body[0].tok, KW_FUNC_DEF) {
+                if !body.is_empty() && is_func_def_kw(&body[0].tok) {
                     let inner = body[1..].to_vec();
                     return parse_func_def(&inner, line);
                 }
