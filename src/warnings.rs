@@ -276,6 +276,12 @@ impl Collector {
                 }
                 self.expr(amount);
             }
+            Stmt::IndexAssign { target, value, .. } => {
+                // Writing into a collection reads the collection and the
+                // value; there is no variable that becomes "assigned".
+                self.expr(target);
+                self.expr(value);
+            }
             Stmt::ForLoop {
                 var_name,
                 source,
@@ -320,8 +326,7 @@ impl Collector {
                 }
             }
             Stmt::FuncCall { name, args, .. } => {
-                self.called.insert(name.clone());
-                self.args(args);
+                self.call(name, args);
             }
             Stmt::FuncCallAssign {
                 name,
@@ -329,9 +334,8 @@ impl Collector {
                 args,
                 line,
             } => {
-                self.called.insert(fn_name.clone());
                 self.write(name, *line);
-                self.args(args);
+                self.call(fn_name, args);
             }
             Stmt::LibCall {
                 lib, fn_name, args, ..
@@ -342,6 +346,9 @@ impl Collector {
                 // alias, say) is not resolved here, so any function of that
                 // name counts as called -- the conservative reading.
                 self.called.insert(fn_name.clone());
+                if let Some(callback) = self.app_callback(lib, fn_name, args) {
+                    self.called.insert(callback);
+                }
                 self.args(args);
             }
             Stmt::LibCallAssign {
@@ -350,6 +357,9 @@ impl Collector {
                 self.write(name, *line);
                 self.lib_uses.insert(lib.clone());
                 self.called.insert(fn_name.clone());
+                if let Some(callback) = self.app_callback(lib, fn_name, args) {
+                    self.called.insert(callback);
+                }
                 self.args(args);
             }
             Stmt::FuncAlias {
@@ -418,8 +428,7 @@ impl Collector {
                 }
             }
             Stmt::EngExprCall { name, args, .. } => {
-                self.called.insert(name.clone());
-                self.args(args);
+                self.call(name, args);
             }
             Stmt::EngAssign { name, value, line } => {
                 self.write(name, *line);
@@ -522,6 +531,49 @@ impl Collector {
         }
     }
 
+    /// The Akkhara function an `App` call registers as a callback, if any.
+    ///
+    /// `App.button(w, "Save", 20, 60, "on_save")`, `App.on_key(w, "Enter", ...)`
+    /// and `App.every(w, 1000, ...)` take the callback as *text*, which the
+    /// library calls by name later on -- so the name is a use of that
+    /// function even though no call site spells it out. Without this the walk
+    /// would report the handler as an unused function (W005).
+    fn app_callback(&self, lib: &str, fn_name: &str, args: &[Expr]) -> Option<String> {
+        let is_app = lib == "App"
+            || self
+                .lib_alias
+                .get(lib)
+                .map(|original| original == "App")
+                .unwrap_or(false);
+        if !is_app {
+            return None;
+        }
+        let index = match fn_name {
+            "button" => 4,
+            "on_key" | "every" => 2,
+            _ => return None,
+        };
+        match args.get(index) {
+            Some(Expr::StrLit(name)) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record a call: its callee name, and -- for the higher-order builtins --
+    /// the bare function name passed as the callback, which is called too.
+    fn call(&mut self, name: &str, args: &[Expr]) {
+        self.called.insert(name.to_string());
+        // A call can also go through a variable holding a callable
+        // (`f = file.read; f(path)`), so the callee counts as read too.
+        self.read(name);
+        if matches!(name, "map" | "filter" | "reduce") {
+            if let Some(Expr::Ident(callback)) = args.get(1) {
+                self.called.insert(callback.clone());
+            }
+        }
+        self.args(args);
+    }
+
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::StrLit(s) => self.read_interpolated(s),
@@ -553,12 +605,14 @@ impl Collector {
                 // `name(args)` in expression position: a call to a user
                 // function or a class constructor, so it counts as a use of
                 // that name either way.
-                self.called.insert(name.clone());
-                self.args(args);
+                self.call(name, args);
             }
             Expr::LibCall(lib, fn_name, args, _) => {
                 self.lib_uses.insert(lib.clone());
                 self.called.insert(fn_name.clone());
+                if let Some(callback) = self.app_callback(lib, fn_name, args) {
+                    self.called.insert(callback);
+                }
                 self.args(args);
             }
             Expr::LibFnRef(lib, _, _) => {
@@ -608,7 +662,10 @@ impl Collector {
         }
         for (lib, alias, line) in &self.imports {
             let used_lib = used.contains(lib)
-                || alias.as_ref().is_some_and(|a| used.contains(a));
+                || alias.as_ref().is_some_and(|a| used.contains(a))
+                // `file` and `ဖိုင်` are one library, so using one spelling
+                // counts as using the other (same for json/server).
+                || library_sibling(lib).is_some_and(|other| used.contains(other));
             if !used_lib {
                 found.push(Found {
                     line: *line,
@@ -685,6 +742,7 @@ fn stmt_line(s: &Stmt) -> Option<usize> {
         | Stmt::RandomDecl { line, .. }
         | Stmt::ExprStmt { line, .. }
         | Stmt::MathAssign { line, .. }
+        | Stmt::IndexAssign { line, .. }
         | Stmt::ForLoop { line, .. }
         | Stmt::While { line, .. }
         | Stmt::FuncDef { line, .. }
@@ -725,6 +783,20 @@ fn w001(line: usize, name: &str) -> String {
         "W001 လိုင်း {} ၏ variable \"{}\" ကို အသုံးမပြုထားပါ (unused variable)။",
         line, name
     )
+}
+
+/// The other spelling of a library that answers to two names, so an import
+/// and a use written in different languages are not reported as unused.
+fn library_sibling(name: &str) -> Option<&'static str> {
+    match name {
+        "file" => Some("ဖိုင်"),
+        "ဖိုင်" => Some("file"),
+        "json" => Some("ဂျေဆန်"),
+        "ဂျေဆန်" => Some("json"),
+        "server" => Some("ဆာဗာ"),
+        "ဆာဗာ" => Some("server"),
+        _ => None,
+    }
 }
 
 fn w002(line: usize, lib: &str) -> String {
