@@ -1,7 +1,9 @@
 mod interpreter;
 mod lexer;
 mod library;
+mod manifest;
 mod parser;
+mod text;
 mod ui;
 mod warnings;
 
@@ -44,6 +46,14 @@ mod server_library;
 ///     နည်းပညာများ ဂျေဆန် ကို သုံးမည်။
 #[path = "../libraries/json/main.rs"]
 mod json_library;
+
+/// The Akkhara "file" library, compiled in from its own source under
+/// `libraries/file/main.rs`. It answers to two names -- `file` and `ဖိုင်` --
+/// and every function has a spelling in each language. Programs load it with
+/// `use file;` or:
+///     နည်းပညာများ ဖိုင် ကို သုံးမည်။
+#[path = "../libraries/file/main.rs"]
+mod file_library;
 
 use std::env;
 use std::fs;
@@ -108,10 +118,11 @@ fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str)
 
 fn print_usage() {
     eprintln!("Usage: akk <file name> [--no-warn]");
+    eprintln!("       akk run [file]             (runs the akk.toml project)");
     eprintln!("       akk report [folder]        (runs every .akk in the folder)");
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
-    eprintln!("       akk install <library>");
+    eprintln!("       akk install [library]      (no name: installs akk.toml dependencies)");
     eprintln!("       akk update [version]");
     eprintln!("       akk uninstall");
 }
@@ -154,12 +165,17 @@ fn main() {
             return;
         }
         "install" => {
+            // With no name, install everything the project's manifest lists;
+            // with one, install exactly that library (unchanged behavior).
             if args.len() < 3 {
-                eprintln!("အသုံးပြုပုံ: akk install <library>");
-                process::exit(1);
+                cmd_install_manifest();
+                return;
             }
             cmd_install(&args[2]);
             return;
+        }
+        "run" => {
+            process::exit(cmd_run(no_warn, args.get(2).map(String::as_str)));
         }
         "update" => {
             let version = args.get(2).map(|s| s.as_str());
@@ -173,14 +189,69 @@ fn main() {
         _ => {}
     }
 
-    let filename = &args[1];
+    // A plain `akk file.akk` never looks for a manifest: its behavior is
+    // exactly what it has always been. `akk run` is the manifest-aware entry
+    // point (see `cmd_run`).
+    process::exit(run_program(
+        &args[1],
+        RunOptions::defaults(no_warn),
+        &[],
+        &[],
+    ));
+}
+
+/// What a run shows and writes. `akk file.akk` gets every setting on; `akk
+/// run` takes them from the manifest's `[run]` table.
+#[derive(Debug, Clone, Copy)]
+struct RunOptions {
+    /// Write the `<file>.akop` transcript (including after a failure).
+    transcript: bool,
+    /// Print the closing `Interpreted in ...` line on success.
+    timing: bool,
+    /// Show the static and runtime warnings.
+    warnings: bool,
+}
+
+impl RunOptions {
+    /// The historical behavior of `akk file.akk` (`--no-warn` turns only the
+    /// warnings off).
+    fn defaults(no_warn: bool) -> Self {
+        RunOptions {
+            transcript: true,
+            timing: true,
+            warnings: !no_warn,
+        }
+    }
+
+    /// A manifest's `[run]` settings, with `--no-warn` still winning.
+    fn from_manifest(run: &manifest::RunSettings, no_warn: bool) -> Self {
+        RunOptions {
+            transcript: run.transcript,
+            timing: run.timing,
+            warnings: run.warnings && !no_warn,
+        }
+    }
+}
+
+/// Run one program file, honoring `options`, and return the exit code the
+/// process should end with. This is the whole plain run path: `akk file.akk`
+/// and `akk run` both come through here, so the two behave identically apart
+/// from the settings and the extra manifest warnings.
+fn run_program(
+    filename: &str,
+    options: RunOptions,
+    extra_warnings: &[String],
+    dependencies: &[(String, PathBuf)],
+) -> i32 {
     let src = match fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", filename, e);
             eprintln!("{}", msg);
-            save_terminal_log(filename, None, &msg);
-            process::exit(1);
+            if options.transcript {
+                save_terminal_log(filename, None, &msg);
+            }
+            return 1;
         }
     };
 
@@ -188,8 +259,10 @@ fn main() {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{}", e);
-            save_terminal_log(filename, None, &e);
-            process::exit(1);
+            if options.transcript {
+                save_terminal_log(filename, None, &e);
+            }
+            return 1;
         }
     };
 
@@ -197,8 +270,10 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}", e);
-            save_terminal_log(filename, None, &e);
-            process::exit(1);
+            if options.transcript {
+                save_terminal_log(filename, None, &e);
+            }
+            return 1;
         }
     };
 
@@ -221,19 +296,28 @@ fn main() {
     }
 
     // Static warnings: what the program -- and every script it imports --
-    // declares but never uses. They are shown before the program starts (and
-    // saved into its `.akop` transcript), and they never change what the
-    // program does.
-    let warning_prefix = if no_warn {
-        String::new()
+    // declares but never uses, plus any manifest key this `akk` does not
+    // know. They are shown before the program starts (and saved into its
+    // `.akop` transcript), and they never change what the program does.
+    let warning_prefix = if options.warnings {
+        let mut all: Vec<String> = extra_warnings.to_vec();
+        all.extend(library_warnings(&stmts, &search_dirs, dependencies));
+        write_warnings(&all)
     } else {
-        write_warnings(&library_warnings(&stmts, &search_dirs))
+        String::new()
     };
-    let outcome = match interpret(stmts, libs_dir, search_dirs, false, no_warn) {
+    let outcome = match interpret(
+        stmts,
+        libs_dir,
+        search_dirs,
+        dependencies.to_vec(),
+        false,
+        !options.warnings,
+    ) {
         Ok(outcome) => outcome,
         Err((message, code)) => {
             eprintln!("{}", message);
-            process::exit(code);
+            return code;
         }
     };
 
@@ -241,20 +325,167 @@ fn main() {
         eprintln!("{}", e);
         // A failing run still saves its transcript: what the program managed
         // to print, then the error the terminal showed.
-        save_terminal_log(filename, with_warnings(&warning_prefix, outcome.output), &e);
-        process::exit(1);
+        if options.transcript {
+            save_terminal_log(filename, with_warnings(&warning_prefix, outcome.output), &e);
+        }
+        return 1;
     }
-    let closing_line = format!("Interpreted in {:.3}s", outcome.elapsed);
-    println!("{}", closing_line);
+
+    let closing_line = if options.timing {
+        let line = format!("Interpreted in {:.3}s", outcome.elapsed);
+        println!("{}", line);
+        line
+    } else {
+        // `[run] timing = false` keeps the closing line out of the terminal.
+        // The transcript still ends with its own newline (see
+        // `save_terminal_log`).
+        String::new()
+    };
 
     // Save everything the terminal showed next to the program as
     // `<file_name>.akop`: the warnings, the program's output and that closing
     // line.
-    save_terminal_log(
-        filename,
-        with_warnings(&warning_prefix, outcome.output),
-        &closing_line,
-    );
+    if options.transcript {
+        save_terminal_log(
+            filename,
+            with_warnings(&warning_prefix, outcome.output),
+            &closing_line,
+        );
+    }
+    0
+}
+
+/// `akk run [file]` -- the manifest-aware run.
+///
+/// With no file, the nearest `akk.toml` supplies the entry and `[run]`
+/// settings. With a file, that file runs instead, but still takes the
+/// manifest's settings and dependencies when there is one. With neither a
+/// file nor a manifest there is nothing to run.
+fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("E146 akk.toml ကို ရှာရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
+            return 1;
+        }
+    };
+
+    let found = match manifest::discover(&cwd) {
+        Some(path) => match manifest::load(&path) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                eprintln!("{}", e);
+                return 1;
+            }
+        },
+        None => None,
+    };
+
+    let (filename, options, warnings, dependencies) = match (found, file) {
+        (Some(manifest), None) => {
+            if let Err(e) = manifest.validate_entry() {
+                eprintln!("{}", e);
+                return 1;
+            }
+            let dependencies = match manifest.resolve_dependencies(&libraries_dir()) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    return 1;
+                }
+            };
+            (
+                manifest.entry_path().display().to_string(),
+                RunOptions::from_manifest(&manifest.run, no_warn),
+                manifest.warnings.clone(),
+                dependency_pairs(dependencies),
+            )
+        }
+        (Some(manifest), Some(file)) => {
+            let dependencies = match manifest.resolve_dependencies(&libraries_dir()) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    return 1;
+                }
+            };
+            (
+                file.to_string(),
+                RunOptions::from_manifest(&manifest.run, no_warn),
+                manifest.warnings.clone(),
+                dependency_pairs(dependencies),
+            )
+        }
+        (None, Some(file)) => (
+            file.to_string(),
+            RunOptions::defaults(no_warn),
+            Vec::new(),
+            Vec::new(),
+        ),
+        (None, None) => {
+            eprintln!(
+                "E146 ဤ folder တွင် akk.toml ကို ရှာမတွေ့ပါ။ \"akk run <file>\" ဖြင့် ဖိုင်တစ်ခုကို တိုက်ရိုက် run ပါ။"
+            );
+            return 1;
+        }
+    };
+
+    run_program(&filename, options, &warnings, &dependencies)
+}
+
+/// The `(name, path)` pairs the interpreter registers for `[dependencies]`
+/// entries that resolved to a source file. Built-ins have no file to load.
+fn dependency_pairs(resolved: Vec<manifest::ResolvedDependency>) -> Vec<(String, PathBuf)> {
+    resolved
+        .into_iter()
+        .filter_map(|dependency| dependency.path.map(|path| (dependency.name, path)))
+        .collect()
+}
+
+/// `akk install` with no library name -- installs every `[dependencies]`
+/// entry the project's manifest lists. `path` dependencies are already in the
+/// project, so only version/git entries are downloaded; each one reuses
+/// `cmd_install`.
+fn cmd_install_manifest() {
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("E146 akk.toml ကို ရှာရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
+            process::exit(1);
+        }
+    };
+    let Some(path) = manifest::discover(&cwd) else {
+        eprintln!(
+            "E146 ဤ folder တွင် akk.toml ကို ရှာမတွေ့ပါ။ \"akk install <library>\" ဖြင့် library တစ်ခုကို ထည့်သွင်းပါ။"
+        );
+        process::exit(1);
+    };
+    let manifest = match manifest::load(&path) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
+
+    let names: Vec<String> = manifest
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            !matches!(dependency.source, manifest::DependencySource::Path(_))
+        })
+        .map(|dependency| dependency.name.clone())
+        .collect();
+
+    if names.is_empty() {
+        println!("==> akk.toml ၏ [dependencies] တွင် install လုပ်ရန် library မရှိပါ။");
+        return;
+    }
+
+    println!("==> Installing {} akk.toml dependencies...", names.len());
+    for name in names {
+        cmd_install(&name);
+    }
 }
 
 /// Run one parsed program on a thread with a large stack. A tree-walking
@@ -275,6 +506,7 @@ fn interpret(
     stmts: Vec<parser::Stmt>,
     libraries_dir: PathBuf,
     search_dirs: Vec<PathBuf>,
+    dependencies: Vec<(String, PathBuf)>,
     silent: bool,
     warnings_off: bool,
 ) -> Result<RunOutcome, (String, i32)> {
@@ -285,6 +517,9 @@ fn interpret(
             let mut interp = interpreter::Interpreter::new(libraries_dir);
             for dir in search_dirs {
                 interp.add_library_search_dir(dir);
+            }
+            for (name, path) in dependencies {
+                interp.add_manifest_dependency(&name, path);
             }
             // Collect the program's output so it can be saved alongside the
             // program (in addition to being shown on stdout).
@@ -336,10 +571,17 @@ fn interpret(
 /// import the way a run does (a downloaded package first, then a plain
 /// `<name>.akk` script in one of `search_dirs`). A built-in library and a name
 /// that is not on disk add nothing: there is no source to read.
-fn library_warnings(stmts: &[parser::Stmt], search_dirs: &[PathBuf]) -> Vec<String> {
+fn library_warnings(
+    stmts: &[parser::Stmt],
+    search_dirs: &[PathBuf],
+    dependencies: &[(String, PathBuf)],
+) -> Vec<String> {
     let mut loader = library::LibraryLoader::new(libraries_dir());
     for dir in search_dirs {
         loader.add_script_dir(dir.clone());
+    }
+    for (name, path) in dependencies {
+        loader.add_dependency(name, path.clone());
     }
     warnings::check_program(stmts, &|name| {
         loader.find_source(name).map(|(path, source)| warnings::Library {
@@ -442,9 +684,9 @@ fn cmd_report(folder: &str, no_warn: bool) {
         let found_warnings: Vec<String> = if no_warn {
             Vec::new()
         } else {
-            library_warnings(&stmts, &search_dirs)
+            library_warnings(&stmts, &search_dirs, &[])
         };
-        let outcome = match interpret(stmts, libraries_dir(), search_dirs, true, no_warn) {
+        let outcome = match interpret(stmts, libraries_dir(), search_dirs, Vec::new(), true, no_warn) {
             Ok(outcome) => outcome,
             Err((message, _)) => {
                 println!("[ERROR] warning {}၊ error 1", found_warnings.len());
