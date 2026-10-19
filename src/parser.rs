@@ -125,6 +125,17 @@ pub enum Stmt {
         amount: Expr,
         line: usize,
     },
+    /// Assignment into a collection element:
+    ///   eng:     `xs[0] = <value>;`
+    ///   Myanmar: `xs[0] သည် <value> ဖြစ်၏။`
+    /// The target is always an `Expr::Index`; the interpreter writes through
+    /// the variable that holds the collection (a list, a table row or a dict),
+    /// so no name is rebound.
+    IndexAssign {
+        target: Expr,
+        value: Expr,
+        line: usize,
+    },
     ForLoop {
         var_name: String,
         source: ForSource,
@@ -473,9 +484,17 @@ const KW_WHILE: &str = "အခြေအနေ";
 const KW_WHILE_POS: &str = "ဖြစ်နေစဉ်";
 /// `ဖြစ်နေစဥ်` -- the same word with `ဥ` instead of `ဉ`.
 const KW_WHILE_POS_ALT: &str = "ဖြစ်နေစဥ်";
+/// `ဖြစ်နေရင်` -- the positive while header written with the `ရင်`
+/// terminator instead of `စဉ်`: it loops while the condition is true, the
+/// same as `ဖြစ်နေစဉ်`.
+const KW_WHILE_POS_ALT2: &str = "ဖြစ်နေရင်";
 const KW_WHILE_NEG: &str = "မဖြစ်နေစဉ်";
 /// `မဖြစ်နေစဥ်` -- `မဖြစ်နေစဉ်` with `ဥ`.
 const KW_WHILE_NEG_ALT: &str = "မဖြစ်နေစဥ်";
+/// `မဖြစ်နေရင်` -- the negative while header written with the `ရင်`
+/// terminator instead of `စဉ်`: it loops while the condition is not true,
+/// the same as `မဖြစ်နေစဉ်`.
+const KW_WHILE_NEG_ALT2: &str = "မဖြစ်နေရင်";
 
 const KW_FUNC_DEF: &str = "အလုပ်";
 const KW_BY: &str = "ဖြင့်";
@@ -507,6 +526,24 @@ const KW_LIBRARIES: &str = "နည်းပညာများ";
 const KW_WAIT: &str = "စောင့်ပါ";
 const KW_RANDOM: &str = "ကျပန်းကိန်း";
 const KW_BETWEEN: &str = "အကြား";
+
+/// The type keywords a condition can name (`<expr> သည် <type>`). The ones
+/// `parse_typecheck_name` cannot check are listed so `(x သည် ကိန်းပြည့်)`
+/// keeps reporting a condition-syntax error instead of comparing `x` to a
+/// variable that happens to share the type word.
+const TYPE_WORDS: &[&str] = &[
+    "စာသား",
+    "ကိန်း",
+    "ကိန်းပြည့်",
+    "ဒဿမ",
+    "ဒဿမကိန်း",
+    "စာရင်း",
+    "အစု",
+    "အုပ်စု",
+    "အဘိဓာန်",
+    "ဇယား",
+];
+
 const KW_AS: &str = "အဖြစ်";
 
 // Member access / network library keywords.
@@ -585,8 +622,10 @@ fn is_reserved_word(name: &str) -> bool {
         KW_WHILE,
         KW_WHILE_POS,
         KW_WHILE_POS_ALT,
+        KW_WHILE_POS_ALT2,
         KW_WHILE_NEG,
         KW_WHILE_NEG_ALT,
+        KW_WHILE_NEG_ALT2,
         KW_FUNC_DEF,
         KW_BY,
         KW_CALL,
@@ -846,7 +885,7 @@ fn while_condition_syntax_err(line: usize) -> String {
 
 fn while_missing_then_err(line: usize) -> String {
     format!(
-        "E017 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" လိုအပ်ပါသည်။",
+        "E017 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" / \"ဖြစ်နေရင်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" / \"မဖြစ်နေရင်\" လိုအပ်ပါသည်။",
         line
     )
 }
@@ -1103,6 +1142,23 @@ fn split_top_level<'a>(tokens: &'a [Token], is_delim: impl Fn(&Tok) -> bool) -> 
 }
 
 /// Find the first top-level (bracket-depth 0) index matching `kw`.
+/// The index of the first `=` at the statement's own nesting level (not
+/// inside `[...]`, `(...)` or `{...}`), or `None`. Recognizes an eng
+/// assignment whose left side is an index, e.g. `xs[0] = 1;`.
+fn find_top_level_assign(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            depth += 1;
+        } else if is_close(&t.tok) {
+            depth -= 1;
+        } else if depth == 0 && matches!(t.tok, Tok::Assign) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn find_kw_top_level(tokens: &[Token], kw: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, t) in tokens.iter().enumerate() {
@@ -1719,11 +1775,15 @@ fn is_then_neg(tok: &Tok) -> bool {
 }
 
 fn is_while_pos(tok: &Tok) -> bool {
-    ident_eq(tok, KW_WHILE_POS) || ident_eq(tok, KW_WHILE_POS_ALT)
+    ident_eq(tok, KW_WHILE_POS)
+        || ident_eq(tok, KW_WHILE_POS_ALT)
+        || ident_eq(tok, KW_WHILE_POS_ALT2)
 }
 
 fn is_while_neg(tok: &Tok) -> bool {
-    ident_eq(tok, KW_WHILE_NEG) || ident_eq(tok, KW_WHILE_NEG_ALT)
+    ident_eq(tok, KW_WHILE_NEG)
+        || ident_eq(tok, KW_WHILE_NEG_ALT)
+        || ident_eq(tok, KW_WHILE_NEG_ALT2)
 }
 
 /// A keyword that closes a header and starts its body: `ဖြစ်လျှင်` /
@@ -2038,6 +2098,43 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
         };
         let value = parse_expr(&rest[2..], line).map_err(|_| eng_bad_form_err(line))?;
         return Ok(Stmt::EngAssign { name, value, line });
+    }
+
+    // --- eng index assignment: `xs[i] = <value>;` and `xs[i] += <value>;` ---
+    // The left side is an index expression, so the write lands inside the
+    // collection the variable holds instead of rebinding the name.
+    if !is_const {
+        if let Some(eq) = find_top_level_assign(rest) {
+            let compound = eq >= 2 && matches!(rest[eq - 1].tok, Tok::Op(_));
+            let (target_tokens, value_from, op) = if compound {
+                let op = match &rest[eq - 1].tok {
+                    Tok::Op(c) => Some(*c),
+                    _ => None,
+                };
+                (&rest[..eq - 1], eq + 1, op)
+            } else {
+                (&rest[..eq], eq + 1, None)
+            };
+            if let Ok(target) = parse_expr(target_tokens, line) {
+                if matches!(target, Expr::Index(..)) {
+                    let value = parse_expr(&rest[value_from..], line)
+                        .map_err(|_| eng_bad_form_err(line))?;
+                    return Ok(match op {
+                        Some(op) => Stmt::MathAssign {
+                            target,
+                            op,
+                            amount: value,
+                            line,
+                        },
+                        None => Stmt::IndexAssign {
+                            target,
+                            value,
+                            line,
+                        },
+                    });
+                }
+            }
+        }
     }
 
     // --- eng function-call statement: `name(arg1, arg2);` / `name();` ---
@@ -2967,8 +3064,10 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                         KW_THEN_NEG_ALT,
                         KW_WHILE_POS,
                         KW_WHILE_POS_ALT,
+                        KW_WHILE_POS_ALT2,
                         KW_WHILE_NEG,
                         KW_WHILE_NEG_ALT,
+                        KW_WHILE_NEG_ALT2,
                     ],
                 ) {
                     if is_while_terminator(&body[idx].tok) {
@@ -3690,28 +3789,35 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
     }
 
-    // --- Variable / collection declaration: name (သည်|မှာ) value ဖြစ်၏။ ---
-    if let Some(is_idx) = find_kw(&body, KW_IS) {
+    // --- Variable / collection declaration: <target> (သည်|မှာ) value ဖြစ်၏။ ---
+    // `<target>` is a name or an index, so `xs[0] သည် 5 ဖြစ်၏။` writes into
+    // the collection exactly like the eng `xs[0] = 5;` does.
+    if let Some(is_idx) = find_kw_top_level(&body, KW_IS) {
         if body.is_empty() {
             return Err(generic_syntax_err(line));
         }
-        let name = match &body[0].tok {
-            Tok::Ident(s) => s.clone(),
+        let assign_idx = find_kw_top_level(&body[..is_idx], KW_ASSIGN)
+            .or_else(|| find_kw_top_level(&body[..is_idx], KW_ASSIGN_COLLECTION));
+        let assign_idx = match assign_idx {
+            Some(i) if i > 0 => i,
+            _ => {
+                return Err(format!(
+                    "E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
+                    line
+                ))
+            }
+        };
+        let target = parse_expr(&body[..assign_idx], line)?;
+        let label = match &target {
+            Expr::Ident(name) => name.clone(),
+            Expr::Index(..) => "index".to_string(),
             _ => return Err(generic_syntax_err(line)),
         };
-        let assign_ok = body.len() >= 2
-            && (ident_eq(&body[1].tok, KW_ASSIGN) || ident_eq(&body[1].tok, KW_ASSIGN_COLLECTION));
-        if !assign_ok {
-            return Err(format!(
-                "E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
-                line
-            ));
-        }
-        let value_tokens = &body[2..is_idx];
+        let value_tokens = &body[assign_idx + 1..is_idx];
         if value_tokens.is_empty() {
             return Err(format!(
                 "E001 လိုင်း {} တွင် {} သည် တန်ဖိုးသတ်မှတ်ထားခြင်းမရှိပါ။",
-                line, name
+                line, label
             ));
         }
         if !end_present {
@@ -3721,7 +3827,35 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(generic_syntax_err(line));
         }
         let value = parse_expr(value_tokens, line)?;
-        return Ok(Stmt::VarDecl { name, value, line });
+        return Ok(match target {
+            Expr::Ident(name) => Stmt::VarDecl { name, value, line },
+            other => Stmt::IndexAssign {
+                target: other,
+                value,
+                line,
+            },
+        });
+    }
+
+    // --- Short index assignment: `xs[i] က <value>။` ---
+    // The short declaration's `က` spelling, for a collection element.
+    if matches!(body.first().map(|t| &t.tok), Some(Tok::Ident(_)))
+        && matches!(body.get(1).map(|t| &t.tok), Some(Tok::LBracket))
+    {
+        if let Ok(close) = find_close(&body, 1, line) {
+            if close + 2 < body.len() && ident_eq(&body[close + 1].tok, KW_DECL) {
+                if !end_present {
+                    return Err(missing_period_err(line));
+                }
+                let target = parse_expr(&body[..close + 1], line)?;
+                let value = parse_expr(&body[close + 2..], line)?;
+                return Ok(Stmt::IndexAssign {
+                    target,
+                    value,
+                    line,
+                });
+            }
+        }
     }
 
     // --- Short declaration: `name က value ။` -- the same statement as
@@ -3986,11 +4120,13 @@ fn parse_typecheck_name(tokens: &[Token]) -> Option<String> {
     None
 }
 
-/// Parse a single parenthesized condition group's inner tokens. Three forms,
+/// Parse a single parenthesized condition group's inner tokens. Four forms,
 /// checked in this order:
 ///   1. Type-check: "<expr> သည် <type>", e.g. "x သည် ကိန်း".
-///   2. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
-///   3. Bare boolean-valued expression, e.g. "flag" (test its truthiness).
+///   2. Myanmar equality: "<expr> သည် <value>" / "<expr> က <value>", both
+///      meaning `==` -- e.g. "(found က မှန်)" and "(tries သည် ၂၀)".
+///   3. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
+///   4. Bare boolean-valued expression, e.g. "flag" (test its truthiness).
 fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
     // eng library logical-not: an atom may be introduced by `!`, negating
     // its truth value. The rest of the atom parses normally.
@@ -3999,20 +4135,60 @@ fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
     if tokens.is_empty() {
         return Err(if_condition_syntax_err(line));
     }
+    // "<lhs> က <rhs>" -- the declaration particle read as "is", compared
+    // with `==`. A condition has no declaration to make, so this spelling is
+    // unambiguous here.
+    if let Some(eq_idx) = find_kw_top_level(tokens, KW_DECL) {
+        if eq_idx == 0 || eq_idx + 1 >= tokens.len() {
+            return Err(if_condition_syntax_err(line));
+        }
+        let lhs = parse_expr(&tokens[..eq_idx], line)?;
+        let rhs = parse_expr(&tokens[eq_idx + 1..], line)?;
+        return Ok(CondAtom {
+            lhs,
+            op: Some("==".to_string()),
+            rhs: Some(rhs),
+            negate,
+            type_check: None,
+            line,
+        });
+    }
     if let Some(is_idx) = find_kw_top_level(tokens, KW_ASSIGN) {
-        if is_idx == 0 {
+        if is_idx == 0 || is_idx + 1 >= tokens.len() {
             return Err(if_condition_syntax_err(line));
         }
         let lhs = parse_expr(&tokens[..is_idx], line)?;
         let type_tokens = &tokens[is_idx + 1..];
-        let type_name = parse_typecheck_name(type_tokens)
-            .ok_or_else(|| if_condition_syntax_err(line))?;
+        if let Some(type_name) = parse_typecheck_name(type_tokens) {
+            return Ok(CondAtom {
+                lhs,
+                op: None,
+                rhs: None,
+                negate,
+                type_check: Some(type_name),
+                line,
+            });
+        }
+        // `x သည် <type keyword>` names a type, but not one this parser
+        // knows how to check -- keep reporting the condition-syntax error
+        // instead of reading the type word as a variable.
+        if type_tokens.len() == 1 {
+            if let Tok::Ident(name) = &type_tokens[0].tok {
+                if TYPE_WORDS.contains(&name.as_str()) {
+                    return Err(if_condition_syntax_err(line));
+                }
+            }
+        }
+        // Otherwise the right side is a value, so this is the
+        // natural-language "<lhs> သည် <value>" equality, the same
+        // comparison as `==`.
+        let rhs = parse_expr(type_tokens, line)?;
         return Ok(CondAtom {
             lhs,
-            op: None,
-            rhs: None,
+            op: Some("==".to_string()),
+            rhs: Some(rhs),
             negate,
-            type_check: Some(type_name),
+            type_check: None,
             line,
         });
     }
@@ -4208,18 +4384,28 @@ fn parse_if_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
 
 /// Parse a while-loop. `inner` is everything between the leading "အခြေအနေ"
 /// (already stripped by the caller) and the trailing "ပြီး" (also already
-/// stripped): "(<condition...>) ဖြစ်နေစဉ်/မဖြစ်နေစဉ် <body...>".
+/// stripped): "(<condition...>) ဖြစ်နေစဉ်/ဖြစ်နေရင်/မဖြစ်နေစဉ်/မဖြစ်နေရင်
+/// <body...>".
 fn parse_while_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
     if inner.is_empty() {
         return Err(while_missing_condition_err(line));
     }
 
-    let (term_idx, which) = find_first_at_block_level(
+    let (term_idx, _) = find_first_at_block_level(
         inner,
-        &[KW_WHILE_POS, KW_WHILE_POS_ALT, KW_WHILE_NEG, KW_WHILE_NEG_ALT],
+        &[
+            KW_WHILE_POS,
+            KW_WHILE_POS_ALT,
+            KW_WHILE_POS_ALT2,
+            KW_WHILE_NEG,
+            KW_WHILE_NEG_ALT,
+            KW_WHILE_NEG_ALT2,
+        ],
     )
     .ok_or_else(|| while_missing_then_err(line))?;
-    let negate = which >= 2;
+    // The `ဖြစ်` spellings loop while the condition holds; the `မဖြစ်`
+    // spellings loop while it does not.
+    let negate = is_while_neg(&inner[term_idx].tok);
     let cond_tokens = &inner[..term_idx];
     let cond = parse_cond_chain(cond_tokens, line, true)?;
 
