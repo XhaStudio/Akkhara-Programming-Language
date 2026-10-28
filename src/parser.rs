@@ -336,7 +336,9 @@ pub enum Stmt {
     },
     /// eng infinite loop statement: `loop { ... }` -- runs until a `break`
     /// (or a `return` unwinds out of the enclosing function).
-    EngLoop { body: Vec<Stmt> },
+    EngLoop {
+        body: Vec<Stmt>,
+    },
     /// eng counted loop: `for (<init>; <cond>; <step>) { ... }`. `init` runs
     /// once before the loop, `cond` is tested before every iteration, and
     /// `step` runs at the end of each one -- so a `break` inside the body
@@ -796,17 +798,11 @@ fn unclosed_bracket_err(line: usize, open: char) -> String {
         '{' => '}',
         _ => '?',
     };
-    format!(
-        "E003 လိုင်း {} တွင် '{}' ကိုပိတ်ရန် '{}' မရှိပါ။",
-        line, open, close
-    )
+    format!("E003 လိုင်း {} တွင် '{}' ကိုပိတ်ရန် '{}' မရှိပါ။", line, open, close)
 }
 
 fn mismatched_bracket_err(line: usize) -> String {
-    format!(
-        "E004 လိုင်း {} တွင် ကွင်းများ ({{}}/[]/()) မှန်ကန်စွာ မတွဲထားပါ။",
-        line
-    )
+    format!("E004 လိုင်း {} တွင် ကွင်းများ ({{}}/[]/()) မှန်ကန်စွာ မတွဲထားပါ။", line)
 }
 
 fn dict_entry_err(line: usize) -> String {
@@ -922,10 +918,7 @@ fn func_missing_by_err(line: usize) -> String {
 }
 
 fn func_call_bad_name_err(line: usize) -> String {
-    format!(
-        "E021 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
-        line
-    )
+    format!("E021 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။", line)
 }
 
 fn func_call_missing_particle_err(line: usize) -> String {
@@ -943,10 +936,7 @@ fn func_call_missing_by_err(line: usize) -> String {
 }
 
 fn func_call_missing_arg_err(line: usize) -> String {
-    format!(
-        "E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။",
-        line
-    )
+    format!("E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။", line)
 }
 
 fn library_use_bad_list_err(line: usize) -> String {
@@ -1020,10 +1010,7 @@ fn func_call_assign_missing_var_err(line: usize) -> String {
 }
 
 fn func_call_assign_bad_name_err(line: usize) -> String {
-    format!(
-        "E069 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။",
-        line
-    )
+    format!("E069 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။", line)
 }
 
 fn func_call_assign_missing_particle_err(line: usize) -> String {
@@ -1291,6 +1278,42 @@ fn parse_lib_call_args(tokens: &[Token], line: usize) -> Result<Vec<Expr>, Strin
         args.push(parse_expr(p, line)?);
     }
     Ok(args)
+}
+
+/// Parse a Myanmar library call as an expression, for contexts such as
+/// `<lib> ၏ <fn>(args) ကို ပြပါ။`. Statement calls keep their existing
+/// dedicated forms and behavior.
+fn parse_myanmar_lib_call_expr(tokens: &[Token], line: usize) -> Result<Option<Expr>, String> {
+    if tokens.len() < 5
+        || !matches!(tokens[0].tok, Tok::Ident(_))
+        || !ident_eq(&tokens[1].tok, KW_OF)
+        || !matches!(tokens[2].tok, Tok::Ident(_))
+        || !matches!(tokens[3].tok, Tok::LParen)
+    {
+        return Ok(None);
+    }
+    let close = find_close(tokens, 3, line)?;
+    if close + 1 != tokens.len() {
+        return Ok(None);
+    }
+    let lib = match &tokens[0].tok {
+        Tok::Ident(name) => name.clone(),
+        _ => unreachable!(),
+    };
+    let fn_name = match &tokens[2].tok {
+        Tok::Ident(name) => name.clone(),
+        _ => unreachable!(),
+    };
+    let inner = &tokens[4..close];
+    let args = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inner, |token| matches!(token, Tok::Comma))
+            .into_iter()
+            .map(|part| parse_expr(part, line))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Some(Expr::LibCall(lib, fn_name, args, tokens[2].line)))
 }
 
 /// Build either the plain or the assigning library-call statement,
@@ -1707,14 +1730,13 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
                 let entries = split_top_level(inner, |t| matches!(t, Tok::End));
                 let mut pairs = Vec::with_capacity(entries.len());
                 for e in entries {
-                    let is_idx =
-                        find_kw_top_level(e, KW_IS).ok_or_else(|| dict_entry_err(line))?;
+                    let is_idx = find_kw_top_level(e, KW_IS).ok_or_else(|| dict_entry_err(line))?;
                     if is_idx + 1 != e.len() {
                         return Err(dict_entry_err(line));
                     }
                     let body_e = &e[..is_idx];
-                    let assign_idx = find_kw_top_level(body_e, KW_ASSIGN)
-                        .ok_or_else(|| dict_entry_err(line))?;
+                    let assign_idx =
+                        find_kw_top_level(body_e, KW_ASSIGN).ok_or_else(|| dict_entry_err(line))?;
                     let key = parse_expr(&body_e[..assign_idx], line)?;
                     let value = parse_expr(&body_e[assign_idx + 1..], line)?;
                     pairs.push((key, value));
@@ -2008,8 +2030,7 @@ fn parse_eng_call_arg(tokens: &[Token], fn_name: &str, line: usize) -> Result<Ex
     {
         return Err(eng_call_bad_form_err(line, fn_name));
     }
-    parse_expr(&tokens[1..tokens.len() - 1], line)
-        .map_err(|_| eng_call_bad_form_err(line, fn_name))
+    parse_expr(&tokens[1..tokens.len() - 1], line).map_err(|_| eng_call_bad_form_err(line, fn_name))
 }
 
 /// Parse an eng declaration (the trailing ';' has already been stripped by
@@ -2019,7 +2040,8 @@ fn parse_eng_call_arg(tokens: &[Token], fn_name: &str, line: usize) -> Result<Ex
 /// The declared type is enforced at runtime by the interpreter.
 fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
     // --- eng calls: print(<value>); / input(<prompt>); ---
-    if !body.is_empty() && matches!(&body[0].tok, Tok::Ident(s) if s == ENG_PRINT || s == ENG_INPUT) {
+    if !body.is_empty() && matches!(&body[0].tok, Tok::Ident(s) if s == ENG_PRINT || s == ENG_INPUT)
+    {
         let fn_name = match &body[0].tok {
             Tok::Ident(s) => s.clone(),
             _ => unreachable!(),
@@ -2028,7 +2050,10 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(if fn_name == ENG_PRINT {
             Stmt::EngPrint { value, line }
         } else {
-            Stmt::EngInput { prompt: value, line }
+            Stmt::EngInput {
+                prompt: value,
+                line,
+            }
         });
     }
     // --- eng break: `break;` / `break <value>;` ---
@@ -2058,8 +2083,7 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
         if value_tokens.is_empty() {
             return Ok(Stmt::EngReturn { value: None, line });
         }
-        let value = parse_expr(value_tokens, line)
-            .map_err(|_| eng_return_bad_form_err(line))?;
+        let value = parse_expr(value_tokens, line).map_err(|_| eng_return_bad_form_err(line))?;
         return Ok(Stmt::EngReturn {
             value: Some(value),
             line,
@@ -2164,8 +2188,7 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
         let mut args = Vec::new();
         if !inner.is_empty() {
             for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
-                let arg = parse_expr(part, line)
-                    .map_err(|_| eng_call_bad_form_err(line, &name))?;
+                let arg = parse_expr(part, line).map_err(|_| eng_call_bad_form_err(line, &name))?;
                 args.push(arg);
             }
         }
@@ -2288,7 +2311,10 @@ fn eng_for_in_form_err(line: usize) -> String {
 }
 
 fn eng_return_bad_form_err(line: usize) -> String {
-    format!("E109 line {}: expected `return;` or `return <value>;`", line)
+    format!(
+        "E109 line {}: expected `return;` or `return <value>;`",
+        line
+    )
 }
 
 /// The `{` that opens an iterator for loop's body. The body is the *last*
@@ -2310,9 +2336,10 @@ fn find_iter_body_lbrace(tokens: &[Token], line: usize) -> Option<usize> {
             _ => {}
         }
     }
-    candidates.into_iter().rev().find(|&i| {
-        matches!(find_close(tokens, i, line), Ok(close) if close + 1 == tokens.len())
-    })
+    candidates
+        .into_iter()
+        .rev()
+        .find(|&i| matches!(find_close(tokens, i, line), Ok(close) if close + 1 == tokens.len()))
 }
 
 /// Index of the first `{` at paren/bracket depth 0 -- the brace that opens a
@@ -2574,14 +2601,10 @@ fn parse_eng_use(body: &[Token], line: usize) -> Result<Stmt, String> {
                 _ => return Err(eng_use_bad_form_err(line)),
             },
             // <lib> as <alias>
-            [name, as_t, alias] if ident_eq(&as_t.tok, ENG_AS) => {
-                match (&name.tok, &alias.tok) {
-                    (Tok::Ident(lib), Tok::Ident(a)) => {
-                        libs.push((lib.clone(), Some(a.clone())))
-                    }
-                    _ => return Err(eng_use_bad_form_err(line)),
-                }
-            }
+            [name, as_t, alias] if ident_eq(&as_t.tok, ENG_AS) => match (&name.tok, &alias.tok) {
+                (Tok::Ident(lib), Tok::Ident(a)) => libs.push((lib.clone(), Some(a.clone()))),
+                _ => return Err(eng_use_bad_form_err(line)),
+            },
             _ => return Err(eng_use_bad_form_err(line)),
         }
     }
@@ -3112,10 +3135,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         }
         let ends_with_use = ident_eq(&body.last().unwrap().tok, KW_USE)
             || ident_eq(&body.last().unwrap().tok, KW_USE_ALT);
-        if ends_with_use
-            && body.len() >= 4
-            && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE)
-        {
+        if ends_with_use && body.len() >= 4 && ident_eq(&body[body.len() - 2].tok, KW_PARTICLE) {
             let names_tokens = &body[1..body.len() - 2];
             let mut libs: Vec<(String, Option<String>)> = Vec::new();
             // Split on top-level commas only, so a parenthesized alias list
@@ -3206,18 +3226,15 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         let (amount_tokens, unit) =
             if let Some(Tok::Ident(suf)) = value_tokens.last().map(|t| &t.tok) {
                 match suf.as_str() {
-                    "s" if value_tokens.len() >= 2 => (
-                        &value_tokens[..value_tokens.len() - 1],
-                        WaitUnit::Seconds,
-                    ),
-                    "m" if value_tokens.len() >= 2 => (
-                        &value_tokens[..value_tokens.len() - 1],
-                        WaitUnit::Minutes,
-                    ),
-                    "h" if value_tokens.len() >= 2 => (
-                        &value_tokens[..value_tokens.len() - 1],
-                        WaitUnit::Hours,
-                    ),
+                    "s" if value_tokens.len() >= 2 => {
+                        (&value_tokens[..value_tokens.len() - 1], WaitUnit::Seconds)
+                    }
+                    "m" if value_tokens.len() >= 2 => {
+                        (&value_tokens[..value_tokens.len() - 1], WaitUnit::Minutes)
+                    }
+                    "h" if value_tokens.len() >= 2 => {
+                        (&value_tokens[..value_tokens.len() - 1], WaitUnit::Hours)
+                    }
                     _ => (value_tokens, WaitUnit::Seconds),
                 }
             } else {
@@ -3227,11 +3244,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(generic_syntax_err(line));
         }
         let amount = parse_expr(amount_tokens, line)?;
-        return Ok(Stmt::Wait {
-            amount,
-            unit,
-            line,
-        });
+        return Ok(Stmt::Wait { amount, unit, line });
     }
 
     // --- Function alias: <fn name> အဖြစ် <alias1>, <alias2>, ... ---
@@ -3306,8 +3319,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(generic_syntax_err(line));
         }
         let after_of = &rest[2..];
-        let to_idx =
-            find_kw_top_level(after_of, KW_TO).ok_or_else(|| generic_syntax_err(line))?;
+        let to_idx = find_kw_top_level(after_of, KW_TO).ok_or_else(|| generic_syntax_err(line))?;
         let url_tokens = &after_of[..to_idx];
         let data_tokens = &after_of[to_idx + 1..];
         if url_tokens.is_empty() || data_tokens.is_empty() {
@@ -3325,6 +3337,21 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             data,
             line,
         });
+    }
+
+    // A library call can also be the value printed directly:
+    // `<lib> ၏ <fn>(args) ကို ပြပါ။`. Handle it before the statement-call
+    // parser below, which otherwise expects `လုပ်ပါ` after the particle.
+    if let Some(print_idx) = find_kw(&body, KW_PRINT).or_else(|| find_kw(&body, KW_PRINT_ALT)) {
+        if print_idx + 1 == body.len()
+            && print_idx > 0
+            && ident_eq(&body[print_idx - 1].tok, KW_PARTICLE)
+            && end_present
+        {
+            if let Some(value) = parse_myanmar_lib_call_expr(&body[..print_idx - 1], line)? {
+                return Ok(Stmt::Print { value, line });
+            }
+        }
     }
 
     // --- Library function call: <lib> ၏ <fn>(<arg>) ကို လုပ်ပါ။ and its
@@ -3407,21 +3434,17 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     //     assigning form `<var> အတွက် <fn name> ကို (<args>) ဖြင့် လုပ်ပါ။`
     //     works too. `<fn name>` may be a function, or a name bound to a
     //     first-class library function. ---
-    if end_present
-        && body.len() >= 4
-        && ident_eq(&body[body.len() - 1].tok, KW_CALL)
-    {
-        let (assign_name, rest) = if matches!(body[0].tok, Tok::Ident(_))
-            && ident_eq(&body[1].tok, KW_FOR)
-        {
-            let name = match &body[0].tok {
-                Tok::Ident(s) => s.clone(),
-                _ => unreachable!(),
+    if end_present && body.len() >= 4 && ident_eq(&body[body.len() - 1].tok, KW_CALL) {
+        let (assign_name, rest) =
+            if matches!(body[0].tok, Tok::Ident(_)) && ident_eq(&body[1].tok, KW_FOR) {
+                let name = match &body[0].tok {
+                    Tok::Ident(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                (Some(name), &body[2..])
+            } else {
+                (None, &body[..])
             };
-            (Some(name), &body[2..])
-        } else {
-            (None, &body[..])
-        };
         // `<fn name> ကို ( ... ) ဖြင့် လုပ်ပါ`
         if rest.len() >= 4
             && matches!(rest[0].tok, Tok::Ident(_))
@@ -3519,8 +3542,8 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             return Err(func_call_missing_particle_err(line));
         }
         let after_call = &body[call_idx + 1..];
-        let by_idx = find_kw_top_level(after_call, KW_BY)
-            .ok_or_else(|| func_call_missing_by_err(line))?;
+        let by_idx =
+            find_kw_top_level(after_call, KW_BY).ok_or_else(|| func_call_missing_by_err(line))?;
         let arg_tokens = &after_call[..by_idx];
         let args = parse_call_args(arg_tokens, line)?;
         if !end_present {
@@ -3621,7 +3644,8 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 _ => return Err(generic_syntax_err(line)),
             };
             let rest = &body[for_idx + 1..];
-            let inp_idx_in_rest = find_kw(rest, KW_INPUT).ok_or_else(|| generic_syntax_err(line))?;
+            let inp_idx_in_rest =
+                find_kw(rest, KW_INPUT).ok_or_else(|| generic_syntax_err(line))?;
             let value = parse_particle_call(rest, inp_idx_in_rest, KW_INPUT, line)?;
             if !end_present {
                 return Err(missing_period_err(line));
@@ -3684,7 +3708,11 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         if !amount_is_num && !amount_is_neg_num {
             return Err(math_missing_value_err(line, &fname));
         }
-        let amount_start = if amount_is_neg_num { fn_idx - 2 } else { fn_idx - 1 };
+        let amount_start = if amount_is_neg_num {
+            fn_idx - 2
+        } else {
+            fn_idx - 1
+        };
         let (amount, _) = parse_term_at(&body, amount_start, line)?;
 
         if amount_start == 0 {
@@ -3793,7 +3821,12 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 };
                 let min = parse_expr(&body[3..a_idx], line)?;
                 let max = parse_expr(&body[a_idx + 1..b_idx], line)?;
-                return Ok(Stmt::RandomDecl { name, min, max, line });
+                return Ok(Stmt::RandomDecl {
+                    name,
+                    min,
+                    max,
+                    line,
+                });
             }
             _ => return Err(generic_syntax_err(line)),
         }
@@ -3810,12 +3843,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             .or_else(|| find_kw_top_level(&body[..is_idx], KW_ASSIGN_COLLECTION));
         let assign_idx = match assign_idx {
             Some(i) if i > 0 => i,
-            _ => {
-                return Err(format!(
-                    "E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။",
-                    line
-                ))
-            }
+            _ => return Err(format!("E001 လိုင်း {} တွင် တန်ဖိုးသတ်မှတ်ရာမှာ 'သည်' လိုအပ်ပါသည်။", line)),
         };
         let target = parse_expr(&body[..assign_idx], line)?;
         let label = match &target {
@@ -3870,10 +3898,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
 
     // --- Short declaration: `name က value ။` -- the same statement as
     //     `name သည် value ဖြစ်၏။`, with the `ဖြစ်၏` left out. ---
-    if body.len() >= 3
-        && matches!(body[0].tok, Tok::Ident(_))
-        && ident_eq(&body[1].tok, KW_DECL)
-    {
+    if body.len() >= 3 && matches!(body[0].tok, Tok::Ident(_)) && ident_eq(&body[1].tok, KW_DECL) {
         if !end_present {
             return Err(missing_period_err(line));
         }
@@ -3956,8 +3981,7 @@ fn parse_for_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(generic_syntax_err(line));
     }
 
-    let htm_idx =
-        find_kw_top_level(inner, KW_LOOP_FROM).ok_or_else(|| generic_syntax_err(line))?;
+    let htm_idx = find_kw_top_level(inner, KW_LOOP_FROM).ok_or_else(|| generic_syntax_err(line))?;
     let source_tokens = &inner[2..htm_idx];
     if source_tokens.is_empty() {
         return Err(generic_syntax_err(line));
@@ -4301,7 +4325,11 @@ fn parse_cond_chain(tokens: &[Token], line: usize, is_while: bool) -> Result<Con
             if pending_op.is_some() || atoms.is_empty() {
                 return Err(syntax_err(line));
             }
-            pending_op = Some(if is_and { LogicalOp::And } else { LogicalOp::Or });
+            pending_op = Some(if is_and {
+                LogicalOp::And
+            } else {
+                LogicalOp::Or
+            });
         } else {
             if !atoms.is_empty() && pending_op.is_none() {
                 return Err(syntax_err(line));
@@ -4576,9 +4604,9 @@ fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
             }
         }
         let term_idx = close + 1;
-        let terminated = rest.get(term_idx).is_some_and(|t| {
-            ident_eq(&t.tok, KW_ASSIGN) || matches!(t.tok, Tok::End)
-        });
+        let terminated = rest
+            .get(term_idx)
+            .is_some_and(|t| ident_eq(&t.tok, KW_ASSIGN) || matches!(t.tok, Tok::End));
         if !terminated {
             return Err(class_missing_period_err(line));
         }
