@@ -169,7 +169,9 @@ impl LibraryLoader {
     /// akk binary. A `name` that already ends in `.akk` is used as-is.
     /// Returns `None` when no such script exists.
     pub fn find_script_source(&self, name: &str) -> Option<String> {
-        let path = self.dependency_path(name).or_else(|| self.script_path(name))?;
+        let path = self
+            .dependency_path(name)
+            .or_else(|| self.script_path(name))?;
         fs::read_to_string(path).ok()
     }
 
@@ -274,7 +276,9 @@ mod tests {
         assert!(src.contains("from_program"), "{}", src);
 
         // The `.akk` spelling names the same file.
-        let named = loader.find_source("Tools.akk").expect("script by file name");
+        let named = loader
+            .find_source("Tools.akk")
+            .expect("script by file name");
         assert_eq!(named.0, path);
 
         // Without the program folder, the libraries folder answers instead.
