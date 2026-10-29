@@ -237,44 +237,68 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         }
 
         if c == '[' {
-            tokens.push(Token { tok: Tok::LBracket, line });
+            tokens.push(Token {
+                tok: Tok::LBracket,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == ']' {
-            tokens.push(Token { tok: Tok::RBracket, line });
+            tokens.push(Token {
+                tok: Tok::RBracket,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == '(' {
-            tokens.push(Token { tok: Tok::LParen, line });
+            tokens.push(Token {
+                tok: Tok::LParen,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == ')' {
-            tokens.push(Token { tok: Tok::RParen, line });
+            tokens.push(Token {
+                tok: Tok::RParen,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == '{' {
-            tokens.push(Token { tok: Tok::LBrace, line });
+            tokens.push(Token {
+                tok: Tok::LBrace,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == '}' {
-            tokens.push(Token { tok: Tok::RBrace, line });
+            tokens.push(Token {
+                tok: Tok::RBrace,
+                line,
+            });
             i += 1;
             continue;
         }
         if c == ',' {
-            tokens.push(Token { tok: Tok::Comma, line });
+            tokens.push(Token {
+                tok: Tok::Comma,
+                line,
+            });
             i += 1;
             continue;
         }
 
         if c == '&' && i + 1 < n && chars[i + 1] == '&' {
             // eng library logical-and: `if (a > 0 && b > 0) { ... }`
-            tokens.push(Token { tok: Tok::And, line });
+            tokens.push(Token {
+                tok: Tok::And,
+                line,
+            });
             i += 2;
             continue;
         }
@@ -288,7 +312,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
 
         if c == ':' {
             // eng library type annotation: `name :int = 5;`
-            tokens.push(Token { tok: Tok::Colon, line });
+            tokens.push(Token {
+                tok: Tok::Colon,
+                line,
+            });
             i += 1;
             continue;
         }
@@ -297,14 +324,20 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             // eng library library-call separator: `ကျပန်း.ကိန်း(1, 10);`
             // (a '.' between digits is consumed as part of a number literal
             // above, so only a "free" dot reaches here)
-            tokens.push(Token { tok: Tok::Dot, line });
+            tokens.push(Token {
+                tok: Tok::Dot,
+                line,
+            });
             i += 1;
             continue;
         }
 
         if c == ';' {
             // eng library statement terminator ( Myanmar uses '။' instead).
-            tokens.push(Token { tok: Tok::Semicolon, line });
+            tokens.push(Token {
+                tok: Tok::Semicolon,
+                line,
+            });
             i += 1;
             continue;
         }
@@ -338,7 +371,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 // (`name :int = 5;`). Myanmar syntax never uses a lone '='
                 // outside '==', so emitting it here can't affect existing
                 // programs; the parser only accepts it in eng declarations.
-                tokens.push(Token { tok: Tok::Assign, line });
+                tokens.push(Token {
+                    tok: Tok::Assign,
+                    line,
+                });
                 i += 1;
             }
             continue;
@@ -353,7 +389,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 i += 2;
             } else {
                 // eng library logical-not: `if (!flag) { ... }`.
-                tokens.push(Token { tok: Tok::Not, line });
+                tokens.push(Token {
+                    tok: Tok::Not,
+                    line,
+                });
                 i += 1;
             }
             continue;
@@ -372,7 +411,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 } else if cc == '.'
                     && i + 1 < n
                     && (chars[i + 1].is_ascii_digit()
-                    || myanmar_digit_to_ascii(chars[i + 1]).is_some())
+                        || myanmar_digit_to_ascii(chars[i + 1]).is_some())
                 {
                     s.push('.');
                     i += 1;
@@ -415,7 +454,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 line,
             });
             if end_tok {
-                tokens.push(Token { tok: Tok::End, line });
+                tokens.push(Token {
+                    tok: Tok::End,
+                    line,
+                });
             }
             continue;
         }
@@ -482,7 +524,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         }
 
         if end_tok {
-            tokens.push(Token { tok: Tok::End, line });
+            tokens.push(Token {
+                tok: Tok::End,
+                line,
+            });
         }
     }
 
