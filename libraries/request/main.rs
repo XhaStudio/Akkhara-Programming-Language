@@ -46,8 +46,8 @@ const REQUEST_TIMEOUT_SECS: u64 = 20;
 /// `tls_connector` -- it is never picked automatically, even with the
 /// feature enabled -- so we do that here once per request.
 fn agent() -> ureq::Agent {
-    let tls_connector = native_tls::TlsConnector::new()
-        .expect("failed to initialize the system TLS backend");
+    let tls_connector =
+        native_tls::TlsConnector::new().expect("failed to initialize the system TLS backend");
     ureq::AgentBuilder::new()
         .tls_connector(Arc::new(tls_connector))
         .timeout_connect(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -71,9 +71,7 @@ fn to_http_response(status: u16, resp: ureq::Response) -> HttpResponse {
 
 fn check_url(url: &str) -> Result<(), String> {
     if url.trim().is_empty() {
-        return Err(
-            "E079 request ၏ url တန်ဖိုးသည် ဗလာ ဖြစ်နေပါသည်။ URL တစ်ခု ပေးပါ။".to_string(),
-        );
+        return Err("E079 request ၏ url တန်ဖိုးသည် ဗလာ ဖြစ်နေပါသည်။ URL တစ်ခု ပေးပါ။".to_string());
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(format!(
