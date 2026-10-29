@@ -181,7 +181,11 @@ impl Collector {
     }
 
     fn warn(&mut self, line: usize, code: u16, message: String) {
-        self.out.push(Found { line, code, message });
+        self.out.push(Found {
+            line,
+            code,
+            message,
+        });
     }
 
     /// Record a read of `name`: the file reads it, and so does every function
@@ -242,7 +246,10 @@ impl Collector {
                 self.expr(value);
             }
             Stmt::RandomDecl {
-                name, min, max, line,
+                name,
+                min,
+                max,
+                line,
             } => {
                 self.write(name, *line);
                 self.expr(min);
@@ -352,7 +359,11 @@ impl Collector {
                 self.args(args);
             }
             Stmt::LibCallAssign {
-                name, lib, fn_name, args, line,
+                name,
+                lib,
+                fn_name,
+                args,
+                line,
             } => {
                 self.write(name, *line);
                 self.lib_uses.insert(lib.clone());
@@ -399,26 +410,33 @@ impl Collector {
             }
             Stmt::UseLibrary { libs, line } => {
                 for (lib, alias) in libs {
-                    self.imports
-                        .push((lib.clone(), alias.clone(), *line));
+                    self.imports.push((lib.clone(), alias.clone(), *line));
                 }
             }
             Stmt::Wait { amount, .. } => self.expr(amount),
             Stmt::HttpSend {
-                name, lib, url, data, line,
+                name,
+                lib,
+                url,
+                data,
+                line,
             } => {
                 self.write(name, *line);
                 self.lib_uses.insert(lib.clone());
                 self.expr(url);
                 self.expr(data);
             }
-            Stmt::EngDecl { name, value, line, .. } => {
+            Stmt::EngDecl {
+                name, value, line, ..
+            } => {
                 self.write(name, *line);
                 self.expr(value);
             }
             Stmt::EngPrint { value, .. } => self.expr(value),
             Stmt::EngInput { prompt, .. } => self.expr(prompt),
-            Stmt::EngInputAssign { name, prompt, line, .. } => {
+            Stmt::EngInputAssign {
+                name, prompt, line, ..
+            } => {
                 self.write(name, *line);
                 self.expr(prompt);
             }
@@ -434,7 +452,9 @@ impl Collector {
                 self.write(name, *line);
                 self.expr(value);
             }
-            Stmt::EngMathAssign { name, amount, line, .. } => {
+            Stmt::EngMathAssign {
+                name, amount, line, ..
+            } => {
                 self.write(name, *line);
                 self.expr(amount);
             }
@@ -457,7 +477,9 @@ impl Collector {
                 self.stmt(step);
                 self.block(body);
             }
-            Stmt::EngLoopAssign { name, body, line, .. } => {
+            Stmt::EngLoopAssign {
+                name, body, line, ..
+            } => {
                 self.write(name, *line);
                 self.block(body);
             }
@@ -467,10 +489,7 @@ impl Collector {
     fn for_source(&mut self, source: &ForSource) {
         match source {
             ForSource::Range {
-                start,
-                end,
-                step,
-                ..
+                start, end, step, ..
             } => {
                 if let Some(start) = start {
                     self.expr(start);
@@ -714,9 +733,7 @@ fn has_effect(e: &Expr) -> bool {
             items.iter().any(has_effect)
         }
         Expr::DictLit(pairs) => pairs.iter().any(|(k, v)| has_effect(k) || has_effect(v)),
-        Expr::Index(base, indices) => {
-            has_effect(base) || indices.iter().any(has_effect)
-        }
+        Expr::Index(base, indices) => has_effect(base) || indices.iter().any(has_effect),
         Expr::FieldAccess(base, _, _) => has_effect(base),
         _ => false,
     }
@@ -807,10 +824,7 @@ fn w002(line: usize, lib: &str) -> String {
 }
 
 fn w003(line: usize) -> String {
-    format!(
-        "W003 လိုင်း {} ၏ statement ကို ရောက်ရှိမည် မဟုတ်ပါ (dead code)။",
-        line
-    )
+    format!("W003 လိုင်း {} ၏ statement ကို ရောက်ရှိမည် မဟုတ်ပါ (dead code)။", line)
 }
 
 fn w004(line: usize, func: &str, param: &str) -> String {
