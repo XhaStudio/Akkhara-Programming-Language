@@ -229,10 +229,7 @@ pub fn split_query(query: &str) -> Vec<(String, String)> {
             Some((k, v)) => (k, v),
             None => (piece, ""),
         };
-        pairs.push((
-            decode_component(key, true),
-            decode_component(value, true),
-        ));
+        pairs.push((decode_component(key, true), decode_component(value, true)));
     }
     pairs
 }
@@ -269,24 +266,19 @@ fn read_request(stream: &TcpStream) -> Result<Request, (u16, String)> {
     let mut reader = BufReader::new(stream);
 
     let mut line = String::new();
-    let read = reader.read_line(&mut line).map_err(|e| {
-        (
-            400,
-            format!("could not read the request line: {}", e),
-        )
-    })?;
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|e| (400, format!("could not read the request line: {}", e)))?;
     if read == 0 {
-        return Err((400, "the connection closed before a request arrived".to_string()));
+        return Err((
+            400,
+            "the connection closed before a request arrived".to_string(),
+        ));
     }
     let mut parts = line.split_whitespace();
     let (method, target) = match (parts.next(), parts.next()) {
         (Some(m), Some(t)) => (m.to_string(), t.to_string()),
-        _ => {
-            return Err((
-                400,
-                format!("not an HTTP request line: {}", line.trim()),
-            ))
-        }
+        _ => return Err((400, format!("not an HTTP request line: {}", line.trim()))),
     };
     if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
         return Err((400, format!("not an HTTP method: {}", method)));
@@ -310,12 +302,10 @@ fn read_request(stream: &TcpStream) -> Result<Request, (u16, String)> {
         }
         if let Some((name, value)) = header.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().map_err(|_| {
-                    (
-                        400,
-                        format!("not a Content-Length: {}", value.trim()),
-                    )
-                })?;
+                content_length = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| (400, format!("not a Content-Length: {}", value.trim())))?;
             }
         }
         headers.push_str(header.trim_end());
