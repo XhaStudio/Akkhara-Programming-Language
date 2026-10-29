@@ -10,6 +10,14 @@ cargo build --release
 
 The binary is produced at `target/release/akk` (`akk.exe` on Windows).
 
+## Tests
+
+`cargo test` runs the CLI fixtures under `tests/fixtures/`, including Myanmar
+and `eng` syntax, control flow, recursion, classes, collections, and library
+calls. The `bug_*.akk` fixtures are an isolated baseline for the known
+pre-Phase-1 scoping, closure, and anonymous-function issues; their expected
+results will be updated when those behaviors are fixed.
+
 ## Run
 
 ```
@@ -69,7 +77,7 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 - Print: `<value> ကို ဖော်ပြပါ။` or `<value> ကို ပြပါ။`
 - Input (discard): `<prompt> ကို မေးပါ။`
 - Input (assign): `<name> အတွက် <prompt> ကို မေးပါ။`
-- Type conversion: `<value> ကို <type> သို့ ပြောင်းပါ။` (types: `ကိန်းပြည့်`, `ဒဿမကိန်း`, `စာသား`)
+- Type conversion: `စာ(<value>)`, `ကိန်းပြည့်(<value>)`, `ဒဿမကိန်း(<value>)`, `ဘူးလ်(<value>)` (or `str(...)`, `int(...)`, `float(...)`, `bool(...)` in `eng`)
 - Math assignment: `<var or value> ကို <amount> <fn>ပါ။` or `<var> အတွက် <amount> <fn>ပါ။`
   (fn: `တိုး` increase, `လျော့` reduce, `မြှောက်` multiply, `စား` divide — the `အတွက်` form defaults an undeclared variable to `0` before applying the operation)
 - Function call: `<fn> ကို လုပ်ပါ။` (no arguments),
