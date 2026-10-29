@@ -68,10 +68,7 @@ pub fn parse(text: &str) -> Result<Json, ParseError> {
     p.skip_ws();
     if p.at < bytes.len() {
         return Err(ParseError::new(
-            format!(
-                "unexpected {} after the value",
-                describe_byte(bytes[p.at])
-            ),
+            format!("unexpected {} after the value", describe_byte(bytes[p.at])),
             p.at,
         ));
     }
@@ -98,7 +95,10 @@ impl<'a> Parser<'a> {
 
     fn skip_ws(&mut self) {
         // JSON whitespace is exactly these four characters.
-        while matches!(self.peek(), Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')) {
+        while matches!(
+            self.peek(),
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+        ) {
             self.at += 1;
         }
     }
@@ -127,7 +127,10 @@ impl<'a> Parser<'a> {
         }
         self.skip_ws();
         match self.peek() {
-            None => Err(ParseError::new("the text ended where a value was expected", self.at)),
+            None => Err(ParseError::new(
+                "the text ended where a value was expected",
+                self.at,
+            )),
             Some(b'{') => self.object(depth),
             Some(b'[') => self.array(depth),
             Some(b'"') => Ok(Json::Str(self.string()?)),
@@ -285,10 +288,7 @@ impl<'a> Parser<'a> {
                     match std::str::from_utf8(&self.bytes[self.at..end]) {
                         Ok(s) => out.push_str(s),
                         Err(_) => {
-                            return Err(ParseError::new(
-                                "the text is not valid UTF-8",
-                                self.at,
-                            ))
+                            return Err(ParseError::new("the text is not valid UTF-8", self.at))
                         }
                     }
                     self.at = end;
@@ -311,8 +311,7 @@ impl<'a> Parser<'a> {
                 self.at += 2;
                 let second = self.hex4()?;
                 if (0xDC00..0xE000).contains(&second) {
-                    let combined =
-                        0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+                    let combined = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
                     return char::from_u32(combined)
                         .ok_or_else(|| ParseError::new("not a usable code point", save));
                 }
@@ -402,7 +401,9 @@ impl<'a> Parser<'a> {
             if self.peek() != Some(b'"') {
                 return Err(ParseError::new(
                     match self.peek() {
-                        Some(c) => format!("an object key must be a string, found {}", describe_byte(c)),
+                        Some(c) => {
+                            format!("an object key must be a string, found {}", describe_byte(c))
+                        }
                         None => "the object was not closed before the text ended".to_string(),
                     },
                     self.at,
