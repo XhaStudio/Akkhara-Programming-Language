@@ -410,7 +410,10 @@ fn pairs_to_dict(pairs: &[(String, String)]) -> Value {
     let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
     for (k, v) in pairs {
         let key = Value::Str(k.clone());
-        match out.iter_mut().find(|(existing, _)| value_eq(existing, &key)) {
+        match out
+            .iter_mut()
+            .find(|(existing, _)| value_eq(existing, &key))
+        {
             Some(slot) => slot.1 = Value::Str(v.clone()),
             None => out.push((key, Value::Str(v.clone()))),
         }
@@ -522,8 +525,18 @@ fn server_headers_of(fields: &[(String, Value)]) -> Vec<(String, String)> {
 /// else is its printed form.
 fn server_response_of(value: Option<Value>) -> (u16, String, String, Vec<(String, String)>) {
     match value {
-        None => (200, String::new(), SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
-        Some(Value::Str(body)) => (200, body, SERVER_DEFAULT_CONTENT_TYPE.to_string(), Vec::new()),
+        None => (
+            200,
+            String::new(),
+            SERVER_DEFAULT_CONTENT_TYPE.to_string(),
+            Vec::new(),
+        ),
+        Some(Value::Str(body)) => (
+            200,
+            body,
+            SERVER_DEFAULT_CONTENT_TYPE.to_string(),
+            Vec::new(),
+        ),
         Some(Value::Object(o)) if o.class == SERVER_RESPONSE_CLASS => {
             let status = server_field(&o.fields, SERVER_STATUS, SERVER_STATUS_MM)
                 .and_then(as_i64)
@@ -532,11 +545,15 @@ fn server_response_of(value: Option<Value>) -> (u16, String, String, Vec<(String
             let body = server_field(&o.fields, SERVER_BODY, SERVER_BODY_MM)
                 .map(display)
                 .unwrap_or_default();
-            let content_type =
-                server_field(&o.fields, SERVER_CONTENT_TYPE, SERVER_CONTENT_TYPE_MM)
-                    .map(display)
-                    .unwrap_or_else(|| SERVER_DEFAULT_CONTENT_TYPE.to_string());
-            (status as u16, body, content_type, server_headers_of(&o.fields))
+            let content_type = server_field(&o.fields, SERVER_CONTENT_TYPE, SERVER_CONTENT_TYPE_MM)
+                .map(display)
+                .unwrap_or_else(|| SERVER_DEFAULT_CONTENT_TYPE.to_string());
+            (
+                status as u16,
+                body,
+                content_type,
+                server_headers_of(&o.fields),
+            )
         }
         Some(other) => (
             200,
@@ -561,10 +578,7 @@ fn server_route_err(msg: &str, line: usize) -> String {
 }
 
 fn server_listen_err(msg: &str, line: usize) -> String {
-    format!(
-        "E131 လိုင်း {} တွင် server သည် port ကို ဖွင့်၍မရပါ - {}",
-        line, msg
-    )
+    format!("E131 လိုင်း {} တွင် server သည် port ကို ဖွင့်၍မရပါ - {}", line, msg)
 }
 
 /// A text argument of a server function: paths, methods, handler names and
@@ -652,9 +666,7 @@ fn json_tree_to_value(tree: crate::json_library::Json) -> Value {
         Json::Int(i) => Value::Int(i),
         Json::Float(f) => Value::Float(f),
         Json::Str(s) => Value::Str(s),
-        Json::Arr(items) => {
-            Value::List(items.into_iter().map(json_tree_to_value).collect())
-        }
+        Json::Arr(items) => Value::List(items.into_iter().map(json_tree_to_value).collect()),
         Json::Obj(members) => Value::Dict(
             members
                 .into_iter()
@@ -894,12 +906,15 @@ fn app_index(v: &Value, fn_name: &str, line: usize) -> Result<usize, String> {
         Value::Float(f) if f.fract() == 0.0 => Some(*f as i64),
         _ => None,
     };
-    index.filter(|i| *i >= 0).map(|i| i as usize).ok_or_else(|| {
-        format!(
-            "E090 လိုင်း {} တွင် \"App.{}\" ၏ row/column သည် 0 နှင့်အထက် ကိန်းပြည့် ဖြစ်ရပါသည်။",
-            line, fn_name
-        )
-    })
+    index
+        .filter(|i| *i >= 0)
+        .map(|i| i as usize)
+        .ok_or_else(|| {
+            format!(
+                "E090 လိုင်း {} တွင် \"App.{}\" ၏ row/column သည် 0 နှင့်အထက် ကိန်းပြည့် ဖြစ်ရပါသည်။",
+                line, fn_name
+            )
+        })
 }
 
 /// A value handed to `App.set`: numbers and booleans keep their type (a
@@ -988,7 +1003,13 @@ fn lib_fn_unknown_err(lib: &str, fn_name: &str, line: usize) -> String {
     )
 }
 
-fn lib_fn_argc(lib: &str, fn_name: &str, args: &[Expr], want: usize, line: usize) -> Result<(), String> {
+fn lib_fn_argc(
+    lib: &str,
+    fn_name: &str,
+    args: &[Expr],
+    want: usize,
+    line: usize,
+) -> Result<(), String> {
     if args.len() == want {
         Ok(())
     } else {
@@ -1175,7 +1196,10 @@ impl Env {
         let Some(&mark) = self.marks.last() else {
             return;
         };
-        if self.log[mark..].iter().any(|(logged, _)| logged.as_ref() == name) {
+        if self.log[mark..]
+            .iter()
+            .any(|(logged, _)| logged.as_ref() == name)
+        {
             return;
         }
         let previous = self.map.get(name).cloned();
@@ -1608,10 +1632,7 @@ impl Interpreter {
             // `break` is heading for the innermost loop): stop running
             // statements here -- the try/catch and library bodies use this
             // same entry point.
-            if self.return_signal.is_some()
-                || self.break_signal.is_some()
-                || self.continue_signal
-            {
+            if self.return_signal.is_some() || self.break_signal.is_some() || self.continue_signal {
                 break;
             }
             self.exec(stmt)?;
@@ -1626,10 +1647,7 @@ impl Interpreter {
     fn run_loop_body(&mut self, body: &[Stmt]) -> Result<LoopFlow, String> {
         for s in body {
             self.exec(s)?;
-            if self.return_signal.is_some()
-                || self.break_signal.is_some()
-                || self.continue_signal
-            {
+            if self.return_signal.is_some() || self.break_signal.is_some() || self.continue_signal {
                 break;
             }
         }
@@ -1651,10 +1669,7 @@ impl Interpreter {
         // enclosing function/loop consumes it -- this keeps `return` inside
         // if/while/for and try bodies from executing the statements that
         // follow it.
-        if self.return_signal.is_some()
-            || self.break_signal.is_some()
-            || self.continue_signal
-        {
+        if self.return_signal.is_some() || self.break_signal.is_some() || self.continue_signal {
             return Ok(());
         }
         match stmt {
@@ -1904,7 +1919,11 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::IndexAssign { target, value, line } => {
+            Stmt::IndexAssign {
+                target,
+                value,
+                line,
+            } => {
                 let v = self.eval(value, *line, None)?;
                 self.assign_index(target, v, *line)
             }
@@ -1959,10 +1978,7 @@ impl Interpreter {
                 self.exec_condition_loop(cond, false, body, Some(step), *line, "for loop")
             }
             Stmt::FuncDef {
-                name,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 self.functions
                     .insert(name.clone(), Rc::new((params.clone(), body.clone())));
@@ -2015,21 +2031,21 @@ impl Interpreter {
                     Some(self.construct_object(fn_name, args, *line)?)
                 } else {
                     match self.functions.get(fn_name).cloned() {
-                    // The function was already found, so its argument count
-                    // is checked and its body runs without a second lookup.
-                    Some(function) => self.invoke_looked_up(fn_name, &function, args, *line)?,
-                    None => {
-                        if is_eng_builtin(fn_name) {
-                            Some(self.call_builtin(fn_name, args, *line)?)
-                        } else {
-                            match self.env.get(fn_name).cloned() {
-                                Some(Value::Callable(kind)) => {
-                                    Some(self.invoke_callable(&kind, args, *line)?)
+                        // The function was already found, so its argument count
+                        // is checked and its body runs without a second lookup.
+                        Some(function) => self.invoke_looked_up(fn_name, &function, args, *line)?,
+                        None => {
+                            if is_eng_builtin(fn_name) {
+                                Some(self.call_builtin(fn_name, args, *line)?)
+                            } else {
+                                match self.env.get(fn_name).cloned() {
+                                    Some(Value::Callable(kind)) => {
+                                        Some(self.invoke_callable(&kind, args, *line)?)
+                                    }
+                                    _ => self.call_function(fn_name, args, *line)?,
                                 }
-                                _ => self.call_function(fn_name, args, *line)?,
                             }
                         }
-                    }
                     }
                 };
                 let value = result.ok_or_else(|| {
@@ -2208,7 +2224,12 @@ impl Interpreter {
                 }
                 Ok(())
             }
-            Stmt::RandomDecl { name, min, max, line } => {
+            Stmt::RandomDecl {
+                name,
+                min,
+                max,
+                line,
+            } => {
                 if !self.libraries.is_loaded("ကျပန်း") {
                     return Err(format!(
                         "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို သုံးမည်။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
@@ -2219,10 +2240,16 @@ impl Interpreter {
                 let max_v = self.eval(max, *line, None)?;
 
                 let min_i = as_i64(&min_v).ok_or_else(|| {
-                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အစသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
+                    format!(
+                        "E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အစသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+                        line
+                    )
                 })?;
                 let max_i = as_i64(&max_v).ok_or_else(|| {
-                    format!("E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အဆုံးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
+                    format!(
+                        "E065 လိုင်း {} တွင် ကျပန်းကိန်း အပိုင်းအခြား၏ အဆုံးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+                        line
+                    )
                 })?;
 
                 let val = crate::random_library::random_int(min_i, max_i)?;
@@ -2238,10 +2265,7 @@ impl Interpreter {
                 }
                 let v = self.eval(amount, *line, None)?;
                 let secs = as_f64(&v).ok_or_else(|| {
-                    format!(
-                        "E061 လိုင်း {} တွင် စောင့်ရန် အချိန်တန်ဖိုးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
-                        line
-                    )
+                    format!("E061 လိုင်း {} တွင် စောင့်ရန် အချိန်တန်ဖိုးသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။", line)
                 })?;
                 let unit = match unit {
                     WaitUnit::Seconds => crate::time_library::WaitUnit::Seconds,
@@ -2284,8 +2308,8 @@ impl Interpreter {
 
     /// Substitute "{VarName}" placeholders inside a string literal with the
     /// current value of that variable, e.g. "Hello!, {Name}".
-/// The self keyword inside a `{...}` placeholder: "{အတု <field>}".
-const SELF_PREFIX: &'static str = "အတု ";
+    /// The self keyword inside a `{...}` placeholder: "{အတု <field>}".
+    const SELF_PREFIX: &'static str = "အတု ";
 
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
         // The fast path is only for a string with nothing to look at: no
@@ -2375,32 +2399,32 @@ const SELF_PREFIX: &'static str = "အတု ";
         Ok(out)
     }
 
-/// Type-check for the "<var/val> သည် <type>" condition form.
-/// "ကိန်း" (num) and "ဒဿမကိန်း" (float) also accept numeric-looking strings,
-/// per spec: `"10" သည် ကိန်း` must be true.
-fn check_type(v: &Value, type_name: &str) -> bool {
-    match type_name {
-        "စာသား" => matches!(v, Value::Str(_)),
-        "ကိန်း" => match v {
-            Value::Int(_) | Value::Float(_) => true,
-            Value::Str(s) => {
-                let t = s.trim();
-                t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok()
-            }
+    /// Type-check for the "<var/val> သည် <type>" condition form.
+    /// "ကိန်း" (num) and "ဒဿမကိန်း" (float) also accept numeric-looking strings,
+    /// per spec: `"10" သည် ကိန်း` must be true.
+    fn check_type(v: &Value, type_name: &str) -> bool {
+        match type_name {
+            "စာသား" => matches!(v, Value::Str(_)),
+            "ကိန်း" => match v {
+                Value::Int(_) | Value::Float(_) => true,
+                Value::Str(s) => {
+                    let t = s.trim();
+                    t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok()
+                }
+                _ => false,
+            },
+            "ဒဿမကိန်း" => match v {
+                Value::Float(_) => true,
+                Value::Str(s) => {
+                    let t = s.trim();
+                    t.contains('.') && t.parse::<f64>().is_ok()
+                }
+                _ => false,
+            },
+            "မှန်/မှား" => matches!(v, Value::Bool(_)),
             _ => false,
-        },
-        "ဒဿမကိန်း" => match v {
-            Value::Float(_) => true,
-            Value::Str(s) => {
-                let t = s.trim();
-                t.contains('.') && t.parse::<f64>().is_ok()
-            }
-            _ => false,
-        },
-        "မှန်/မှား" => matches!(v, Value::Bool(_)),
-        _ => false,
+        }
     }
-}
 
     #[inline]
     fn eval_cond_atom(&mut self, atom: &CondAtom) -> Result<bool, String> {
@@ -2594,8 +2618,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     // the same unit `len` and `s[i]` use.
                     Value::Str(s) => {
                         for cluster in crate::text::clusters(&s) {
-                            self.env
-                                .assign(var_name, Value::Str(cluster.to_string()));
+                            self.env.assign(var_name, Value::Str(cluster.to_string()));
                             if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
                                 || self.return_signal.is_some()
                             {
@@ -2655,8 +2678,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         lib_fn_argc(lib, fn_name, args, 2, line)?;
                         let url_v = self.eval(&args[0], line, None)?;
                         let data_v = self.eval(&args[1], line, None)?;
-                        let resp = crate::request_library::post(&display(&url_v), &display(&data_v))
-                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
+                        let resp =
+                            crate::request_library::post(&display(&url_v), &display(&data_v))
+                                .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
                         Ok(Some(http_response_to_value(resp)))
                     }
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
@@ -2669,10 +2693,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         lib_fn_argc(lib, fn_name, args, 2, line)?;
                         let min_v = self.eval(&args[0], line, None)?;
                         let max_v = self.eval(&args[1], line, None)?;
-                        let min_i = as_i64(&min_v)
-                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        let max_i = as_i64(&max_v)
-                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let min_i =
+                            as_i64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_i =
+                            as_i64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
                         Ok(Some(Value::Int(crate::random_library::random_int(
                             min_i, max_i,
                         )?)))
@@ -2681,10 +2705,10 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         lib_fn_argc(lib, fn_name, args, 2, line)?;
                         let min_v = self.eval(&args[0], line, None)?;
                         let max_v = self.eval(&args[1], line, None)?;
-                        let min_f = as_f64(&min_v)
-                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        let max_f = as_f64(&max_v)
-                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let min_f =
+                            as_f64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_f =
+                            as_f64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
                         Ok(Some(Value::Float(crate::random_library::random_float(
                             min_f, max_f,
                         )?)))
@@ -2775,9 +2799,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
         match fn_name {
             "get" | "ရယူ" => self.register_server_route("GET", fn_name, args, line),
             "post" | "ပို့" => self.register_server_route("POST", fn_name, args, line),
-            "put" | "အစားထိုး" => self.register_server_route("PUT", fn_name, args, line),
+            "put" | "အစားထိုး" => {
+                self.register_server_route("PUT", fn_name, args, line)
+            }
             "delete" | "ဖျက်" => self.register_server_route("DELETE", fn_name, args, line),
-            "patch" | "ပြင်ဆင်" => self.register_server_route("PATCH", fn_name, args, line),
+            "patch" | "ပြင်ဆင်" => {
+                self.register_server_route("PATCH", fn_name, args, line)
+            }
             "route" | "လမ်းကြောင်း" => {
                 lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 3, line)?;
                 let method_v = self.eval(&args[0], line, None)?;
@@ -2796,9 +2824,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 lib_fn_argc_range(LIB_SERVER_NAME, fn_name, args, 2, 3, line)?;
                 let status_v = self.eval(&args[0], line, None)?;
                 let body_v = self.eval(&args[1], line, None)?;
-                let status = as_i64(&status_v).ok_or_else(|| {
-                    server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line)
-                })?;
+                let status = as_i64(&status_v)
+                    .ok_or_else(|| server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line))?;
                 if !(100..=599).contains(&status) {
                     return Err(server_arg_err(
                         fn_name,
@@ -2883,9 +2910,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "serve" | "ဆောင်ရွက်" => {
                 lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 1, line)?;
                 let port_v = self.eval(&args[0], line, None)?;
-                let port = as_i64(&port_v).ok_or_else(|| {
-                    server_arg_err(fn_name, "port ကို ကိန်းပြည့် (int) အဖြစ်", line)
-                })?;
+                let port = as_i64(&port_v)
+                    .ok_or_else(|| server_arg_err(fn_name, "port ကို ကိန်းပြည့် (int) အဖြစ်", line))?;
                 if !(1..=65535).contains(&port) {
                     return Err(server_arg_err(fn_name, "1 မှ 65535 အတွင်း port", line));
                 }
@@ -2988,10 +3014,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             .any(|r| r.method == method && r.shape == shape)
         {
             return Err(server_route_err(
-                &format!(
-                    "{} {} route ကို နှစ်ခါ မှတ်ထားပါသည် ({})။",
-                    method, path, shape
-                ),
+                &format!("{} {} route ကို နှစ်ခါ မှတ်ထားပါသည် ({})။", method, path, shape),
                 line,
             ));
         }
@@ -3011,7 +3034,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// A registered exact path beats a pattern that would also match it
     /// (`/users/me` before `/users/:id`), and patterns are tried in the order
     /// they were registered. `None` means no route took the request.
-    fn find_server_route(&self, method: &str, path: &str) -> Option<(usize, Vec<(String, String)>)> {
+    fn find_server_route(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<(usize, Vec<(String, String)>)> {
         for (i, route) in self.routes.iter().enumerate() {
             if route.method == method && route_is_literal(route) && route.path == path {
                 return Some((i, Vec::new()));
@@ -3038,8 +3065,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 methods.push(route.method.clone());
             }
         }
-        if methods.iter().any(|m| m == "GET") && !methods.iter().any(|m| m == SERVER_HEAD_METHOD)
-        {
+        if methods.iter().any(|m| m == "GET") && !methods.iter().any(|m| m == SERVER_HEAD_METHOD) {
             methods.push(SERVER_HEAD_METHOD.to_string());
         }
         methods.sort();
@@ -3070,13 +3096,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             // library's own status is the answer.
             if let Some((status, body)) = pending.problem.take() {
                 self.emit_line(&format!("bad request -> {}", status));
-                if let Err(e) = pending.respond(
-                    status,
-                    &body,
-                    SERVER_DEFAULT_CONTENT_TYPE,
-                    &[],
-                    false,
-                ) {
+                if let Err(e) =
+                    pending.respond(status, &body, SERVER_DEFAULT_CONTENT_TYPE, &[], false)
+                {
                     self.emit_line(&format!("could not answer: {}", e));
                 }
                 continue;
@@ -3142,14 +3164,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     }
                 }
             };
-            self.emit_line(&format!("{} {} -> {}", request.method, request.path, status));
-            if let Err(e) = pending.respond(
-                status,
-                &body,
-                &content_type,
-                &response_headers,
-                head_only,
-            ) {
+            self.emit_line(&format!(
+                "{} {} -> {}",
+                request.method, request.path, status
+            ));
+            if let Err(e) =
+                pending.respond(status, &body, &content_type, &response_headers, head_only)
+            {
                 self.emit_line(&format!("could not answer: {}", e));
             }
         }
@@ -3173,7 +3194,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 lib_fn_argc(LIB_JSON_NAME, fn_name, args, 1, line)?;
                 let text_v = self.eval(&args[0], line, None)?;
                 let text = server_text_arg(&text_v, fn_name, "JSON စာသား", line)?;
-                let tree = crate::json_library::parse(&text).map_err(|e| json_parse_err(e, line))?;
+                let tree =
+                    crate::json_library::parse(&text).map_err(|e| json_parse_err(e, line))?;
                 Ok(Some(json_tree_to_value(tree)))
             }
             "stringify" | "ရေးပါ" => {
@@ -3186,7 +3208,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 lib_fn_argc(LIB_JSON_NAME, fn_name, args, 1, line)?;
                 let v = self.eval(&args[0], line, None)?;
                 let tree = value_to_json_tree(&v).map_err(|_| json_form_err(&v, line))?;
-                Ok(Some(Value::Str(crate::json_library::write_pretty(&tree, 2))))
+                Ok(Some(Value::Str(crate::json_library::write_pretty(
+                    &tree, 2,
+                ))))
             }
             // `json.get(value, key, default)`: the lenient member read a
             // backend needs most -- a missing key, or a value that has no
@@ -3231,8 +3255,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "read" | "ဖတ်" => {
                 lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
                 let path = self.file_path_arg(&args[0], fn_name, line)?;
-                let text = crate::file_library::read(&path)
-                    .map_err(|e| file_read_err(&path, &e, line))?;
+                let text =
+                    crate::file_library::read(&path).map_err(|e| file_read_err(&path, &e, line))?;
                 Ok(Some(Value::Str(text)))
             }
             "lines" | "လိုင်းများ" => {
@@ -3268,8 +3292,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "list" | "စာရင်း" => {
                 lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
                 let path = self.file_path_arg(&args[0], fn_name, line)?;
-                let names = crate::file_library::list(&path)
-                    .map_err(|e| file_list_err(&path, &e, line))?;
+                let names =
+                    crate::file_library::list(&path).map_err(|e| file_list_err(&path, &e, line))?;
                 Ok(Some(Value::List(
                     names.into_iter().map(Value::Str).collect(),
                 )))
@@ -3277,15 +3301,14 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "size" | "အရွယ်" => {
                 lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
                 let path = self.file_path_arg(&args[0], fn_name, line)?;
-                let size = crate::file_library::size(&path)
-                    .map_err(|e| file_size_err(&path, &e, line))?;
+                let size =
+                    crate::file_library::size(&path).map_err(|e| file_size_err(&path, &e, line))?;
                 Ok(Some(Value::Int(size.min(i64::MAX as u64) as i64)))
             }
             "delete" | "ဖျက်" => {
                 lib_fn_argc(LIB_FILE_NAME, fn_name, args, 1, line)?;
                 let path = self.file_path_arg(&args[0], fn_name, line)?;
-                crate::file_library::delete(&path)
-                    .map_err(|e| file_delete_err(&path, &e, line))?;
+                crate::file_library::delete(&path).map_err(|e| file_delete_err(&path, &e, line))?;
                 Ok(None)
             }
             _ => Err(lib_fn_unknown_err(LIB_FILE_NAME, fn_name, line)),
@@ -3405,9 +3428,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "textarea" => {
                 app_argc(fn_name, count, 5, 5, line)?;
                 let win = handle(0)?;
-                let id =
-                    crate::app_library::textarea(win, num(1)?, num(2)?, num(3)?, num(4)?)
-                        .map_err(|e| app_err(e, line))?;
+                let id = crate::app_library::textarea(win, num(1)?, num(2)?, num(3)?, num(4)?)
+                    .map_err(|e| app_err(e, line))?;
                 Ok(Some(app_widget_handle(id, "textarea")))
             }
             "checkbox" => {
@@ -3429,15 +3451,9 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 app_argc(fn_name, count, 6, 6, line)?;
                 let win = handle(0)?;
                 let items = app_items(&vals[1], fn_name, line)?;
-                let id = crate::app_library::listbox(
-                    win,
-                    items,
-                    num(2)?,
-                    num(3)?,
-                    num(4)?,
-                    num(5)?,
-                )
-                .map_err(|e| app_err(e, line))?;
+                let id =
+                    crate::app_library::listbox(win, items, num(2)?, num(3)?, num(4)?, num(5)?)
+                        .map_err(|e| app_err(e, line))?;
                 Ok(Some(app_widget_handle(id, "listbox")))
             }
             "table" => {
@@ -3469,9 +3485,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "canvas" => {
                 app_argc(fn_name, count, 5, 5, line)?;
                 let win = handle(0)?;
-                let id =
-                    crate::app_library::canvas(win, num(1)?, num(2)?, num(3)?, num(4)?)
-                        .map_err(|e| app_err(e, line))?;
+                let id = crate::app_library::canvas(win, num(1)?, num(2)?, num(3)?, num(4)?)
+                    .map_err(|e| app_err(e, line))?;
                 Ok(Some(app_widget_handle(id, "canvas")))
             }
 
@@ -3494,8 +3509,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "items" => {
                 app_argc(fn_name, count, 1, 1, line)?;
                 let widget = handle(0)?;
-                let value =
-                    crate::app_library::items(widget).map_err(|e| app_err(e, line))?;
+                let value = crate::app_library::items(widget).map_err(|e| app_err(e, line))?;
                 Ok(Some(app_value_to(value)))
             }
             "set_items" => {
@@ -3512,8 +3526,8 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 let widget = handle(0)?;
                 let row = app_index(&vals[1], fn_name, line)?;
                 let column = app_index(&vals[2], fn_name, line)?;
-                let value = crate::app_library::cell(widget, row, column)
-                    .map_err(|e| app_err(e, line))?;
+                let value =
+                    crate::app_library::cell(widget, row, column).map_err(|e| app_err(e, line))?;
                 Ok(Some(app_value_to(value)))
             }
             "set_cell" => {
@@ -3595,8 +3609,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 app_argc(fn_name, count, 3, 3, line)?;
                 let widget = handle(0)?;
                 let name = app_func_name(&vals[1], fn_name, line)?;
-                crate::app_library::font(widget, &name, num(2)?)
-                    .map_err(|e| app_err(e, line))?;
+                crate::app_library::font(widget, &name, num(2)?).map_err(|e| app_err(e, line))?;
                 Ok(None)
             }
             "show" | "hide" | "enable" | "disable" => {
@@ -3651,8 +3664,15 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             "rect" => {
                 app_argc(fn_name, count, 6, 6, line)?;
                 let cv = handle(0)?;
-                crate::app_library::rect(cv, num(1)?, num(2)?, num(3)?, num(4)?, &display(&vals[5]))
-                    .map_err(|e| app_err(e, line))?;
+                crate::app_library::rect(
+                    cv,
+                    num(1)?,
+                    num(2)?,
+                    num(3)?,
+                    num(4)?,
+                    &display(&vals[5]),
+                )
+                .map_err(|e| app_err(e, line))?;
                 Ok(None)
             }
             "circle" => {
@@ -3757,8 +3777,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 line, name
             ));
         }
-        let before: std::collections::HashSet<String> =
-            self.functions.keys().cloned().collect();
+        let before: std::collections::HashSet<String> = self.functions.keys().cloned().collect();
         let result = (|| -> Result<(), String> {
             let tokens = crate::lexer::lex(src).map_err(|e| {
                 format!(
@@ -3958,8 +3977,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     if let Some(function) = self.functions.get(class_name).cloned() {
                         let result =
                             self.invoke_looked_up(class_name, &function, arg_exprs, *new_line)?;
-                        return result
-                            .ok_or_else(|| eng_no_return_err(class_name, *new_line));
+                        return result.ok_or_else(|| eng_no_return_err(class_name, *new_line));
                     }
                     if is_eng_builtin(class_name) {
                         return self.call_builtin(class_name, arg_exprs, *new_line);
@@ -4040,12 +4058,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
     /// reported before any argument is evaluated, and so a caller that
     /// already holds evaluated values (the `server` library's handler call)
     /// can still check both conditions first.
-    fn lookup_function(
-        &self,
-        name: &str,
-        argc: usize,
-        line: usize,
-    ) -> Result<Rc<FnDef>, String> {
+    fn lookup_function(&self, name: &str, argc: usize, line: usize) -> Result<Rc<FnDef>, String> {
         let function = self.find_function(name, line)?;
         self.check_arity(name, &function, argc, line)?;
         Ok(function)
@@ -4168,18 +4181,16 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                         }
                         continue;
                     }
-                    Stmt::ExprStmt { value, line: sline } => {
-                        match self.eval(value, *sline, None) {
-                            Ok(v) => {
-                                return_value = Some(v);
-                                continue;
-                            }
-                            Err(e) => {
-                                failure = Some(e);
-                                break;
-                            }
+                    Stmt::ExprStmt { value, line: sline } => match self.eval(value, *sline, None) {
+                        Ok(v) => {
+                            return_value = Some(v);
+                            continue;
                         }
-                    }
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    },
                     // A function ending in "<var> သည် <expr> ဖြစ်၏။" -- the
                     // idiomatic "ရလဒ် သည် ... ဖြစ်၏။" pattern -- also counts
                     // as an implicit return: the variable still gets
@@ -4728,11 +4739,13 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                     )));
                 }
                 match (&args[0], &args[1]) {
-                    (Value::Str(s), Value::Str(part)) => Ok(Value::Bool(if name == "starts_with" {
-                        s.starts_with(part.as_str())
-                    } else {
-                        s.ends_with(part.as_str())
-                    })),
+                    (Value::Str(s), Value::Str(part)) => {
+                        Ok(Value::Bool(if name == "starts_with" {
+                            s.starts_with(part.as_str())
+                        } else {
+                            s.ends_with(part.as_str())
+                        }))
+                    }
                     _ => Err(bad_arg(
                         "needs a string and the text to look for".to_string(),
                     )),
@@ -4940,7 +4953,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             }
             "pop" => {
                 if !extra.is_empty() {
-                    return Err(eng_builtin_err(line, name, "takes a list and no other arguments"));
+                    return Err(eng_builtin_err(
+                        line,
+                        name,
+                        "takes a list and no other arguments",
+                    ));
                 }
                 match items.pop() {
                     Some(v) => v,
@@ -4985,7 +5002,11 @@ fn check_type(v: &Value, type_name: &str) -> bool {
             }
             "sort" => {
                 if !extra.is_empty() {
-                    return Err(eng_builtin_err(line, name, "takes a list and no other arguments"));
+                    return Err(eng_builtin_err(
+                        line,
+                        name,
+                        "takes a list and no other arguments",
+                    ));
                 }
                 sort_items(&mut items, line, name)?;
                 Value::List(items.clone())
@@ -5068,10 +5089,7 @@ fn check_type(v: &Value, type_name: &str) -> bool {
                 return Err(eng_builtin_err(
                     line,
                     name,
-                    &format!(
-                        "needs a collection or string, got {}",
-                        type_name_mm(other)
-                    ),
+                    &format!("needs a collection or string, got {}", type_name_mm(other)),
                 ))
             }
         };
@@ -5187,10 +5205,7 @@ fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
     match v {
         Value::Int(i) => Ok(*i),
         Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
-        _ => Err(format!(
-            "E048 လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။",
-            line
-        )),
+        _ => Err(format!("E048 လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။", line)),
     }
 }
 
@@ -5227,10 +5242,7 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
                 )),
             }
         }
-        _ => Err(format!(
-            "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
-            line
-        )),
+        _ => Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line)),
     }
 }
 
@@ -5265,10 +5277,7 @@ fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Res
                 let slot = seq_slot(items.len(), row, line)?;
                 set_index(&mut items[slot], rest, value, line)
             }
-            [] => Err(format!(
-                "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
-                line
-            )),
+            [] => Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line)),
         },
         Value::Dict(pairs) => {
             if keys.len() != 1 {
@@ -5341,10 +5350,7 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
         // `မြန်မာ` is `မြ` rather than the consonant alone.
         Value::Str(s) => {
             if keys.len() != 1 {
-                return Err(format!(
-                    "E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။",
-                    line
-                ));
+                return Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line));
             }
             let idx = index_as_int(&keys[0], line)?;
             if idx < 0 {
@@ -5374,13 +5380,7 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
                 .iter()
                 .find(|(k, _)| value_eq(k, key))
                 .map(|(_, v)| v.clone())
-                .ok_or_else(|| {
-                    format!(
-                        "E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။",
-                        line,
-                        repr(key)
-                    )
-                })
+                .ok_or_else(|| format!("E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။", line, repr(key)))
         }
         other => Err(format!(
             "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
@@ -5555,10 +5555,7 @@ fn binary_op(
             }
             '%' => {
                 if *b == 0 {
-                    Err(format!(
-                        "E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
-                        line
-                    ))
+                    Err(format!("E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။", line))
                 } else {
                     Ok(Value::Int(a.rem_euclid(*b)))
                 }
@@ -5575,10 +5572,7 @@ fn binary_op(
             }
             '\\' => {
                 if *b == 0 {
-                    Err(format!(
-                        "E073 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                        line
-                    ))
+                    Err(format!("E073 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။", line))
                 } else {
                     Ok(Value::Int((*a as f64 / *b as f64).floor() as i64))
                 }
@@ -5606,10 +5600,7 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
         }
         '%' => {
             if b == 0.0 {
-                Err(format!(
-                    "E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
-                    line
-                ))
+                Err(format!("E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။", line))
             } else {
                 Ok(Value::Float(a.rem_euclid(b)))
             }
@@ -5617,10 +5608,7 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
         '^' => Ok(Value::Float(a.powf(b))),
         '\\' => {
             if b == 0.0 {
-                Err(format!(
-                    "E074 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။",
-                    line
-                ))
+                Err(format!("E074 လိုင်း {} တွင် သုညဖြင့် အပြည့်ကိန်းစား၍မရပါ။", line))
             } else {
                 Ok(Value::Float((a / b).floor()))
             }
@@ -5665,11 +5653,7 @@ fn eng_input_convert_err(line: usize, text: &str, type_name: &str) -> String {
 /// Coerce one line of console input to an eng-declared type. `str` keeps
 /// the raw text; `int`/`float` parse numbers; `bool` accepts true/false
 /// (any casing) plus the 1/0 spellings.
-fn coerce_eng_input(
-    text: &str,
-    type_name: &str,
-    line: usize,
-) -> Result<Value, String> {
+fn coerce_eng_input(text: &str, type_name: &str, line: usize) -> Result<Value, String> {
     match type_name {
         "str" => Ok(Value::Str(text.to_string())),
         "int" => text
