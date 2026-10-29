@@ -471,9 +471,7 @@ fn cmd_install_manifest() {
     let names: Vec<String> = manifest
         .dependencies
         .iter()
-        .filter(|dependency| {
-            !matches!(dependency.source, manifest::DependencySource::Path(_))
-        })
+        .filter(|dependency| !matches!(dependency.source, manifest::DependencySource::Path(_)))
         .map(|dependency| dependency.name.clone())
         .collect();
 
@@ -551,12 +549,9 @@ fn interpret(
         });
 
     let outcome = match run {
-        Ok(handle) => handle.join().map_err(|_| {
-            (
-                "akk: the interpreter thread panicked".to_string(),
-                101i32,
-            )
-        })?,
+        Ok(handle) => handle
+            .join()
+            .map_err(|_| ("akk: the interpreter thread panicked".to_string(), 101i32))?,
         Err(e) => {
             return Err((
                 format!("akk: could not start the interpreter thread - {}", e),
@@ -584,10 +579,12 @@ fn library_warnings(
         loader.add_dependency(name, path.clone());
     }
     warnings::check_program(stmts, &|name| {
-        loader.find_source(name).map(|(path, source)| warnings::Library {
-            file: path.display().to_string(),
-            source,
-        })
+        loader
+            .find_source(name)
+            .map(|(path, source)| warnings::Library {
+                file: path.display().to_string(),
+                source,
+            })
     })
 }
 
@@ -686,7 +683,14 @@ fn cmd_report(folder: &str, no_warn: bool) {
         } else {
             library_warnings(&stmts, &search_dirs, &[])
         };
-        let outcome = match interpret(stmts, libraries_dir(), search_dirs, Vec::new(), true, no_warn) {
+        let outcome = match interpret(
+            stmts,
+            libraries_dir(),
+            search_dirs,
+            Vec::new(),
+            true,
+            no_warn,
+        ) {
             Ok(outcome) => outcome,
             Err((message, _)) => {
                 println!("[ERROR] warning {}၊ error 1", found_warnings.len());
@@ -752,7 +756,13 @@ fn cmd_check() {
             api_url
         );
         Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &ps_cmd,
+            ])
             .output()
     };
 
@@ -768,7 +778,9 @@ fn cmd_check() {
         Ok(o) => o,
         Err(e) => {
             eprintln!("    [FAILED] could not check for updates: {}", e);
-            eprintln!("    Make sure curl (or PowerShell) is available and you have network access.");
+            eprintln!(
+                "    Make sure curl (or PowerShell) is available and you have network access."
+            );
             process::exit(1);
         }
     };
@@ -914,42 +926,51 @@ fn cmd_update(version: Option<&str>) {
     let version_owned = version.map(|s| s.to_string());
     let spinner_message = format!("Downloading akk {}...", label);
 
-    let outcome = ui::with_spinner(&spinner_message, move || -> std::io::Result<std::process::Output> {
-        #[cfg(target_os = "windows")]
-        {
-            let url = format!(
-                "https://raw.githubusercontent.com/{}/main/scripts/install.ps1",
-                REPO
-            );
-            let version_arg = version_owned.as_deref().unwrap_or("latest");
-            let ps_cmd = format!(
-                "$env:AKK_VERSION = '{}'; irm {} | iex",
-                version_arg, url
-            );
-            Command::new("powershell")
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
-                .output()
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let url = format!(
-                "https://raw.githubusercontent.com/{}/main/scripts/install.sh",
-                REPO
-            );
-            let shell_cmd = format!("curl -fsSL {} | sh", url);
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(&shell_cmd);
-            if let Some(v) = &version_owned {
-                cmd.env("AKK_VERSION", v);
+    let outcome = ui::with_spinner(
+        &spinner_message,
+        move || -> std::io::Result<std::process::Output> {
+            #[cfg(target_os = "windows")]
+            {
+                let url = format!(
+                    "https://raw.githubusercontent.com/{}/main/scripts/install.ps1",
+                    REPO
+                );
+                let version_arg = version_owned.as_deref().unwrap_or("latest");
+                let ps_cmd = format!("$env:AKK_VERSION = '{}'; irm {} | iex", version_arg, url);
+                Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        &ps_cmd,
+                    ])
+                    .output()
             }
-            cmd.output()
-        }
-    });
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let url = format!(
+                    "https://raw.githubusercontent.com/{}/main/scripts/install.sh",
+                    REPO
+                );
+                let shell_cmd = format!("curl -fsSL {} | sh", url);
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(&shell_cmd);
+                if let Some(v) = &version_owned {
+                    cmd.env("AKK_VERSION", v);
+                }
+                cmd.output()
+            }
+        },
+    );
 
     match outcome {
         Ok(output) if output.status.success() => {
-            println!("    [OK] Updated to {}. Run 'akk --version' to confirm.", label);
+            println!(
+                "    [OK] Updated to {}. Run 'akk --version' to confirm.",
+                label
+            );
         }
         Ok(output) => {
             eprintln!("    [FAILED] updater exited with status: {}", output.status);
@@ -961,7 +982,9 @@ fn cmd_update(version: Option<&str>) {
         }
         Err(e) => {
             eprintln!("    [FAILED] could not run the installer: {}", e);
-            eprintln!("    Make sure curl (or PowerShell) is available and you have network access.");
+            eprintln!(
+                "    Make sure curl (or PowerShell) is available and you have network access."
+            );
             process::exit(1);
         }
     }
@@ -971,7 +994,10 @@ fn cmd_update(version: Option<&str>) {
 /// the error message / process::exit happens on the main thread only after
 /// the spinner has finished cleaning up the terminal (cursor, line, etc.).
 enum InstallDownload {
-    Ok { files: Vec<(String, String)>, manifest: Option<String> },
+    Ok {
+        files: Vec<(String, String)>,
+        manifest: Option<String>,
+    },
     NotFound,
     NetworkError(String),
     ReadError(String),
@@ -1088,7 +1114,11 @@ fn cmd_install(name: &str) {
 
     let main_dir = dest_dir.join("main");
     if let Err(e) = fs::create_dir_all(&main_dir) {
-        eprintln!("    [FAILED] could not create {}: {}", main_dir.display(), e);
+        eprintln!(
+            "    [FAILED] could not create {}: {}",
+            main_dir.display(),
+            e
+        );
         process::exit(1);
     }
     for (file_name, body) in &files {
@@ -1189,7 +1219,11 @@ fn cmd_uninstall() {
     #[cfg(not(target_os = "windows"))]
     {
         if let Err(e) = fs::remove_file(&exe_path) {
-            eprintln!("    [FAILED] could not remove {}: {}", exe_path.display(), e);
+            eprintln!(
+                "    [FAILED] could not remove {}: {}",
+                exe_path.display(),
+                e
+            );
             process::exit(1);
         }
         println!("    [OK] Removed {}", exe_path.display());
