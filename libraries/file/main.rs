@@ -140,11 +140,7 @@ mod tests {
     #[test]
     fn list_is_sorted_and_delete_removes_a_file() {
         let dir = temp_dir("list");
-        write(
-            dir.join("b.txt").to_str().unwrap(),
-            "b",
-        )
-        .expect("write b");
+        write(dir.join("b.txt").to_str().unwrap(), "b").expect("write b");
         write(dir.join("a.txt").to_str().unwrap(), "a").expect("write a");
 
         let names = list(dir.to_str().unwrap()).expect("list");
