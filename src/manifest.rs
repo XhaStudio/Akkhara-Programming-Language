@@ -221,7 +221,14 @@ struct RawDependencyTable {
 
 /// The keys each table accepts. Anything else is a `W008` warning.
 const TOP_LEVEL_KEYS: &[&str] = &["package", "build", "run", "dependencies", "target"];
-const PACKAGE_KEYS: &[&str] = &["name", "version", "entry", "description", "authors", "license"];
+const PACKAGE_KEYS: &[&str] = &[
+    "name",
+    "version",
+    "entry",
+    "description",
+    "authors",
+    "license",
+];
 const BUILD_KEYS: &[&str] = &["mode", "output", "out_dir", "optimize", "bundle"];
 const BUNDLE_KEYS: &[&str] = &["include"];
 const RUN_KEYS: &[&str] = &["transcript", "warnings", "timing"];
@@ -245,15 +252,14 @@ pub fn discover(start: &Path) -> Option<PathBuf> {
 
 /// Load and validate the manifest at `path`.
 pub fn load(path: &Path) -> Result<Manifest, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("E146 akk.toml ကို ဖတ်၍မရပါ - {}", e))?;
+    let text = fs::read_to_string(path).map_err(|e| format!("E146 akk.toml ကို ဖတ်၍မရပါ - {}", e))?;
 
     // Parse once as a `toml::Value` so the key walk below can see every key
     // that was written, then once through serde for the values themselves.
-    let raw_value: toml::Value = toml::from_str(&text)
-        .map_err(|e| format!("E146 akk.toml ကို parse လုပ်၍မရပါ - {}", e))?;
-    let raw: RawManifest = toml::from_str(&text)
-        .map_err(|e| format!("E147 akk.toml ၏ တန်ဖိုး မမှန်ပါ - {}", e))?;
+    let raw_value: toml::Value =
+        toml::from_str(&text).map_err(|e| format!("E146 akk.toml ကို parse လုပ်၍မရပါ - {}", e))?;
+    let raw: RawManifest =
+        toml::from_str(&text).map_err(|e| format!("E147 akk.toml ၏ တန်ဖိုး မမှန်ပါ - {}", e))?;
 
     let root = path
         .parent()
@@ -299,11 +305,7 @@ fn parse_package(raw: Option<RawPackage>, root: &Path) -> Result<Package, String
 
     let entry = raw.entry.unwrap_or_else(|| "main.akk".to_string());
     if entry.trim().is_empty() {
-        return Err(invalid_value(
-            "[package]",
-            "entry",
-            "entry သည် အလွတ် မဖြစ်ရပါ",
-        ));
+        return Err(invalid_value("[package]", "entry", "entry သည် အလွတ် မဖြစ်ရပါ"));
     }
 
     Ok(Package {
@@ -442,7 +444,12 @@ fn unknown_keys(value: &toml::Value) -> Vec<String> {
     if let Some(target) = top.get("target").and_then(|v| v.as_table()) {
         warn_unknown(target, TARGET_KEYS, Some("[target]"), &mut warnings);
         if let Some(windows) = target.get("windows").and_then(|v| v.as_table()) {
-            warn_unknown(windows, WINDOWS_KEYS, Some("[target.windows]"), &mut warnings);
+            warn_unknown(
+                windows,
+                WINDOWS_KEYS,
+                Some("[target.windows]"),
+                &mut warnings,
+            );
         }
     }
     if let Some(dependencies) = top.get("dependencies").and_then(|v| v.as_table()) {
@@ -461,12 +468,7 @@ fn unknown_keys(value: &toml::Value) -> Vec<String> {
     warnings
 }
 
-fn warn_unknown(
-    table: &toml::Table,
-    known: &[&str],
-    section: Option<&str>,
-    out: &mut Vec<String>,
-) {
+fn warn_unknown(table: &toml::Table, known: &[&str], section: Option<&str>, out: &mut Vec<String>) {
     for key in table.keys() {
         if known.contains(&key.as_str()) {
             continue;
@@ -590,11 +592,7 @@ mod tests {
     use super::*;
 
     fn write_manifest(tag: &str, text: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "akk-manifest-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("akk-manifest-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         fs::write(dir.join(FILE_NAME), text).expect("manifest");
