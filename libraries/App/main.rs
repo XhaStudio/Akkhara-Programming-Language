@@ -143,10 +143,7 @@ fn err_bad_color(name: &str) -> String {
 /// lives here so every App error message is in one place.
 #[allow(dead_code)]
 fn err_want_text(fn_name: &str, want: &str) -> String {
-    format!(
-        "E126 \"App.{}\" ၏ argument သည် {} ဖြစ်ရပါသည်။",
-        fn_name, want
-    )
+    format!("E126 \"App.{}\" ၏ argument သည် {} ဖြစ်ရပါသည်။", fn_name, want)
 }
 
 /// Raised when a callback fires but no Akkhara function with that name
@@ -326,10 +323,32 @@ enum WidgetValue {
 /// One shape drawn on a canvas, in canvas-local coordinates.
 #[derive(Debug, Clone)]
 enum DrawOp {
-    Rect { x: f32, y: f32, w: f32, h: f32, color: Color },
-    Circle { x: f32, y: f32, r: f32, color: Color },
-    Line { x1: f32, y1: f32, x2: f32, y2: f32, color: Color },
-    Text { x: f32, y: f32, text: String, color: Color },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: Color,
+    },
+    Circle {
+        x: f32,
+        y: f32,
+        r: f32,
+        color: Color,
+    },
+    Line {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: Color,
+    },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        color: Color,
+    },
 }
 
 struct Widget {
@@ -401,7 +420,10 @@ impl Widget {
     /// The rect this widget occupies, given the top-left corner of the
     /// window's content area.
     fn rect(&self, origin: Pos2) -> Rect {
-        Rect::from_min_size(origin + Vec2::new(self.x, self.y), Vec2::new(self.w, self.h))
+        Rect::from_min_size(
+            origin + Vec2::new(self.x, self.y),
+            Vec2::new(self.w, self.h),
+        )
     }
 }
 
@@ -504,7 +526,11 @@ impl Model {
         if let Some(i) = self.windows.iter().position(|w| w.id == id) {
             return Ok(i);
         }
-        if self.windows.iter().any(|w| w.widgets.iter().any(|g| g.id == id)) {
+        if self
+            .windows
+            .iter()
+            .any(|w| w.widgets.iter().any(|g| g.id == id))
+        {
             return Err(err_not_a_handle(id, "window handle"));
         }
         Err(err_unknown_handle(id))
@@ -927,18 +953,14 @@ pub fn set_items(id: u64, value: AppValue) -> Result<(), String> {
             };
             if widget.kind == Kind::Choice && items.is_empty() {
                 return Err(
-                    "E122 \"choice\" widget အတွက် item တစ်ခုထက်မကပါသော list တစ်ခု လိုအပ်ပါသည်။"
-                        .to_string(),
+                    "E122 \"choice\" widget အတွက် item တစ်ခုထက်မကပါသော list တစ်ခု လိုအပ်ပါသည်။".to_string(),
                 );
             }
             // Keep the selection when the selected item is still there.
-            let selected_text = widget
-                .selected
-                .and_then(|i| widget.items.get(i))
-                .cloned();
+            let selected_text = widget.selected.and_then(|i| widget.items.get(i)).cloned();
             widget.items = items;
-            widget.selected = selected_text
-                .and_then(|text| widget.items.iter().position(|i| *i == text));
+            widget.selected =
+                selected_text.and_then(|text| widget.items.iter().position(|i| *i == text));
             Ok(())
         }
         Kind::Table => {
@@ -1102,12 +1124,9 @@ pub fn rect(id: u64, x: f32, y: f32, w: f32, h: f32, color: &str) -> Result<(), 
 pub fn circle(id: u64, x: f32, y: f32, r: f32, color: &str) -> Result<(), String> {
     let c = parse_color(color)?;
     let mut m = model();
-    m.canvas_mut(id)?.shapes.push(DrawOp::Circle {
-        x,
-        y,
-        r,
-        color: c,
-    });
+    m.canvas_mut(id)?
+        .shapes
+        .push(DrawOp::Circle { x, y, r, color: c });
     Ok(())
 }
 
@@ -1325,8 +1344,12 @@ fn myanmar_font_candidates() -> Vec<(String, PathBuf)> {
     {
         let dirs = [
             std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")),
-            std::env::var_os("LOCALAPPDATA")
-                .map(|w| PathBuf::from(w).join("Microsoft").join("Windows").join("Fonts")),
+            std::env::var_os("LOCALAPPDATA").map(|w| {
+                PathBuf::from(w)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts")
+            }),
         ];
         for dir in dirs.into_iter().flatten() {
             out.push(("Myanmar Text".to_string(), dir.join("mmrtext.ttf")));
@@ -1390,9 +1413,10 @@ fn install_fonts(ctx: &egui::Context) {
             continue;
         };
         let font_name = format!("akk-myanmar-{}", loaded.len());
-        definitions
-            .font_data
-            .insert(font_name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+        definitions.font_data.insert(
+            font_name.clone(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
 
         // Fallback for the default families: Latin text keeps the bundled
         // font, Myanmar text is picked up from this one. (Fallbacks apply
@@ -1453,9 +1477,14 @@ fn font_id(widget: &Widget) -> FontId {
 /// What the GUI wants the interpreter (or the backend) to be told about,
 /// collected while painting and acted on once the model lock is released.
 enum Action {
-    Callback { window: u64, func: String },
+    Callback {
+        window: u64,
+        func: String,
+    },
     /// Tell the waiting `App.run` that this window is gone.
-    ReportClosed { window: u64 },
+    ReportClosed {
+        window: u64,
+    },
 }
 
 struct GuiApp {
@@ -1547,7 +1576,8 @@ fn paint_window(ui: &mut egui::Ui, window_id: u64, actions: &mut Vec<Action>) {
     if m.windows[win_index].shown_title.as_deref() != Some(title.as_str()) {
         m.windows[win_index].shown_title = Some(title.clone());
         if m.session.as_ref().map(|s| s.root) == Some(window_id) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(title));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(title));
         } else {
             let viewport_id =
                 egui::ViewportId::from_hash_of(format!("akk-app-window-{}", window_id));
@@ -1602,9 +1632,7 @@ fn paint_window(ui: &mut egui::Ui, window_id: u64, actions: &mut Vec<Action>) {
         let pressed: Vec<String> = win
             .keys
             .iter()
-            .filter(|b| {
-                !typing || key_works_while_typing(b.key)
-            })
+            .filter(|b| !typing || key_works_while_typing(b.key))
             .filter(|b| ui.input(|i| i.key_pressed(b.key)))
             .map(|b| b.func.clone())
             .collect();
@@ -1638,10 +1666,7 @@ fn paint_widget(
     let rect = widget.rect(origin);
     let font = font_id(widget);
     let id = egui::Id::new(("akk-app-widget", widget.id));
-    let fg = widget
-        .fg
-        .map(Color::to_color32)
-        .unwrap_or(DEFAULT_TEXT);
+    let fg = widget.fg.map(Color::to_color32).unwrap_or(DEFAULT_TEXT);
     let fg = if widget.enabled { fg } else { DISABLED_TEXT };
 
     match widget.kind {
@@ -1681,10 +1706,7 @@ fn paint_widget(
         Kind::Input | Kind::Textarea => {
             let is_multiline = widget.kind == Kind::Textarea;
             let font_size = widget.font_size();
-            let bg = widget
-                .bg
-                .map(Color::to_color32)
-                .unwrap_or(DEFAULT_FIELD_BG);
+            let bg = widget.bg.map(Color::to_color32).unwrap_or(DEFAULT_FIELD_BG);
             let WidgetValue::Text(value) = &mut widget.value else {
                 return;
             };
@@ -1753,10 +1775,7 @@ fn paint_widget(
                 .and_then(|i| items.get(i).cloned())
                 .unwrap_or_default();
             let mut new_selected = selected;
-            let bg = widget
-                .bg
-                .map(Color::to_color32)
-                .unwrap_or(DEFAULT_FIELD_BG);
+            let bg = widget.bg.map(Color::to_color32).unwrap_or(DEFAULT_FIELD_BG);
             let combo_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), rect.height()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(combo_rect), |ui| {
                 ui.visuals_mut().widgets.inactive.bg_fill = bg;
@@ -1776,10 +1795,7 @@ fn paint_widget(
 
         Kind::Listbox => {
             let row_h = (widget.font_size() * 1.7).max(18.0);
-            let bg = widget
-                .bg
-                .map(Color::to_color32)
-                .unwrap_or(DEFAULT_FIELD_BG);
+            let bg = widget.bg.map(Color::to_color32).unwrap_or(DEFAULT_FIELD_BG);
             painter.rect_filled(rect, 3.0, bg);
             painter.rect_stroke(rect, 3.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
             let inner = rect.shrink(1.0);
@@ -1845,10 +1861,7 @@ fn paint_widget(
                 .len()
                 .max(rows.iter().map(|r| r.len()).max().unwrap_or(0))
                 .max(1);
-            let bg = widget
-                .bg
-                .map(Color::to_color32)
-                .unwrap_or(DEFAULT_FIELD_BG);
+            let bg = widget.bg.map(Color::to_color32).unwrap_or(DEFAULT_FIELD_BG);
             painter.rect_filled(rect, 3.0, bg);
             painter.rect_stroke(rect, 3.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
             let inner = rect.shrink(1.0);
@@ -1858,10 +1871,8 @@ fn paint_widget(
             } else {
                 row_h.min(inner.height())
             };
-            let body = Rect::from_min_max(
-                Pos2::new(inner.left(), inner.top() + header_h),
-                inner.max,
-            );
+            let body =
+                Rect::from_min_max(Pos2::new(inner.left(), inner.top() + header_h), inner.max);
             let clip = painter.with_clip_rect(inner);
 
             if header_h > 0.0 {
@@ -1973,8 +1984,7 @@ fn paint_widget(
                 if let Ok(loaded) = image::open(&widget.text) {
                     let rgba = loaded.to_rgba8();
                     let size = [rgba.width() as usize, rgba.height() as usize];
-                    let color_image =
-                        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                     widget.texture = Some(ui.ctx().load_texture(
                         format!("akk-app-image-{}", widget.id),
                         color_image,
@@ -2002,10 +2012,7 @@ fn paint_widget(
         }
 
         Kind::Canvas => {
-            let bg = widget
-                .bg
-                .map(Color::to_color32)
-                .unwrap_or(DEFAULT_FIELD_BG);
+            let bg = widget.bg.map(Color::to_color32).unwrap_or(DEFAULT_FIELD_BG);
             painter.rect_filled(rect, 0.0, bg);
             painter.rect_stroke(rect, 0.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
             let canvas_painter = painter.with_clip_rect(rect);
@@ -2013,10 +2020,7 @@ fn paint_widget(
             for shape in &widget.shapes {
                 match shape {
                     DrawOp::Rect { x, y, w, h, color } => {
-                        let r = Rect::from_min_size(
-                            origin + Vec2::new(*x, *y),
-                            Vec2::new(*w, *h),
-                        );
+                        let r = Rect::from_min_size(origin + Vec2::new(*x, *y), Vec2::new(*w, *h));
                         canvas_painter.rect_filled(r, 0.0, color.to_color32());
                     }
                     DrawOp::Circle { x, y, r, color } => {
@@ -2034,10 +2038,7 @@ fn paint_widget(
                         color,
                     } => {
                         canvas_painter.line_segment(
-                            [
-                                origin + Vec2::new(*x1, *y1),
-                                origin + Vec2::new(*x2, *y2),
-                            ],
+                            [origin + Vec2::new(*x1, *y1), origin + Vec2::new(*x2, *y2)],
                             Stroke::new(1.0, color.to_color32()),
                         );
                     }
@@ -2121,8 +2122,7 @@ fn gui_thread(root: u64, tx: Sender<GuiEvent>) {
         Ok(None) => None,
         Ok(Some(e)) => Some(e),
         Err(_) => Some(
-            "E123 GUI thread ရပ်တန့်သွားပါသည်။ (ဒီစနစ်တွင် window ကို အခြား thread မှ ဖွင့်၍မရပါ)"
-                .to_string(),
+            "E123 GUI thread ရပ်တန့်သွားပါသည်။ (ဒီစနစ်တွင် window ကို အခြား thread မှ ဖွင့်၍မရပါ)".to_string(),
         ),
     };
 
@@ -2231,7 +2231,10 @@ fn event_loop_hook(builder: &mut eframe::EventLoopBuilder<eframe::UserEvent>) {
 /// `App.run(window)` -- shows the window and blocks until it closes, calling
 /// `on_callback` (which the interpreter backs with a by-name function call)
 /// whenever a button is clicked, a key binding fires, or a timer is due.
-pub fn run(window: u64, on_callback: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+pub fn run(
+    window: u64,
+    on_callback: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
     // Start (or reuse) the GUI session, and make this window the one whose
     // callbacks are live.
     {
@@ -2268,16 +2271,18 @@ pub fn run(window: u64, on_callback: &mut dyn FnMut(&str) -> Result<(), String>)
         }
     }
 
-    let rx = events()
-        .take()
-        .unwrap_or_else(|| {
-            let (_tx, rx) = channel();
-            rx
-        });
+    let rx = events().take().unwrap_or_else(|| {
+        let (_tx, rx) = channel();
+        rx
+    });
     let mut failure: Option<String> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(GuiEvent::Callback { window: w, func, ack }) => {
+            Ok(GuiEvent::Callback {
+                window: w,
+                func,
+                ack,
+            }) => {
                 if w != window {
                     let _ = ack.send(true);
                     continue;
@@ -2306,11 +2311,7 @@ pub fn run(window: u64, on_callback: &mut dyn FnMut(&str) -> Result<(), String>)
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                let ended = model()
-                    .session
-                    .as_ref()
-                    .map(|s| s.ended)
-                    .unwrap_or(true);
+                let ended = model().session.as_ref().map(|s| s.ended).unwrap_or(true);
                 if ended {
                     break;
                 }
