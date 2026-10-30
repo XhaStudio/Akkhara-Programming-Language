@@ -52,6 +52,10 @@ pub enum Callable {
     /// (rather than a closure) keeps values `Clone`; `map(xs, double)` binds
     /// `double` to this variant.
     User(String),
+    /// An anonymous function: `fn(x) { x * 2 }`. It holds the same pair a
+    /// named definition does -- parameters and body -- plus the line it was
+    /// written on, which its error messages point at.
+    Lambda { def: FnDef, line: usize },
 }
 
 impl Callable {
@@ -59,6 +63,7 @@ impl Callable {
         match self {
             Callable::Library { lib, fn_name } => format!("{}.{}", lib, fn_name),
             Callable::User(name) => name.clone(),
+            Callable::Lambda { def, .. } => format!("fn({})", def.0.join(", ")),
         }
     }
 }
@@ -1340,8 +1345,9 @@ impl Env {
     }
 }
 
-/// A user function: its parameter names and its body.
-type FnDef = (Vec<String>, Vec<Stmt>);
+/// A user function: its parameter names, its body, and one default per
+/// parameter (`None` for a parameter the caller must supply).
+type FnDef = (Vec<String>, Vec<Stmt>, Vec<Option<Expr>>);
 /// Functions are stored behind an `Rc` so calling one bumps a refcount
 /// instead of deep-cloning its whole body (the body was cloned on every
 /// single call before, which is what made a call cost ~2us).
@@ -1782,6 +1788,66 @@ impl Interpreter {
                     .read_update(name, |current| arith(current, &amt, *op, *line, Some(name)));
                 result
             }
+            // `[a, b] = <list>;` -- one name per item, in order. The value
+            // is evaluated once, so a call on the right runs once.
+            Stmt::Destructure { names, value, line } => {
+                let v = self.eval(value, *line, None)?;
+                let items = match &v {
+                    Value::List(items) | Value::Tuple(items) => items.clone(),
+                    other => return Err(destructure_not_collection_err(*line, &type_name_mm(other))),
+                };
+                if items.len() != names.len() {
+                    return Err(destructure_count_err(*line, names.len(), items.len()));
+                }
+                for (name, item) in names.iter().zip(items.into_iter()) {
+                    if self.is_pinned(name) {
+                        return Err(eng_const_reassign_err(name, *line));
+                    }
+                    self.store(name, item);
+                }
+                Ok(())
+            }
+            // `switch (<value>) { case ... default ... }`: the first matching
+            // arm only. The arm body is a `break` target of its own, so a
+            // `break` in it stops the switch instead of an enclosing loop.
+            Stmt::Switch {
+                subject,
+                arms,
+                line,
+            } => {
+                let subject_value = self.eval(subject, *line, None)?;
+                let mut chosen: Option<usize> = None;
+                for (i, arm) in arms.iter().enumerate() {
+                    let Some(case) = &arm.case else { continue };
+                    let case_value = self.eval(case, arm.line, None)?;
+                    if value_eq(&subject_value, &case_value) {
+                        chosen = Some(i);
+                        break;
+                    }
+                }
+                let picked = chosen.or_else(|| arms.iter().position(|a| a.case.is_none()));
+                let Some(index) = picked else {
+                    return Ok(());
+                };
+                let outer_loop_depth = self.loop_depth;
+                self.loop_depth += 1;
+                let mut failure = None;
+                for s in &arms[index].body {
+                    if self.break_signal.is_some() || self.return_signal.is_some() {
+                        break;
+                    }
+                    if let Err(e) = self.exec(s) {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+                self.break_signal = None;
+                self.loop_depth = outer_loop_depth;
+                if let Some(e) = failure {
+                    return Err(e);
+                }
+                Ok(())
+            }
             Stmt::EngBreak { value, line } => {
                 if self.loop_depth == 0 {
                     return Err(eng_break_outside_loop_err(*line));
@@ -1978,10 +2044,16 @@ impl Interpreter {
                 self.exec_condition_loop(cond, false, body, Some(step), *line, "for loop")
             }
             Stmt::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                defaults,
+                body,
+                ..
             } => {
-                self.functions
-                    .insert(name.clone(), Rc::new((params.clone(), body.clone())));
+                self.functions.insert(
+                    name.clone(),
+                    Rc::new((params.clone(), body.clone(), defaults.clone())),
+                );
                 Ok(())
             }
             Stmt::FuncCall { name, args, line } => {
@@ -3857,6 +3929,34 @@ impl Interpreter {
                 let rv = self.eval(r, line, var_ctx)?;
                 Ok(Value::Bool(compare_values(&lv, &rv, op, *op_line)?))
             }
+            Expr::Logical(l, op, r, op_line) => {
+                let lv = self.eval(l, line, var_ctx)?;
+                let left = bool_operand(&lv, *op_line)?;
+                // Short-circuit: the right operand is only evaluated when
+                // the left one does not already decide the result.
+                match op {
+                    LogicalOp::And if !left => Ok(Value::Bool(false)),
+                    LogicalOp::Or if left => Ok(Value::Bool(true)),
+                    _ => {
+                        let rv = self.eval(r, line, var_ctx)?;
+                        Ok(Value::Bool(bool_operand(&rv, *op_line)?))
+                    }
+                }
+            }
+            // `<cond> ? <then> : <else>`: a condition, then only the branch
+            // it picks. The other branch is not evaluated at all.
+            Expr::Ternary(cond, then_expr, else_expr, op_line) => {
+                let c = self.eval(cond, line, var_ctx)?;
+                if bool_operand(&c, *op_line)? {
+                    self.eval(then_expr, line, var_ctx)
+                } else {
+                    self.eval(else_expr, line, var_ctx)
+                }
+            }
+            Expr::Not(inner, op_line) => {
+                let v = self.eval(inner, line, var_ctx)?;
+                Ok(Value::Bool(!bool_operand(&v, *op_line)?))
+            }
             Expr::NumLit(s) => {
                 if s.contains('.') {
                     s.parse::<f64>()
@@ -3934,6 +4034,13 @@ impl Interpreter {
                     .ok_or_else(|| eng_lib_no_value_err(lib, fn_name, *call_line))
             }
             Expr::LibFnRef(lib, fn_name, refline) => {
+                // A name that is a live variable is not a library: `<var>.<field>`
+                // reads a field off the variable's value, exactly like
+                // `<var> ၏ <field>`. Imports live in their own tables, never
+                // in the variable environment, so a variable always wins.
+                if let Some(value) = self.env.get(lib).cloned() {
+                    return field_of(&value, fn_name, *refline);
+                }
                 // `<lib>.<fn>` without a call is a first-class reference:
                 // its value binds the library function, so `TOOL = Tools.add;`
                 // then `TOOL(1, 100)` calls it. The library must be imported,
@@ -3968,6 +4075,15 @@ impl Interpreter {
                     fn_name: fn_name.clone(),
                 })))
             }
+            Expr::Lambda {
+                params,
+                defaults,
+                body,
+                line: l,
+            } => Ok(Value::Callable(Rc::new(Callable::Lambda {
+                def: (params.clone(), body.clone(), defaults.clone()),
+                line: *l,
+            }))),
             Expr::NewObj(class_name, arg_exprs, new_line) => {
                 // `name(args)` in an expression reaches here (the parser uses
                 // this node for any call-shaped `<name>(...)`): a user class
@@ -4012,24 +4128,7 @@ impl Interpreter {
             }
             Expr::FieldAccess(obj_expr, field, fline) => {
                 let ov = self.eval(obj_expr, line, var_ctx)?;
-                match &ov {
-                    Value::Object(o) => o
-                        .fields
-                        .iter()
-                        .find(|(k, _)| k == field)
-                        .map(|(_, v)| v.clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "E082 လိုင်း {} တွင် object ၌ \"{}\" ဆိုသော field မရှိပါ။",
-                                fline, field
-                            )
-                        }),
-                    other => Err(format!(
-                        "E083 လိုင်း {} တွင် {} အပေါ် \"၏\" ကို သုံး၍မရပါ (Object တစ်ခု ဖြစ်ရပါမည်)။",
-                        fline,
-                        type_name_mm(other)
-                    )),
-                }
+                field_of(&ov, field, *fline)
             }
         }
     }
@@ -4086,13 +4185,19 @@ impl Interpreter {
         argc: usize,
         line: usize,
     ) -> Result<(), String> {
-        if argc != function.0.len() {
+        let total = function.0.len();
+        // Trailing parameters may have defaults, so a call can supply fewer
+        // arguments -- but never fewer than the parameters without one.
+        let required = function.2.iter().filter(|d| d.is_none()).count();
+        if argc < required || argc > total {
+            let expected = if required == total {
+                format!("argument {} ခု", total)
+            } else {
+                format!("argument {} မှ {} ခု", required, total)
+            };
             return Err(format!(
-                "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
-                line,
-                name,
-                function.0.len(),
-                argc
+                "E033 လိုင်း {} တွင် \"{}\" function သည် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                line, name, expected, argc
             ));
         }
         Ok(())
@@ -4128,7 +4233,7 @@ impl Interpreter {
         mut arg_values: Vec<Value>,
         line: usize,
     ) -> Result<Option<Value>, String> {
-        let (params, body) = function;
+        let (params, body, defaults) = function;
         // The interpreter's own frames are what a deep recursion exhausts,
         // so the limit is checked here, before another frame is pushed. The
         // error is an ordinary Akkhara error (E135), so try/catch can handle
@@ -4153,9 +4258,40 @@ impl Interpreter {
         // Bind the parameters into the frame. They are dropped with it when
         // the frame is popped below, so no per-parameter save/restore is
         // needed.
-        for (p, v) in params.iter().zip(arg_values.drain(..)) {
-            self.env.bind_param(p, v);
+        let mut supplied = arg_values.drain(..);
+        for (i, p) in params.iter().enumerate() {
+            match supplied.next() {
+                Some(v) => self.env.bind_param(p, v),
+                // A parameter the call left off: evaluate its default now,
+                // in the new frame, so it sees the parameters before it
+                // (`fn f(a, b = a + 1)`). The arity check has already made
+                // sure every missing parameter has one.
+                None => match defaults.get(i).and_then(|d| d.as_ref()) {
+                    Some(default) => match self.eval(default, line, None) {
+                        Ok(v) => self.env.bind_param(p, v),
+                        Err(e) => {
+                            self.env.pop_frame();
+                            self.loop_depth = outer_loop_depth;
+                            return Err(e);
+                        }
+                    },
+                    None => {
+                        self.env.pop_frame();
+                        self.loop_depth = outer_loop_depth;
+                        return Err(format!(
+                            "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                            line,
+                            "?",
+                            params.len(),
+                            i
+                        ));
+                    }
+                },
+            }
         }
+        // The drain still borrows the buffer (its `Drop` impl runs), so end
+        // the borrow before the buffer is handed back below.
+        drop(supplied);
         let mut return_value: Option<Value> = None;
         let mut failure: Option<String> = None;
         self.call_depth += 1;
@@ -4455,6 +4591,18 @@ impl Interpreter {
                 self.invoke_looked_up(name, &function, args, line)?
                     .ok_or_else(|| eng_no_return_err(name, line))
             }
+            // A lambda takes the same argument list a named function does,
+            // evaluated in source order before its body runs.
+            Callable::Lambda { def, line: l } => {
+                let mut values = Vec::with_capacity(args.len());
+                for e in args {
+                    values.push(self.eval(e, *l, None)?);
+                }
+                let label = kind.label();
+                self.check_arity(&label, def, values.len(), line)?;
+                self.invoke_function(def, values, line)?
+                    .ok_or_else(|| eng_no_return_err(&label, line))
+            }
         }
     }
 
@@ -4472,9 +4620,9 @@ impl Interpreter {
         // The mutating list builtins write through their first argument,
         // which has to be a variable: a value is a copy, so `push(xs, 4)` can
         // only mean "append to the list `xs` holds". The higher-order ones
-        // take a *function name* rather than its value, which does not exist
-        // as a variable either -- so both groups are handled before the eager
-        // argument walk below, or their first argument would fail first.
+        // resolve their callback from the expression (a name, a library
+        // reference or a lambda) rather than from an evaluated value, so both
+        // groups are handled before the eager argument walk below.
         if is_mutating_builtin(name) {
             return self.call_mutating_builtin(name, arg_exprs, line);
         }
@@ -5142,8 +5290,8 @@ impl Interpreter {
     }
 
     /// Resolve a callback argument: a bare function name (`double`), a library
-    /// function reference (`Tools.add`), or a value already bound to a
-    /// callable. Akkhara has no lambdas, so a callback is a named function.
+    /// function reference (`Tools.add`), a lambda (`fn(x) { x * 2 }`), or a
+    /// value already bound to a callable.
     fn eval_callback(
         &mut self,
         expr: &Expr,
@@ -5168,9 +5316,11 @@ impl Interpreter {
         }
     }
 
-    /// Call a callback with already-evaluated arguments. Library functions
-    /// cannot be callbacks: their arguments are written as expressions and
-    /// the library dispatch takes those, not values.
+    /// Call a callback with already-evaluated arguments. A library function
+    /// (`map(xs, Tools.add)`) is called through its usual dispatch, which
+    /// takes expressions, so its values are bound to hidden names in a fresh
+    /// frame and passed as those -- the same call, with the arguments the
+    /// callback was handed.
     fn call_callback(
         &mut self,
         kind: &Callable,
@@ -5184,11 +5334,27 @@ impl Interpreter {
                 self.invoke_function(&function, args, line)?
                     .ok_or_else(|| eng_no_return_err(name, line))
             }
-            Callable::Library { fn_name, .. } => Err(eng_builtin_err(
-                line,
-                fn_name,
-                "is a library function; a callback must be a function the program defines with fn",
-            )),
+            Callable::Lambda { def, .. } => {
+                let label = kind.label();
+                self.check_arity(&label, def, args.len(), line)?;
+                self.invoke_function(def, args, line)?
+                    .ok_or_else(|| eng_no_return_err(&label, line))
+            }
+            Callable::Library { lib, fn_name } => {
+                // Names the lexer can never produce, so they cannot collide
+                // with a program variable; the frame drops them again even if
+                // the call fails or the library function recurses.
+                self.env.push_frame();
+                let mut exprs = Vec::with_capacity(args.len());
+                for (i, value) in args.into_iter().enumerate() {
+                    let name = format!("\u{0}callback:{fn_name}:{i}");
+                    self.env.insert(&name, value);
+                    exprs.push(Expr::Ident(name));
+                }
+                let result = self.eval_lib_call(lib, fn_name, &exprs, line);
+                self.env.pop_frame();
+                result?.ok_or_else(|| eng_lib_no_value_err(lib, fn_name, line))
+            }
         }
     }
 }
@@ -5427,6 +5593,45 @@ fn cmp_type_err(line: usize, t1: &str, t2: &str, op: &str) -> String {
     )
 }
 
+/// Read a field off a class object. `<obj> ၏ <field>` and `<obj>.<field>`
+/// are the same access; a missing field is E082 and a value that is not an
+/// object at all is E083.
+fn field_of(v: &Value, field: &str, line: usize) -> Result<Value, String> {
+    match v {
+        Value::Object(o) => o
+            .fields
+            .iter()
+            .find(|(k, _)| k == field)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| {
+                format!(
+                    "E082 လိုင်း {} တွင် object ၌ \"{}\" ဆိုသော field မရှိပါ။",
+                    line, field
+                )
+            }),
+        other => Err(format!(
+            "E083 လိုင်း {} တွင် {} အပေါ် \"၏\" / \".\" ဖြင့် field ဖတ်၍မရပါ (Object တစ်ခု ဖြစ်ရပါမည်)။",
+            line,
+            type_name_mm(other)
+        )),
+    }
+}
+
+/// One operand of `&&`, `||` or `!`. Only a real bool is accepted: numbers,
+/// strings and collections are not implicitly truthy, which is the same rule
+/// a bare condition value follows (see `eval_cond_atom`, E043).
+#[inline]
+fn bool_operand(v: &Value, line: usize) -> Result<bool, String> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        other => Err(format!(
+            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+            line,
+            type_name_mm(other)
+        )),
+    }
+}
+
 /// Evaluate one comparison ("<", ">", "==", "!=", "<=", ">=") between two
 /// already-evaluated values. Equality/inequality works for any pair of
 /// values (structural comparison); ordering comparisons require both sides
@@ -5637,6 +5842,23 @@ fn eng_const_reassign_err(name: &str, line: usize) -> String {
     format!(
         "E104 line {}: \"{}\" was declared with 'pin' and cannot be reassigned",
         line, name
+    )
+}
+
+/// A destructuring assignment was given something that isn't a list or
+/// tuple, so there are no items to hand out.
+fn destructure_not_collection_err(line: usize, got: &str) -> String {
+    format!(
+        "E154 line {}: destructuring needs a list or tuple to take items from, got {}",
+        line, got
+    )
+}
+
+/// A destructuring assignment whose names and items don't line up.
+fn destructure_count_err(line: usize, names: usize, items: usize) -> String {
+    format!(
+        "E155 line {}: destructuring lists {} name(s) but the value has {} item(s)",
+        line, names, items
     )
 }
 
