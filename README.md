@@ -13,10 +13,11 @@ The binary is produced at `target/release/akk` (`akk.exe` on Windows).
 ## Tests
 
 `cargo test` runs the CLI fixtures under `tests/fixtures/`, including Myanmar
-and `eng` syntax, control flow, recursion, classes, collections, and library
-calls. The `bug_*.akk` fixtures are an isolated baseline for the known
-pre-Phase-1 scoping, closure, and anonymous-function issues; their expected
-results will be updated when those behaviors are fixed.
+and `eng` syntax, control flow, recursion, classes, collections, library
+calls, lambdas, and the shorthand forms (ternary, `switch`, default
+parameters, destructuring). Each fixture is a `Case` in `tests/cli.rs` with
+the output it must produce, and `every_fixture_is_covered` fails when a
+fixture on disk has no entry there.
 
 ## Run
 
@@ -96,8 +97,13 @@ Restart PowerShell and `akk file.akk` works from anywhere.
   - Set: `{1, 2, 3}` (duplicates are dropped)
   - Dict: `{ "key" သည် value ဖြစ်၏။ ... }` (each entry is its own `key သည် value ဖြစ်၏။`, can span multiple lines)
   - Table: just a list of lists, e.g. `[["a","b"], ["c","d"]]`
-- Comments: `# ...`
+- Statements end at their terminator: `။` in the Myanmar spelling and `;` in
+  the eng one. A line break never ends a statement, so several statements may
+  share a line (`a = 1; b = 2;`) and one statement may span as many lines as
+  it needs.
+- Comments: `# ...` (to the end of the line)
 - Arithmetic: `+ - * /` (Myanmar names in errors: ပေါင်း၊ နှတ်၊ မြှောက်၊ စား), unary minus supported (`-1`, `value * -1`, `value ကို -1 မြှောက်ပါ။`)
+  - Precedence, tightest first: `**` (exponent) → `* / % \` → `+ -` → comparisons. Operators of the same tier group left to right, so `1 + 2 * 3` is `7` and `10 - 4 - 3` is `3`; parentheses override (`(1 + 2) * 3` is `9`).
 - Numbers: both Myanmar digits (၀-၉) and ASCII digits
 - Booleans: `True`/`False` and `မှန်`/`မှား`
 
@@ -174,6 +180,12 @@ Built-in libraries and the functions they expose:
 response အတွက် request ၏ get("https://api.example.com/data") ကို လုပ်ပါ။
 response ၏ အခြေအနေကုဒ် ကို ဖော်ပြပါ။
 ```
+
+A field of an object value can be read with `၏` or with `.` — `response ၏
+အခြေအနေကုဒ်` and `response.အခြေအနေကုဒ်` are the same read, and dot
+access chains (`p.inner.v`) and works on class objects too (`p.name`). A `.`
+after a name that is *not* a variable is still a library call, so
+`ကျပန်း.ကိန်း(1, 10)` keeps its meaning.
 
 #### App — windows, widgets and an event loop
 
@@ -330,7 +342,11 @@ An eng statement has to end with its `;`; leaving it off reports
 `E002 Line <line>: Its missing semicolon ";"`, whether the line ends with nothing at all or with a Myanmar `။`.
 
 Conditions compare with `== != < <= > >=` and combine with `&&`, `||` and `!`,
-e.g. `if (flag && !done) { ... }`.
+e.g. `if (flag && !done) { ... }`. The same operators work wherever a value
+is expected — `ok :bool = a > 1 && b < 2;`, `ok = !done;` — with `&&` binding
+tighter than `||` and short-circuit evaluation, so
+`0 < len(xs) && xs[0] > 0` is safe on an empty list. Both operands must be
+`မှန်/မှား`; anything else reports `E043`.
 
 Builtin helpers (core syntax — usable as statements or inside expressions):
 
@@ -343,6 +359,86 @@ Builtin helpers (core syntax — usable as statements or inside expressions):
 | `floor(x)` / `ceil(x)` / `round(x)` | number | integer |
 | `upper(s)` / `lower(s)` / `trim(s)` | string | new string |
 | `contains(hay, needle)` | string or collection, and a value | `True` / `False` |
+
+#### Anonymous functions (`fn(x) { ... }`)
+
+`fn(<params>) { <body> }` written where a value is expected is a function
+value — the same thing `fn <name>(...) { ... }` defines, without the name. It
+is core syntax, so the Myanmar spellings can use one too.
+
+```
+xs = [1, 2, 3, 4, 5];
+print(map(xs, fn(x) { x * 2 }));              # [2, 4, 6, 8, 10]
+print(filter(xs, fn(x) { x % 2 == 0 }));      # [2, 4]
+print(reduce(xs, fn(a, b) { a + b }, 0));     # 15
+
+# the callback can also be stored first, and it closes over its scope
+factor :int = 10;
+scale = fn(x) { x * factor };
+print(map(xs, scale));                        # [10, 20, 30, 40, 50]
+
+adder = fn(n) { fn(x) { x + n } };            # a lambda may return one
+add5 = adder(5);
+print(add5(10));                              # 15
+```
+
+- The body's last expression is its result; earlier statements run first, and
+  `return` works inside a body like it does in a named function.
+- A lambda takes as many arguments as its parameter list declares (a
+  mismatch is `E033`, worded like any other function call).
+- `map`, `filter` and `reduce` accept, in the callback position, a lambda, a
+  named function, a name bound to a function value, or a library function —
+  `map(xs, Tools.add)` is the same call as `fn(x) { Tools.add(x) }` (the
+  library has to be imported, and the function's own arity still applies;
+  one that returns nothing is `E117`).
+
+```
+xs သည် [1, 2, 3] ဖြစ်၏။
+ရလဒ် သည် map(xs, fn(x) { x * x }) ဖြစ်၏။
+ရလဒ် ကို ဖော်ပြပါ။
+```
+
+#### Ternary, switch, default parameters, destructuring
+
+```
+n = 7;
+print(n % 2 == 0 ? "even" : "odd");     # a value, not an if/else block
+
+fn greet(name, punct = "!") {            # trailing parameters may be omitted
+    return "Hi, " + name + punct;
+}
+print(greet("Su"));                       # Hi, Su!
+print(greet("Su", "?"));                  # Hi, Su?
+
+[a, b] = [1, 2];                          # one name per item, in order
+print(a + b);
+
+switch (n) {
+    case 1: print("one");
+    case 7:
+        print("seven");
+    default: print("other");              # only when no case matched
+}
+```
+
+- **Ternary** — `<cond> ? <then> : <else>`. `<cond>` must be `မှန်/မှား`
+  (`E043` otherwise), only the chosen branch is evaluated, it binds looser
+  than `||`, and it associates to the right
+  (`a ? b : c ? d : e` is `a ? b : (c ? d : e)`). A missing `:` is `E151`.
+- **switch** — `switch (<value>) { case <value>: <statements> default:
+  <statements> }`. Cases are tried in order and only the first match runs, so
+  there is no fall-through and no `break` is needed; `default` runs when none
+  matched, wherever it is written. `break` inside an arm stops the switch.
+  A malformed switch is `E153`.
+- **Default parameters** — `fn f(a, b = 1, c = b * 2)`. Defaults must be the
+  trailing parameters (a required one after a default is `E109`), a call may
+  supply any number of arguments from the required count up to the full list
+  (`E033` otherwise), and each default is evaluated in the call's own frame,
+  so it can read the parameters before it. Lambdas take them too:
+  `fn(x, times = 2) { x * times }`.
+- **Destructuring** — `[a, b] = <list or tuple>;` (also `(a, b) = ...`). The
+  value must have exactly one item per name (`E154` for a non-list, `E155`
+  for a count mismatch), and names already declared become assignments.
 
 ### eng — library calls
 
@@ -409,6 +505,17 @@ one, `E116` `break` outside a loop, `E117` library call used as a value but
 returned nothing, `E118` bad `use` import form.
 
 ### Known limitations
-- One statement per physical line (no multi-line statements).
-- Nested expressions (e.g. a conversion used directly inside a print's value) aren't supported — use a variable as an intermediate step.
-- Generic user-defined `function ... ကို လုပ်ပါ` calling isn't implemented (per spec, only noted for future reference).
+- There is no automatic terminator: every statement needs its `;` or `။`,
+  even when a line break makes the end obvious.
+- Default parameters are accepted on `fn` and lambda headers only; a Myanmar
+  `လုပ်ငန်း` definition and a class constructor take plain parameter names.
+- Destructuring takes a list or tuple of plain names: no nested patterns and
+  no dict/object destructuring.
+- `switch` is a statement, not a value. Where a value is needed, use a ternary
+  or an `if` that returns.
+- eng builtins (`abs`, `upper`, `max`, ...) are not values, so they cannot be
+  used as callbacks (`map(xs, abs)` is `E030`); library functions and lambdas
+  can.
+- `sort` takes a list and no comparator.
+- `App` callbacks (`button`, `on_key`, `every`) take the *name* of a function,
+  as text: `"on_go"`.
