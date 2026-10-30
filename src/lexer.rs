@@ -16,6 +16,7 @@ pub enum Tok {
     Or,            // || (eng library logical or)
     Not,           // !  (eng library logical not)
     Dot,           // .  (eng library library-call separator: `lib.fn(args);`)
+    Question,      // ?  (ternary condition: `<cond> ? <then> : <else>`)
     Bool(bool),    // true / false (eng library bool literals)
     Assign,        // =  (eng library declaration assignment)
     Colon,         // :  (eng library type annotation)
@@ -77,6 +78,7 @@ fn is_digit_char(c: char) -> bool {
 fn is_word_delim(c: char) -> bool {
     c.is_whitespace()
         || c == '"'
+        || c == '?'
         || c == '#'
         || c == '+'
         || c == '-'
@@ -310,8 +312,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
+        if c == '?' {
+            // eng library ternary: `<cond> ? <then> : <else>`
+            tokens.push(Token {
+                tok: Tok::Question,
+                line,
+            });
+            i += 1;
+            continue;
+        }
+
         if c == ':' {
-            // eng library type annotation: `name :int = 5;`
+            // eng library type annotation: `name :int = 5;`, and the ':' of
+            // a ternary (`<cond> ? <then> : <else>`)
             tokens.push(Token {
                 tok: Tok::Colon,
                 line,
