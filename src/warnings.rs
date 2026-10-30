@@ -245,6 +245,21 @@ impl Collector {
                 self.write(name, *line);
                 self.expr(value);
             }
+            Stmt::Destructure { names, value, line } => {
+                for name in names {
+                    self.write(name, *line);
+                }
+                self.expr(value);
+            }
+            Stmt::Switch { subject, arms, .. } => {
+                self.expr(subject);
+                for arm in arms {
+                    if let Some(case) = &arm.case {
+                        self.expr(case);
+                    }
+                    self.block(&arm.body);
+                }
+            }
             Stmt::RandomDecl {
                 name,
                 min,
@@ -314,6 +329,7 @@ impl Collector {
             Stmt::FuncDef {
                 name,
                 params,
+                defaults,
                 body,
                 line,
             } => {
@@ -321,6 +337,14 @@ impl Collector {
                 for p in params {
                     self.params.insert(p.clone());
                 }
+                // Default expressions run in the function's own frame --
+                // they may read the parameters before them -- so they are
+                // walked with a frame open.
+                self.frames.push(HashSet::new());
+                for default in defaults.iter().flatten() {
+                    self.expr(default);
+                }
+                self.frames.pop();
                 self.frames.push(HashSet::new());
                 // A function body ends with its value when its last statement
                 // is a bare expression -- see `block_with_tail`.
@@ -598,11 +622,16 @@ impl Collector {
             Expr::StrLit(s) => self.read_interpolated(s),
             Expr::NumLit(_) | Expr::Int(_) | Expr::Float(_) | Expr::BoolLit(_) | Expr::NullLit => {}
             Expr::Ident(name) => self.read(name),
-            Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) => {
+            Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) | Expr::Logical(a, _, b, _) => {
                 self.expr(a);
                 self.expr(b);
             }
-            Expr::Neg(a, _) => self.expr(a),
+            Expr::Neg(a, _) | Expr::Not(a, _) => self.expr(a),
+            Expr::Ternary(cond, then_expr, else_expr, _) => {
+                self.expr(cond);
+                self.expr(then_expr);
+                self.expr(else_expr);
+            }
             Expr::ListLit(items) | Expr::TupleLit(items) | Expr::SetLit(items) => {
                 for item in items {
                     self.expr(item);
@@ -620,6 +649,26 @@ impl Collector {
                     self.expr(index);
                 }
             }
+            Expr::Lambda {
+                params,
+                defaults,
+                body,
+                ..
+            } => {
+                // A lambda body is a function body without a name: its
+                // parameters are parameters (so W001 never blames them) and
+                // it opens a frame, but there is no `fn <name>` to warn
+                // about and no per-parameter W004 to report.
+                for p in params {
+                    self.params.insert(p.clone());
+                }
+                self.frames.push(HashSet::new());
+                for default in defaults.iter().flatten() {
+                    self.expr(default);
+                }
+                self.block_with_tail(body, true);
+                self.frames.pop();
+            }
             Expr::NewObj(name, args, _) => {
                 // `name(args)` in expression position: a call to a user
                 // function or a class constructor, so it counts as a use of
@@ -634,8 +683,16 @@ impl Collector {
                 }
                 self.args(args);
             }
-            Expr::LibFnRef(lib, _, _) => {
+            Expr::LibFnRef(lib, fn_name, _) => {
+                // `<lib>.<fn>` is also how a dot field access is written
+                // (`p.name`): the parser cannot tell them apart, so the name
+                // counts as read -- a variable used only through a dot access
+                // is still used -- and, for a real library, as a library use.
+                // The function itself is used too: `TOOL = Tools.add;` and
+                // `map(xs, Tools.add)` both call it, so it is not W005.
+                self.read(lib);
                 self.lib_uses.insert(lib.clone());
+                self.called.insert(fn_name.clone());
             }
             Expr::FieldAccess(base, _, _) => self.expr(base),
             Expr::HttpGet(lib, url, _) => {
@@ -727,8 +784,10 @@ struct Found {
 fn has_effect(e: &Expr) -> bool {
     match e {
         Expr::LibCall(..) | Expr::NewObj(..) | Expr::HttpGet(..) => true,
-        Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) => has_effect(a) || has_effect(b),
-        Expr::Neg(a, _) => has_effect(a),
+        Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) | Expr::Logical(a, _, b, _) => {
+            has_effect(a) || has_effect(b)
+        }
+        Expr::Neg(a, _) | Expr::Not(a, _) => has_effect(a),
         Expr::ListLit(items) | Expr::TupleLit(items) | Expr::SetLit(items) => {
             items.iter().any(has_effect)
         }
@@ -782,6 +841,8 @@ fn stmt_line(s: &Stmt) -> Option<usize> {
         | Stmt::EngMathAssign { line, .. }
         | Stmt::EngBreak { line, .. }
         | Stmt::Continue { line }
+        | Stmt::Destructure { line, .. }
+        | Stmt::Switch { line, .. }
         | Stmt::EngFor { line, .. }
         | Stmt::EngLoopAssign { line, .. }
         | Stmt::ClassDef { line, .. } => Some(*line),
