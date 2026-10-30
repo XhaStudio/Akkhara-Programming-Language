@@ -28,6 +28,9 @@ const ENG_BREAK: &str = "break";
 const ENG_CONTINUE: &str = "continue";
 const ENG_USE: &str = "use";
 const ENG_AS: &str = "as";
+const ENG_SWITCH: &str = "switch";
+const ENG_CASE: &str = "case";
+const ENG_DEFAULT: &str = "default";
 
 /// The eng library's four supported type keywords.
 fn is_eng_type(s: &str) -> bool {
@@ -60,7 +63,19 @@ pub enum Expr {
     /// A comparison used as a value: `x > y`, `name == "Aung"`. The same
     /// operators a condition accepts, producing a `bool`.
     Compare(Box<Expr>, String, Box<Expr>, usize), // line of the operator
-    Neg(Box<Expr>, usize),                     // unary minus, line
+    /// The eng library's logical-and / logical-or used as a value:
+    /// `a && b`, `a || b`. Both sides must be `bool`. Expressions
+    /// short-circuit, so the right side is not evaluated when the left one
+    /// already decides the result -- `i < len(xs) && xs[i] > 0` is safe.
+    Logical(Box<Expr>, LogicalOp, Box<Expr>, usize), // line of the operator
+    /// The eng library's conditional expression: `<cond> ? <then> : <else>`.
+    /// Only the branch the condition picks is evaluated, so the other side
+    /// may be anything (a call with side effects, a division by zero).
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>, usize), // line of the '?'
+    /// The eng library's logical-not used as a value: `!done`. The operand
+    /// must be `bool`.
+    Not(Box<Expr>, usize), // line of the operator
+    Neg(Box<Expr>, usize), // unary minus, line
     ListLit(Vec<Expr>),
     TupleLit(Vec<Expr>),
     SetLit(Vec<Expr>),
@@ -71,6 +86,18 @@ pub enum Expr {
     /// spelling; the old `အသစ်` marker (on either side of the argument list)
     /// is refused with `E029`.
     NewObj(String, Vec<Expr>, usize),
+    /// An anonymous function value: `fn(x) { x * 2 }`. It is the same pair a
+    /// named function definition holds -- parameters and a body -- so a
+    /// callback can be written where it is used instead of being defined and
+    /// then named: `map(xs, fn(x) { x * 2 })`. Like a function body, the last
+    /// expression in the block is its value.
+    Lambda {
+        params: Vec<String>,
+        /// Defaults, parallel to `params` -- see `Stmt::FuncDef::defaults`.
+        defaults: Vec<Option<Expr>>,
+        body: Vec<Stmt>,
+        line: usize,
+    },
     /// Library call in the eng spelling: `<lib>.<fn>(arg1, arg2, ...)` --
     /// the same call as the Myanmar `<lib> ၏ <fn>(args) ကို လုပ်ပါ။`.
     LibCall(String, String, Vec<Expr>, usize),
@@ -154,6 +181,10 @@ pub enum Stmt {
     FuncDef {
         name: String,
         params: Vec<String>,
+        /// One entry per parameter: `Some(expr)` for a parameter that has a
+        /// default (`fn greet(name, punct = "!")`), `None` otherwise. Default
+        /// parameters come last, so a call may leave them off from the right.
+        defaults: Vec<Option<Expr>>,
         body: Vec<Stmt>,
         /// The line the `fn` / `အလုပ်` header is written on. The static
         /// warning pass (`crate::warnings`) points the unused-function and
@@ -334,6 +365,23 @@ pub enum Stmt {
     Continue {
         line: usize,
     },
+    /// Destructuring assignment: `[a, b] = <value>;` (or `(a, b) = <value>;`).
+    /// The value must be a list or tuple with exactly one item per name, and
+    /// each name takes its item in order.
+    Destructure {
+        names: Vec<String>,
+        value: Expr,
+        line: usize,
+    },
+    /// `switch (<value>) { case <expr>: ... default: ... }` -- runs the arm
+    /// whose `case` equals the value, or `default` when none does. There is
+    /// no fall-through, so arms need no `break` (a `break` inside still
+    /// stops the switch, and works inside a loop the switch is in).
+    Switch {
+        subject: Expr,
+        arms: Vec<SwitchArm>,
+        line: usize,
+    },
     /// eng infinite loop statement: `loop { ... }` -- runs until a `break`
     /// (or a `return` unwinds out of the enclosing function).
     EngLoop {
@@ -362,6 +410,14 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchArm {
+    /// The `case` value this arm matches, or `None` for `default:`.
+    pub case: Option<Expr>,
+    pub body: Vec<Stmt>,
+    pub line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1485,20 +1541,91 @@ fn parse_expr(tokens: &[Token], line: usize) -> Result<Expr, String> {
     Ok(expr)
 }
 
+/// The precedence tiers, lowest first. Each tier parses its operands with the
+/// next tier down, so an operand has already grouped everything tighter than
+/// the operator that consumes it:
+///
+///   `||`                                         parse_expr_at
+///   `&&`                                         parse_and_at
+///   comparisons (`<` `>` `==` `!=` `<=` `>=`)    parse_cmp_at
+///   `+` `-`                                      parse_add_at
+///   `*` `/` `%` `\` (floor division)             parse_mul_at
+///   `**` (exponent)                              parse_pow_at
+///   unary `-`, `!`                               parse_unary_at
+///   postfix (`[...]`, `၏ <field>`, `lib.fn(...)`)  parse_term_at
+///
+/// Operators on the same tier still group left to right, so `10 - 4 - 3` is
+/// `(10 - 4) - 3`, while `1 + 2 * 3` is `1 + (2 * 3)` -- `*` binds tighter
+/// than `+`.
 fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
-    let (mut expr, mut i) = parse_term_at(tokens, pos, line)?;
+    let (cond, i) = parse_or_at(tokens, pos, line)?;
+    // Conditional expression: `<cond> ? <then> : <else>`. It sits at the
+    // loosest level, below `||`, and associates to the right -- `a ? b : c ?
+    // d : e` is `a ? b : (c ? d : e)`. The `:` that ends the `<then>` part is
+    // looked for by the caller-recursion, since no operator consumes it.
+    if i < tokens.len() && matches!(tokens[i].tok, Tok::Question) {
+        let q_line = tokens[i].line;
+        let (then_expr, after_then) = parse_expr_at(tokens, i + 1, line)?;
+        if !matches!(tokens.get(after_then).map(|t| &t.tok), Some(Tok::Colon)) {
+            return Err(ternary_bad_form_err(q_line));
+        }
+        let (else_expr, after_else) = parse_expr_at(tokens, after_then + 1, line)?;
+        return Ok((
+            Expr::Ternary(
+                Box::new(cond),
+                Box::new(then_expr),
+                Box::new(else_expr),
+                q_line,
+            ),
+            after_else,
+        ));
+    }
+    Ok((cond, i))
+}
+
+/// A ternary with its `?` but without the `:` and the else branch.
+fn ternary_bad_form_err(line: usize) -> String {
+    format!(
+        "E151 line {}: expected `<condition> ? <then> : <else>` (both the '?' and the ':' are needed)",
+        line
+    )
+}
+
+fn parse_or_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_and_at(tokens, pos, line)?;
+    while i < tokens.len() && matches!(tokens[i].tok, Tok::Or) {
+        let op_line = tokens[i].line;
+        let (rhs, ni) = parse_and_at(tokens, i + 1, line)?;
+        expr = Expr::Logical(Box::new(expr), LogicalOp::Or, Box::new(rhs), op_line);
+        i = ni;
+    }
+    Ok((expr, i))
+}
+
+/// The `&&` tier: it binds tighter than `||` but looser than a comparison,
+/// so `a > 1 && b < 2` joins the two comparisons and `a || b && c` is
+/// `a || (b && c)`.
+fn parse_and_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_cmp_at(tokens, pos, line)?;
+    while i < tokens.len() && matches!(tokens[i].tok, Tok::And) {
+        let op_line = tokens[i].line;
+        let (rhs, ni) = parse_cmp_at(tokens, i + 1, line)?;
+        expr = Expr::Logical(Box::new(expr), LogicalOp::And, Box::new(rhs), op_line);
+        i = ni;
+    }
+    Ok((expr, i))
+}
+
+/// The comparison tier.
+fn parse_cmp_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_add_at(tokens, pos, line)?;
     while i < tokens.len() {
-        if let Tok::Op(c) = &tokens[i].tok {
-            let op_line = tokens[i].line;
-            let (rhs, ni) = parse_term_at(tokens, i + 1, line)?;
-            expr = Expr::Binary(Box::new(expr), *c, Box::new(rhs), op_line);
-            i = ni;
-        } else if let Tok::Cmp(op) = &tokens[i].tok {
-            // A comparison is the lowest-precedence operator in an
+        if let Tok::Cmp(op) = &tokens[i].tok {
+            // A comparison is the lowest-precedence arithmetic operator in an
             // expression, so `x + 1 > y` compares the whole sum. It yields a
             // bool, which `print`, a declaration or an `if` can all consume.
             let op_line = tokens[i].line;
-            let (rhs, ni) = parse_term_at(tokens, i + 1, line)?;
+            let (rhs, ni) = parse_add_at(tokens, i + 1, line)?;
             expr = Expr::Compare(Box::new(expr), op.clone(), Box::new(rhs), op_line);
             i = ni;
         } else {
@@ -1508,6 +1635,114 @@ fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
     Ok((expr, i))
 }
 
+/// The `+` / `-` tier.
+fn parse_add_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_mul_at(tokens, pos, line)?;
+    while i < tokens.len() {
+        let op = match &tokens[i].tok {
+            Tok::Op(c) if *c == '+' || *c == '-' => *c,
+            _ => break,
+        };
+        let op_line = tokens[i].line;
+        let (rhs, ni) = parse_mul_at(tokens, i + 1, line)?;
+        expr = Expr::Binary(Box::new(expr), op, Box::new(rhs), op_line);
+        i = ni;
+    }
+    Ok((expr, i))
+}
+
+/// The `*` / `/` / `%` / `\` (floor division) tier.
+fn parse_mul_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_unary_at(tokens, pos, line)?;
+    while i < tokens.len() {
+        let op = match &tokens[i].tok {
+            Tok::Op(c) if *c == '*' || *c == '/' || *c == '%' || *c == '\\' => *c,
+            _ => break,
+        };
+        let op_line = tokens[i].line;
+        let (rhs, ni) = parse_unary_at(tokens, i + 1, line)?;
+        expr = Expr::Binary(Box::new(expr), op, Box::new(rhs), op_line);
+        i = ni;
+    }
+    Ok((expr, i))
+}
+
+/// The exponent tier (`**`, tokenized as `Op('^')`), which sits just above
+/// multiplication so `2 * 3 ** 2` is `2 * (3 ** 2)`. The exponent itself is
+/// parsed as a unary expression, which makes `**` right-associative
+/// (`2 ** 2 ** 3` is `2 ** (2 ** 3)`), allows `2 ** -1`, and makes
+/// `-2 ** 2` mean `-(2 ** 2)`.
+fn parse_pow_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    let (mut expr, mut i) = parse_term_at(tokens, pos, line)?;
+    while i < tokens.len() && matches!(tokens[i].tok, Tok::Op('^')) {
+        let op_line = tokens[i].line;
+        let (rhs, ni) = parse_unary_at(tokens, i + 1, line)?;
+        expr = Expr::Binary(Box::new(expr), '^', Box::new(rhs), op_line);
+        i = ni;
+    }
+    Ok((expr, i))
+}
+
+/// The unary tier. Unary minus: `-2 * 3` negates `2` first, and `-x[0]`
+/// negates the indexed element. Logical not: `!done`, `!(a > 1 && b < 2)`.
+fn parse_unary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    if let Some(t) = tokens.get(pos) {
+        if matches!(t.tok, Tok::Op('-')) {
+            let op_line = t.line;
+            let (inner, next) = parse_unary_at(tokens, pos + 1, line)?;
+            return Ok((Expr::Neg(Box::new(inner), op_line), next));
+        }
+        if matches!(t.tok, Tok::Not) {
+            let op_line = t.line;
+            let (inner, next) = parse_unary_at(tokens, pos + 1, line)?;
+            return Ok((Expr::Not(Box::new(inner), op_line), next));
+        }
+    }
+    parse_pow_at(tokens, pos, line)
+}
+
+/// A lambda body: a block whose final bare value is the lambda's result
+/// (`fn(x) { x }`, `fn(x) { y = x * 2; y }`). The statement parser's bare
+/// expression fallback needs an arithmetic operator in the chunk, so a
+/// statement that is only a value (`x`, `1`, `(v)`) is retried here as an
+/// expression statement.
+fn parse_lambda_block(tokens: &[Token]) -> Result<Vec<Stmt>, String> {
+    let mut stmts = Vec::new();
+    let chunks: Vec<(Vec<Token>, usize)> = split_statements(tokens)
+        .into_iter()
+        .map(|(chunk, line)| (chunk.to_vec(), line))
+        .collect();
+    let last = chunks.len().saturating_sub(1);
+    for (i, (chunk, line)) in chunks.iter().enumerate() {
+        match parse_stmt(chunk, *line) {
+            // A lambda's body is its value, so a call in tail position
+            // (`fn(x) { f(x) }`) has to hand its result back instead of
+            // running as a bare statement the way it does in a named
+            // function's body. Everything before the last statement keeps
+            // statement semantics.
+            Ok(Stmt::EngExprCall {
+                name,
+                args,
+                line: call_line,
+            }) if i == last => stmts.push(Stmt::ExprStmt {
+                value: Expr::NewObj(name, args, call_line),
+                line: call_line,
+            }),
+            Ok(stmt) => stmts.push(stmt),
+            Err(err) => match parse_expr(chunk, *line) {
+                Ok(value) => stmts.push(Stmt::ExprStmt {
+                    value,
+                    line: *line,
+                }),
+                Err(_) => return Err(err),
+            },
+        }
+    }
+    Ok(stmts)
+}
+
+/// The postfix tier: a primary value followed by any number of `[...]`
+/// indexes, `၏ <field>` accesses and `lib.fn(...)` calls.
 fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
     let (mut expr, mut i) = parse_primary_at(tokens, pos, line)?;
     loop {
@@ -1531,16 +1766,20 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
         }
 
         // eng library call `<lib>.<fn>(args)` -- the English spelling of
-        // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။` -- and, without a call, the
+        // `<lib> ၏ <fn>(args) ကို လုပ်ပါ။` -- and, without a call, either the
         // first-class function reference `<lib>.<fn>` (whose value a later
-        // `TOOL(1, 100)` can invoke).
+        // `TOOL(1, 100)` can invoke) or a dot field access `<value>.<field>`
+        // (`p.name`, `response.အခြေအနေကုဒ်`), the same read as
+        // `<value> ၏ <field>`. The parser cannot tell a library from a
+        // variable, so a bare name stays a `LibFnRef` and the interpreter
+        // decides: a variable of that name is read as an object field.
         if i + 1 < tokens.len()
             && matches!(tokens[i].tok, Tok::Dot)
             && matches!(tokens[i + 1].tok, Tok::Ident(_))
         {
-            let lib = match &expr {
-                Expr::Ident(name) => name.clone(),
-                _ => return Err(generic_syntax_err(line)),
+            let base = match &expr {
+                Expr::Ident(name) => Some(name.clone()),
+                _ => None,
             };
             let fn_name = match &tokens[i + 1].tok {
                 Tok::Ident(s) => s.clone(),
@@ -1548,6 +1787,9 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
             };
             let dot_line = tokens[i].line;
             if i + 2 < tokens.len() && matches!(tokens[i + 2].tok, Tok::LParen) {
+                // `<lib>.<fn>(args)`: a library call needs a library name,
+                // so an expression on the left (a field read) is not one.
+                let lib = base.ok_or_else(|| generic_syntax_err(line))?;
                 let close = find_close(tokens, i + 2, tokens[i + 2].line)?;
                 let inner = &tokens[i + 3..close];
                 let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
@@ -1560,8 +1802,11 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
                 }
                 expr = Expr::LibCall(lib, fn_name, args, dot_line);
                 i = close + 1;
-            } else {
+            } else if let Some(lib) = base {
                 expr = Expr::LibFnRef(lib, fn_name, dot_line);
+                i += 2;
+            } else {
+                expr = Expr::FieldAccess(Box::new(expr), fn_name, dot_line);
                 i += 2;
             }
             continue;
@@ -1650,12 +1895,39 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
             "မှား" => Ok((Expr::BoolLit(false), pos + 1)),
             "null" | "ဗလာ" => Ok((Expr::NullLit, pos + 1)),
             _ => {
+                let next = pos + 1;
+                // Anonymous function: `fn(x) { x * 2 }`. A named `fn
+                // <name>(...)` is a statement, so `fn` followed straight by
+                // the parameter list can only be a lambda value here.
+                if s == ENG_FN
+                    && next < tokens.len()
+                    && matches!(tokens[next].tok, Tok::LParen)
+                {
+                    let close = find_close(tokens, next, tokens[next].line)?;
+                    let (params, defaults) = parse_eng_fn_sig(&tokens[next + 1..close], line)
+                        .map_err(|_| lambda_bad_form_err(line))?;
+                    let brace = close + 1;
+                    if !matches!(tokens.get(brace).map(|t| &t.tok), Some(Tok::LBrace)) {
+                        return Err(lambda_bad_form_err(line));
+                    }
+                    let (body_tokens, after) = take_brace_block(tokens, brace, line)
+                        .map_err(|_| lambda_bad_form_err(line))?;
+                    let body = parse_lambda_block(body_tokens)?;
+                    return Ok((
+                        Expr::Lambda {
+                            params,
+                            defaults,
+                            body,
+                            line: tokens[pos].line,
+                        },
+                        after,
+                    ));
+                }
                 // Object instantiation: "<ClassName>(args)". There is only
                 // this one spelling. The old optional "အသစ်" (new) marker --
                 // written before the argument list or after it -- is refused
                 // with a pointer to the accepted form rather than being
                 // silently skipped.
-                let next = pos + 1;
                 if next < tokens.len() && ident_eq(&tokens[next].tok, KW_NEW) {
                     return Err(new_obj_missing_class_err(tokens[pos].line));
                 }
@@ -1709,9 +1981,8 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
             let parts = split_top_level(inner, |t| matches!(t, Tok::Comma));
             if parts.len() == 1 {
                 // A single, comma-less parenthesized group is just a
-                // grouping for precedence (e.g. "(temp - 32) * 5"), not a
-                // one-element tuple -- Akkhara has no precedence tiers of
-                // its own, so parens are the only way to group arithmetic.
+                // grouping that overrides operator precedence (e.g.
+                // "(temp - 32) * 5"), not a one-element tuple.
                 let inner_expr = parse_expr(parts[0], line)?;
                 Ok((inner_expr, close + 1))
             } else {
@@ -2285,13 +2556,27 @@ fn is_eng_block_keyword(tok: &Tok) -> bool {
     matches!(
         tok,
         Tok::Ident(s)
-            if s == ENG_IF || s == ENG_WHILE || s == ENG_FN || s == ENG_LOOP || s == ENG_FOR
+            if s == ENG_IF
+                || s == ENG_WHILE
+                || s == ENG_FN
+                || s == ENG_LOOP
+                || s == ENG_FOR
+                || s == ENG_SWITCH
     )
 }
 
 fn eng_block_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `for (<init>; <cond>; <step>) {{ ... }}`, `loop {{ ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `for (<init>; <cond>; <step>) {{ ... }}`, `loop {{ ... }}`, `switch (<value>) {{ case <value>: ... default: ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        line
+    )
+}
+
+/// A `fn` written as a value but not in the lambda form
+/// `fn(<params>) { <body> }`.
+fn lambda_bad_form_err(line: usize) -> String {
+    format!(
+        "E150 line {}: expected a lambda `fn(<params>) {{ <body> }}`",
         line
     )
 }
@@ -2469,6 +2754,9 @@ fn parse_eng_block_statement(tokens: &[Token], line: usize) -> Result<Stmt, Stri
     if ident_eq(&tokens[0].tok, ENG_FOR) {
         return parse_eng_for(tokens, line);
     }
+    if ident_eq(&tokens[0].tok, ENG_SWITCH) {
+        return parse_eng_switch(tokens, line);
+    }
     Err(eng_block_form_err(line))
 }
 
@@ -2512,6 +2800,102 @@ fn parse_eng_for_in(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         var_name,
         source: ForSource::Auto(source),
         body: parse_block(body_tokens)?,
+        line,
+    })
+}
+
+fn eng_switch_form_err(line: usize) -> String {
+    format!(
+        "E153 line {}: expected `switch (<value>) {{ case <value>: ... default: ... }}`",
+        line
+    )
+}
+
+/// The first `:` written at the top level of `tokens` (not inside brackets,
+/// parentheses or braces). A `case <value>:` label splits there.
+fn top_level_colon(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        match t.tok {
+            Tok::LBracket | Tok::LParen | Tok::LBrace => depth += 1,
+            Tok::RBracket | Tok::RParen | Tok::RBrace => depth = depth.saturating_sub(1),
+            Tok::Colon if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `switch (<value>) { case <value>: <statements> ... default: <statements> }`
+/// -- the arms are tried in source order and the first matching one runs; the
+/// `default:` arm runs when none matched, wherever it is written. There is no
+/// fall-through: only one arm ever runs, so arms need no `break`.
+fn parse_eng_switch(tokens: &[Token], line: usize) -> Result<Stmt, String> {
+    if !matches!(tokens.get(1).map(|t| &t.tok), Some(Tok::LParen)) {
+        return Err(eng_switch_form_err(line));
+    }
+    let header_close = find_close(tokens, 1, line).map_err(|_| eng_switch_form_err(line))?;
+    let subject =
+        parse_expr(&tokens[2..header_close], line).map_err(|_| eng_switch_form_err(line))?;
+    let brace = header_close + 1;
+    if !matches!(tokens.get(brace).map(|t| &t.tok), Some(Tok::LBrace)) {
+        return Err(eng_switch_form_err(line));
+    }
+    let (body_tokens, after) =
+        take_brace_block(tokens, brace, line).map_err(|_| eng_switch_form_err(line))?;
+    if after != tokens.len() {
+        return Err(eng_switch_form_err(line));
+    }
+
+    let mut arms: Vec<SwitchArm> = Vec::new();
+    let mut seen_default = false;
+    for (chunk, chunk_line) in split_statements(body_tokens) {
+        let is_case = chunk.first().map(|t| ident_eq(&t.tok, ENG_CASE)) == Some(true);
+        let is_default = chunk.first().map(|t| ident_eq(&t.tok, ENG_DEFAULT)) == Some(true);
+        if !is_case && !is_default {
+            // A further statement of the arm above.
+            let Some(arm) = arms.last_mut() else {
+                return Err(eng_switch_form_err(chunk_line));
+            };
+            arm.body.push(parse_stmt(&chunk, chunk_line)?);
+            continue;
+        }
+        if is_default && seen_default {
+            return Err(eng_switch_form_err(chunk_line));
+        }
+        seen_default |= is_default;
+        let rest = &chunk[1..];
+        let Some(colon) = top_level_colon(rest) else {
+            return Err(eng_switch_form_err(chunk_line));
+        };
+        let case = if is_case {
+            if colon == 0 {
+                return Err(eng_switch_form_err(chunk_line));
+            }
+            Some(parse_expr(&rest[..colon], chunk_line).map_err(|_| eng_switch_form_err(chunk_line))?)
+        } else {
+            if colon != 0 {
+                return Err(eng_switch_form_err(chunk_line));
+            }
+            None
+        };
+        let mut body = Vec::new();
+        let tail = &rest[colon + 1..];
+        if !tail.is_empty() {
+            body.push(parse_stmt(tail, chunk_line)?);
+        }
+        arms.push(SwitchArm {
+            case,
+            body,
+            line: chunk_line,
+        });
+    }
+    if arms.is_empty() {
+        return Err(eng_switch_form_err(line));
+    }
+    Ok(Stmt::Switch {
+        subject,
+        arms,
         line,
     })
 }
@@ -2762,7 +3146,7 @@ fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(eng_block_form_err(line));
     }
     let params_close = find_close(tokens, 2, line).map_err(|_| eng_block_form_err(line))?;
-    let params = parse_eng_fn_params(&tokens[3..params_close], line)?;
+    let (params, defaults) = parse_eng_fn_sig(&tokens[3..params_close], line)?;
 
     let mut cursor = params_close + 1;
     // Optional return-type annotation, spelled `-> int` or `: int`. It is
@@ -2800,22 +3184,78 @@ fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     Ok(Stmt::FuncDef {
         name,
         params,
+        defaults,
         body: parse_block(body_tokens)?,
         line,
     })
 }
 
-/// Parse an eng `fn` parameter list: `p1, p2`, each optionally annotated
-/// `p :int`. The annotations are validated but otherwise ignored.
-fn parse_eng_fn_params(tokens: &[Token], line: usize) -> Result<Vec<String>, String> {
-    if tokens.is_empty() {
-        return Ok(Vec::new());
+fn destructure_bad_form_err(line: usize) -> String {
+    format!(
+        "E152 line {}: expected a destructuring assignment like `[a, b] = <list>` (names only, separated by commas)",
+        line
+    )
+}
+
+/// `[a, b] = <value>` / `(a, b) = <value>` -- names on the left, one value on
+/// the right. Returns `Ok(None)` for a statement of any other shape (a call
+/// with its arguments first, a tuple literal, ...).
+fn try_parse_eng_destructure(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    if !matches!(
+        body.first().map(|t| &t.tok),
+        Some(Tok::LBracket) | Some(Tok::LParen)
+    ) {
+        return Ok(None);
+    }
+    let close = find_close(body, 0, line)?;
+    if !matches!(body.get(close + 1).map(|t| &t.tok), Some(Tok::Assign)) {
+        return Ok(None);
     }
     let mut names = Vec::new();
-    for part in split_top_level(tokens, |t| matches!(t, Tok::Comma)) {
+    for part in split_top_level(&body[1..close], |t| matches!(t, Tok::Comma)) {
         match part {
             [p] => match &p.tok {
                 Tok::Ident(s) => names.push(s.clone()),
+                _ => return Err(destructure_bad_form_err(line)),
+            },
+            _ => return Err(destructure_bad_form_err(line)),
+        }
+    }
+    if names.is_empty() {
+        return Err(destructure_bad_form_err(line));
+    }
+    let value = parse_expr(&body[close + 2..], line).map_err(|_| destructure_bad_form_err(line))?;
+    Ok(Some(Stmt::Destructure { names, value, line }))
+}
+
+/// Parse an eng `fn` parameter list with its defaults: `p1, p2 = 1, p :int`.
+/// A parameter is a name, optionally annotated `: type`, optionally given a
+/// default value with `=`. Defaults have to be the trailing parameters, so a
+/// call may leave them off from the right -- `fn greet(name, punct = "!")`
+/// takes one argument or two.
+fn parse_eng_fn_sig(
+    tokens: &[Token],
+    line: usize,
+) -> Result<(Vec<String>, Vec<Option<Expr>>), String> {
+    if tokens.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut names = Vec::new();
+    let mut defaults: Vec<Option<Expr>> = Vec::new();
+    for part in split_top_level(tokens, |t| matches!(t, Tok::Comma)) {
+        // Split off a default (`= <expr>`), if this parameter has one.
+        let eq = part.iter().position(|t| matches!(t.tok, Tok::Assign));
+        let (head, default) = match eq {
+            Some(i) => {
+                let expr = parse_expr(&part[i + 1..], line)
+                    .map_err(|_| eng_block_form_err(line))?;
+                (&part[..i], Some(expr))
+            }
+            None => (part, None),
+        };
+        let name = match head {
+            [p] => match &p.tok {
+                Tok::Ident(s) => s.clone(),
                 _ => return Err(eng_block_form_err(line)),
             },
             [p, colon, ty] => match (&p.tok, &colon.tok, &ty.tok) {
@@ -2823,14 +3263,21 @@ fn parse_eng_fn_params(tokens: &[Token], line: usize) -> Result<Vec<String>, Str
                     if !is_eng_type(t) {
                         return Err(eng_bad_type_err(line, t));
                     }
-                    names.push(s.clone());
+                    s.clone()
                 }
                 _ => return Err(eng_block_form_err(line)),
             },
             _ => return Err(eng_block_form_err(line)),
+        };
+        // A default before a parameter that has none could never be filled
+        // by a positional argument, so it is a syntax error.
+        if default.is_none() && defaults.iter().any(|d| d.is_some()) {
+            return Err(eng_block_form_err(line));
         }
+        names.push(name);
+        defaults.push(default);
     }
-    Ok(names)
+    Ok((names, defaults))
 }
 
 /// `<name>(<args>)` written as a standalone statement -- the parenthesized,
@@ -3025,6 +3472,13 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     //     and stop at the `as`. ---
     if let Some(stmt) = try_parse_eng_func_alias(decl_body, line, terminated)? {
         return Ok(stmt);
+    }
+
+    // --- destructuring assignment: `[a, b] = <value>;` (also `(a, b) =`) ---
+    if terminated {
+        if let Some(stmt) = try_parse_eng_destructure(decl_body, line)? {
+            return Ok(stmt);
+        }
     }
 
     // --- bare parenthesized call: `name(args)` / `name(args);` -- the eng
@@ -4162,6 +4616,23 @@ fn parse_typecheck_name(tokens: &[Token]) -> Option<String> {
 ///   3. Comparison: "<expr> <cmp-op> <expr>", e.g. "x == 10".
 ///   4. Bare boolean-valued expression, e.g. "flag" (test its truthiness).
 fn parse_cond_atom(tokens: &[Token], line: usize) -> Result<CondAtom, String> {
+    // A group that is one whole logical expression -- `(a < b && b > 1)`,
+    // `(!done)`, `(!(n == 2))` -- is a bare boolean atom. Splitting it at its
+    // first comparison would tear the `&&` / `||` apart, so it is parsed as
+    // an expression first; plain comparisons (`x == 10`) fall through to the
+    // forms below, which keep their own conditions and error messages.
+    if let Ok(expr) = parse_expr(tokens, line) {
+        if matches!(expr, Expr::Logical(..) | Expr::Not(..)) {
+            return Ok(CondAtom {
+                lhs: expr,
+                op: None,
+                rhs: None,
+                negate: false,
+                type_check: None,
+                line,
+            });
+        }
+    }
     // eng library logical-not: an atom may be introduced by `!`, negating
     // its truth value. The rest of the atom parses normally.
     let negate = !tokens.is_empty() && matches!(tokens[0].tok, Tok::Not);
@@ -4484,6 +4955,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(Stmt::FuncDef {
             name,
             params: Vec::new(),
+            defaults: Vec::new(),
             body,
             line,
         });
@@ -4521,6 +4993,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(Stmt::FuncDef {
             name,
             params,
+            defaults: Vec::new(),
             body,
             line,
         });
@@ -4558,6 +5031,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     Ok(Stmt::FuncDef {
         name,
         params,
+        defaults: Vec::new(),
         body,
         line,
     })
