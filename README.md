@@ -118,16 +118,24 @@ same block.
   `(<condition>) ဖြစ်ရင်` ... `အခြား (<condition>) ဖြစ်ရင်` ... `မဟုတ်ရင်` ... `ပြီး။`.
   `မဖြစ်လျှင်` / `မဖြစ်ရင်` runs the branch when the
   condition is *not* true.
+  A one-statement guard needs no `ပြီး။` at all: let the statement follow the
+  header's own terminator, on the same line --
+  `(age > 18) ဖြစ်ရင်။ "x" ကို ပြပါ။` (`(age > 18) မဖြစ်ရင်။ ...` guards the
+  other way round).
 - While: `အခြေအနေ (<condition>) ဖြစ်နေစဉ်` ... `ပြီး။`, or
   `(<condition>) ဖြစ်နေစဥ်` ... `ပြီး။` -- the keyword is optional, and
   `မဖြစ်နေစဉ်` / `မဖြစ်နေစဥ်` loops while the condition is not true.
-- For, over a collection: `x အတွက် တစ်ခုစီ(xs)` ... `ပြီး။`, or
-  `x သည် xs ထဲမှ တစ်ခုစီ` ... `ပြီး။` -- a dict yields its keys.
-- For, over a range: `i အတွက် တစ်ခုစီ(0, 10, 2)` ... `ပြီး။`, or
-  `i သည် 0, 10 ထဲမှ တစ်ခုစီ 1 တိုးခြင်းဖြင့်` ... `ပြီး။` -- the end is
-  exclusive; the step may be left out (`တစ်ခုစီ(0, 10)` steps by 1) and a
-  negative step counts down (`တစ်ခုစီ(10, 0, -1)`). One number ranges from
-  0: `i အတွက် တစ်ခုစီ(10)` runs 0..9.
+- For, over a collection: `x သည် xs ထဲ တစ်ခုစီ` ... `ပြီး။` -- `ထဲ` is the
+  short particle (`x သည် xs ထဲမှ တစ်ခုစီ` is the longer spelling of the same
+  header), and the `အတွက်` spelling `x အတွက် တစ်ခုစီ(xs)` ... `ပြီး။` still
+  works. A dict yields its keys.
+- For, over a range: `x သည် တစ်ခုစီ(0, 10, 2)` ... `ပြီး။` (also
+  `x အတွက် တစ်ခုစီ(...)`) -- the end is exclusive; the step may be left out
+  (`တစ်ခုစီ(0, 10)` steps by 1), may be written with its sign
+  (`တစ်ခုစီ(1, 2, +1)`), and a negative step counts down
+  (`တစ်ခုစီ(10, 0, -1)`). One number ranges from 0: `တစ်ခုစီ(10)` runs 0..9.
+  The step can follow a collection-form header too:
+  `i သည် 0, 10 ထဲ တစ်ခုစီ 2 တိုးခြင်းဖြင့်` ... `ပြီး။`.
 
 Conditions join with `and` / `or`, or with their own Myanmar groups
 `(နှင့်)` / `(သို့)`:
@@ -348,6 +356,18 @@ tighter than `||` and short-circuit evaluation, so
 `0 < len(xs) && xs[0] > 0` is safe on an empty list. Both operands must be
 `မှန်/မှား`; anything else reports `E043`.
 
+Membership is `in` -- `if (x in xs) { ... }`, `ok = x in xs;` -- the same test
+`contains(xs, x)` makes (a substring of a string, an item of a
+list/tuple/set, a key of a dict). The Myanmar spelling puts the collection
+first: `(xs ထဲ x) ဖြစ်ရင်။ "x" ကို ပြပါ။`.
+
+A guard can also carry its `if` at the end, so a one-line conditional needs no
+braces:
+
+```
+print("x") if (age > 18);
+```
+
 Builtin helpers (core syntax — usable as statements or inside expressions):
 
 | Builtin | Arguments | Result |
@@ -365,6 +385,13 @@ Builtin helpers (core syntax — usable as statements or inside expressions):
 `fn(<params>) { <body> }` written where a value is expected is a function
 value — the same thing `fn <name>(...) { ... }` defines, without the name. It
 is core syntax, so the Myanmar spellings can use one too.
+
+`<name> => <expression>` (or `(<p1>, <p2>) => <expression>`) is that same
+value on one line: `map(xs, x => x * 2)` is `map(xs, fn(x) { x * 2 })`, and
+`reduce(xs, (a, b) => a + b, 0)` takes two parameters. Both spellings of the
+language use the arrow, so a Myanmar sentence can pass one to `map` just as
+easily. The arrow form takes plain parameter names (no defaults) and its body
+is a single expression.
 
 ```
 xs = [1, 2, 3, 4, 5];

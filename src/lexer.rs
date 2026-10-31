@@ -19,6 +19,7 @@ pub enum Tok {
     Question,      // ?  (ternary condition: `<cond> ? <then> : <else>`)
     Bool(bool),    // true / false (eng library bool literals)
     Assign,        // =  (eng library declaration assignment)
+    Arrow,         // => (arrow lambda: `x => x * 2`)
     Colon,         // :  (eng library type annotation)
     Semicolon,     // ;  (eng library statement terminator)
     End,           // ။  (end of sentence)
@@ -376,6 +377,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             if i + 1 < n && chars[i + 1] == '=' {
                 tokens.push(Token {
                     tok: Tok::Cmp("==".to_string()),
+                    line,
+                });
+                i += 2;
+            } else if i + 1 < n && chars[i + 1] == '>' {
+                // Arrow lambda: `x => x * 2`, the short spelling of
+                // `fn(x) { x * 2 }`.
+                tokens.push(Token {
+                    tok: Tok::Arrow,
                     line,
                 });
                 i += 2;

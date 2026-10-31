@@ -43,6 +43,16 @@ const CASES: &[Case] = &[
         stdin: &[],
     },
     Case {
+        name: "shorthand",
+        exit: 0,
+        stdout: &[
+            "adult", "လူကြီး", "[2, 4, 6]", "[2, 3]", "6", "in ok", "no 9", "1", "2", "3", "1",
+            "2", "0", "2", "4",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
         name: "functions",
         exit: 0,
         stdout: &["Hello, World!", "42"],

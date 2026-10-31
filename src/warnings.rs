@@ -622,7 +622,10 @@ impl Collector {
             Expr::StrLit(s) => self.read_interpolated(s),
             Expr::NumLit(_) | Expr::Int(_) | Expr::Float(_) | Expr::BoolLit(_) | Expr::NullLit => {}
             Expr::Ident(name) => self.read(name),
-            Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) | Expr::Logical(a, _, b, _) => {
+            Expr::Binary(a, _, b, _)
+            | Expr::Compare(a, _, b, _)
+            | Expr::Logical(a, _, b, _)
+            | Expr::Contains(a, b, _) => {
                 self.expr(a);
                 self.expr(b);
             }
@@ -784,9 +787,10 @@ struct Found {
 fn has_effect(e: &Expr) -> bool {
     match e {
         Expr::LibCall(..) | Expr::NewObj(..) | Expr::HttpGet(..) => true,
-        Expr::Binary(a, _, b, _) | Expr::Compare(a, _, b, _) | Expr::Logical(a, _, b, _) => {
-            has_effect(a) || has_effect(b)
-        }
+        Expr::Binary(a, _, b, _)
+        | Expr::Compare(a, _, b, _)
+        | Expr::Logical(a, _, b, _)
+        | Expr::Contains(a, b, _) => has_effect(a) || has_effect(b),
         Expr::Neg(a, _) | Expr::Not(a, _) => has_effect(a),
         Expr::ListLit(items) | Expr::TupleLit(items) | Expr::SetLit(items) => {
             items.iter().any(has_effect)

@@ -63,6 +63,10 @@ pub enum Expr {
     /// A comparison used as a value: `x > y`, `name == "Aung"`. The same
     /// operators a condition accepts, producing a `bool`.
     Compare(Box<Expr>, String, Box<Expr>, usize), // line of the operator
+    /// Membership, the operator spelling of `contains(<haystack>, <needle>)`:
+    /// `x in xs` in the eng syntax and `xs ထဲ x` in the Myanmar one. The
+    /// fields are (haystack, needle), so both spellings share one node.
+    Contains(Box<Expr>, Box<Expr>, usize), // line of the operator
     /// The eng library's logical-and / logical-or used as a value:
     /// `a && b`, `a || b`. Both sides must be `bool`. Expressions
     /// short-circuit, so the right side is not evaluated when the left one
@@ -500,6 +504,9 @@ const KW_TO: &str = "သို့";
 /// instead of a generic syntax error.
 const KW_CONVERT: &str = "ပြောင်းပါ";
 const KW_LOOP_FROM: &str = "ထဲမှ";
+/// `ထဲ` -- the short loop particle (`x သည် xs ထဲ တစ်ခုစီ`) and the
+/// membership operator (`(xs ထဲ x)` is `x in xs`).
+const KW_INSIDE: &str = "ထဲ";
 const KW_LOOP_EACH: &str = "တစ်ခုစီ";
 
 // Type-check condition keywords: "<var/val> သည် <type>" inside if/while.
@@ -1558,6 +1565,11 @@ fn parse_expr(tokens: &[Token], line: usize) -> Result<Expr, String> {
 /// `(10 - 4) - 3`, while `1 + 2 * 3` is `1 + (2 * 3)` -- `*` binds tighter
 /// than `+`.
 fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usize), String> {
+    // Arrow lambda: `x => x * 2` / `(a, b) => a + b`. Its body is the rest of
+    // the expression, so it is recognized before every operator tier.
+    if let Some((lambda, next)) = try_parse_arrow_lambda(tokens, pos, line)? {
+        return Ok((lambda, next));
+    }
     let (cond, i) = parse_or_at(tokens, pos, line)?;
     // Conditional expression: `<cond> ? <then> : <else>`. It sits at the
     // loosest level, below `||`, and associates to the right -- `a ? b : c ?
@@ -1581,6 +1593,62 @@ fn parse_expr_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
         ));
     }
     Ok((cond, i))
+}
+
+/// An arrow lambda, the short spelling of `fn(<params>) { <body> }`:
+///   - `<name> => <expression>`
+///   - `(<p1>, <p2>) => <expression>`
+/// The expression after `=>` is the lambda's body, so `map(xs, x => x * 2)`
+/// needs no braces. Returns `None` when the tokens are not an arrow lambda.
+fn try_parse_arrow_lambda(
+    tokens: &[Token],
+    pos: usize,
+    line: usize,
+) -> Result<Option<(Expr, usize)>, String> {
+    let mut params: Vec<String> = Vec::new();
+    let body_start = match tokens.get(pos).map(|t| &t.tok) {
+        Some(Tok::Ident(name))
+            if matches!(tokens.get(pos + 1).map(|t| &t.tok), Some(Tok::Arrow)) =>
+        {
+            params.push(name.clone());
+            pos + 2
+        }
+        Some(Tok::LParen) => {
+            let close = find_close(tokens, pos, line)?;
+            if !matches!(tokens.get(close + 1).map(|t| &t.tok), Some(Tok::Arrow)) {
+                return Ok(None);
+            }
+            let inner = &tokens[pos + 1..close];
+            if inner.is_empty() {
+                return Err(lambda_bad_form_err(line));
+            }
+            for part in split_top_level(inner, |t| matches!(t, Tok::Comma)) {
+                match part {
+                    [p] => match &p.tok {
+                        Tok::Ident(s) => params.push(s.clone()),
+                        _ => return Err(lambda_bad_form_err(line)),
+                    },
+                    _ => return Err(lambda_bad_form_err(line)),
+                }
+            }
+            close + 2
+        }
+        _ => return Ok(None),
+    };
+    if body_start >= tokens.len() {
+        return Err(lambda_bad_form_err(line));
+    }
+    let (value, next) = parse_expr_at(tokens, body_start, line)?;
+    let defaults = vec![None; params.len()];
+    Ok(Some((
+        Expr::Lambda {
+            params,
+            defaults,
+            body: vec![Stmt::ExprStmt { value, line }],
+            line,
+        },
+        next,
+    )))
 }
 
 /// A ternary with its `?` but without the `:` and the else branch.
@@ -1628,9 +1696,26 @@ fn parse_cmp_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usiz
             let (rhs, ni) = parse_add_at(tokens, i + 1, line)?;
             expr = Expr::Compare(Box::new(expr), op.clone(), Box::new(rhs), op_line);
             i = ni;
-        } else {
-            break;
+            continue;
         }
+        // Membership. The two spellings put the collection on different
+        // sides: eng reads `<needle> in <haystack>`, Myanmar reads
+        // `<haystack> ထဲ <needle>`.
+        if ident_eq(&tokens[i].tok, ENG_IN) {
+            let op_line = tokens[i].line;
+            let (haystack, ni) = parse_add_at(tokens, i + 1, line)?;
+            expr = Expr::Contains(Box::new(haystack), Box::new(expr), op_line);
+            i = ni;
+            continue;
+        }
+        if ident_eq(&tokens[i].tok, KW_INSIDE) {
+            let op_line = tokens[i].line;
+            let (needle, ni) = parse_add_at(tokens, i + 1, line)?;
+            expr = Expr::Contains(Box::new(expr), Box::new(needle), op_line);
+            i = ni;
+            continue;
+        }
+        break;
     }
     Ok((expr, i))
 }
@@ -1696,6 +1781,11 @@ fn parse_unary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, us
             let op_line = t.line;
             let (inner, next) = parse_unary_at(tokens, pos + 1, line)?;
             return Ok((Expr::Not(Box::new(inner), op_line), next));
+        }
+        // Unary plus, so a range step can be written with its sign:
+        // `(1, 2, +1)` is the same step as `(1, 2, 1)`.
+        if matches!(t.tok, Tok::Op('+')) {
+            return parse_unary_at(tokens, pos + 1, line);
         }
     }
     parse_pow_at(tokens, pos, line)
@@ -2165,8 +2255,23 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
     let mut depth = 0i32;
     let mut pending_header = 0i32;
     let mut start = 0usize;
+    // A one-line guard (`(<cond>) ဖြစ်ရင်။ <statement>။`) has no `ပြီး။` of
+    // its own: its header opens a level that the guarded statement's own `။`
+    // closes. `guard_levels` holds the depth of every open guard, and
+    // `guard_headers` says whether that guard's header `။` was consumed.
+    let mut guard_levels: Vec<i32> = Vec::new();
+    let mut guard_headers: Vec<bool> = Vec::new();
     for (i, t) in tokens.iter().enumerate() {
         let was_close = is_close(&t.tok);
+        // A condition terminator written with its own `။` is a guard header,
+        // not a block header: no `ပြီး။` will ever close it.
+        if pending_header == 0
+            && (is_then_pos(&t.tok) || is_then_neg(&t.tok))
+            && matches!(tokens.get(i + 1).map(|t| &t.tok), Some(Tok::End))
+        {
+            guard_levels.push(depth + 1);
+            guard_headers.push(false);
+        }
         advance_block_depth(&t.tok, &mut depth, &mut pending_header);
         if was_close {
             // An eng block statement (`if (...) { ... }`, `while (...) {...}`,
@@ -2191,11 +2296,37 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
                 stmts.push((slice.to_vec(), line));
                 start = i + 1;
             }
-        } else if depth == 0 && matches!(t.tok, Tok::End) {
-            let slice = &tokens[start..=i];
-            let line = slice[0].line;
-            stmts.push((slice.to_vec(), line));
-            start = i + 1;
+        } else if matches!(t.tok, Tok::End) {
+            if let Some(level) = guard_levels.last().copied() {
+                if depth == level {
+                    if !guard_headers.last().copied().unwrap_or(true) {
+                        // The `။` closing the guard's own header.
+                        if let Some(header) = guard_headers.last_mut() {
+                            *header = true;
+                        }
+                    } else {
+                        // The guarded statement ends here, and with it the
+                        // guard's level -- so its `။` also ends the chunk
+                        // when the guard sits at the top level.
+                        guard_levels.pop();
+                        guard_headers.pop();
+                        depth -= 1;
+                        if depth == 0 {
+                            let slice = &tokens[start..=i];
+                            let line = slice[0].line;
+                            stmts.push((slice.to_vec(), line));
+                            start = i + 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+            if depth == 0 {
+                let slice = &tokens[start..=i];
+                let line = slice[0].line;
+                stmts.push((slice.to_vec(), line));
+                start = i + 1;
+            }
         } else if depth == 0 && matches!(t.tok, Tok::Semicolon) {
             // The eng library's ';' terminator: ends a statement just like
             // '။' does, so several eng declarations can sit on consecutive
@@ -3452,6 +3583,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         return parse_eng_block_statement(decl_body, line);
     }
 
+    // --- eng postfix guard: `<statement> if (<condition>);` -- a one-line
+    //     conditional, e.g. `print("x") if (age > 18);` ---
+    if terminated {
+        if let Some(stmt) = try_parse_postfix_guard(decl_body, line)? {
+            return Ok(stmt);
+        }
+    }
+
     // --- eng `break` / `return` without their ';', as the last statement of a
     //     block: `if (...) { break }` ---
     if !end_present && !terminated {
@@ -3579,6 +3718,14 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 }
                 return parse_for_loop(&body, line);
             }
+        }
+    }
+
+    // --- Myanmar one-line guard: `(<condition>) ဖြစ်ရင်။ <statement>။` --
+    //     the single-statement if that needs no closing `ပြီး။` ---
+    if end_present {
+        if let Some(stmt) = try_parse_one_line_guard(&body, line)? {
+            return Ok(stmt);
         }
     }
 
@@ -4373,13 +4520,55 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     Err(generic_syntax_err(line))
 }
 
-/// Does a block's tokens open a `<var> အတွက် တစ်ခုစီ(<args>)` loop header?
-/// `တစ်ခုစီ` is reserved, so no other statement can hold that slot.
+/// Where `တစ်ခုစီ` sits in a parenthesized loop header -- `<var> အတွက်
+/// တစ်ခုစီ(...)` or `<var> သည် တစ်ခုစီ(...)` -- or `None` when the statement
+/// is not one. `တစ်ခုစီ` is reserved, so no other statement can hold that
+/// slot.
+fn for_each_head(tokens: &[Token]) -> Option<usize> {
+    if !matches!(tokens.first().map(|t| &t.tok), Some(Tok::Ident(_))) {
+        return None;
+    }
+    let is_header = (ident_eq_opt(tokens.get(1), KW_FOR)
+        || ident_eq_opt(tokens.get(1), KW_ASSIGN))
+        && ident_eq_opt(tokens.get(2), KW_LOOP_EACH);
+    if !is_header {
+        return None;
+    }
+    if matches!(tokens.get(3).map(|t| &t.tok), Some(Tok::LParen)) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Does a block's tokens open a parenthesized for-loop header?
 fn is_for_each_header(tokens: &[Token]) -> bool {
-    matches!(tokens.first().map(|t| &t.tok), Some(Tok::Ident(_)))
-        && ident_eq_opt(tokens.get(1), KW_FOR)
-        && ident_eq_opt(tokens.get(2), KW_LOOP_EACH)
-        && matches!(tokens.get(3).map(|t| &t.tok), Some(Tok::LParen))
+    for_each_head(tokens).is_some()
+}
+
+/// The argument list of a parenthesized for-loop source. The argument count
+/// picks the source:
+///
+///   - one: a collection, or a number (which ranges from 0, exclusive)
+///   - two: `<from>, <end>`, stepping by 1
+///   - three: `<from>, <end>, <step>` (the step may carry its sign: `+1`)
+///
+/// `<end>` is exclusive and the sign of `<step>` picks the direction.
+fn parse_for_source_args(tokens: &[Token], line: usize) -> Result<ForSource, String> {
+    match split_top_level(tokens, |t| matches!(t, Tok::Comma)).as_slice() {
+        [src] => Ok(ForSource::Auto(parse_expr(src, line)?)),
+        [start, end] => Ok(ForSource::RangeSigned {
+            start: parse_expr(start, line)?,
+            end: parse_expr(end, line)?,
+            step: Expr::Int(1),
+        }),
+        [start, end, step] => Ok(ForSource::RangeSigned {
+            start: parse_expr(start, line)?,
+            end: parse_expr(end, line)?,
+            step: parse_expr(step, line)?,
+        }),
+        _ => Err(generic_syntax_err(line)),
+    }
 }
 
 /// Parse a `<var> အတွက် တစ်ခုစီ(<args>)` loop, the parenthesized spelling of
@@ -4397,21 +4586,9 @@ fn parse_for_each_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
         Tok::Ident(s) => s.clone(),
         _ => unreachable!(),
     };
-    let close = find_close(inner, 3, line)?;
-    let source = match split_top_level(&inner[4..close], |t| matches!(t, Tok::Comma)).as_slice() {
-        [src] => ForSource::Auto(parse_expr(src, line)?),
-        [start, end] => ForSource::RangeSigned {
-            start: parse_expr(start, line)?,
-            end: parse_expr(end, line)?,
-            step: Expr::Int(1),
-        },
-        [start, end, step] => ForSource::RangeSigned {
-            start: parse_expr(start, line)?,
-            end: parse_expr(end, line)?,
-            step: parse_expr(step, line)?,
-        },
-        _ => return Err(generic_syntax_err(line)),
-    };
+    let each = for_each_head(inner).ok_or_else(|| generic_syntax_err(line))?;
+    let close = find_close(inner, each + 1, line)?;
+    let source = parse_for_source_args(&inner[each + 2..close], line)?;
     Ok(Stmt::ForLoop {
         var_name,
         source,
@@ -4435,26 +4612,52 @@ fn parse_for_loop(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Err(generic_syntax_err(line));
     }
 
-    let htm_idx = find_kw_top_level(inner, KW_LOOP_FROM).ok_or_else(|| generic_syntax_err(line))?;
+    // `ထဲ` is the short particle; `ထဲမှ` is the longer spelling of the same
+    // loop header.
+    let htm_idx = find_kw_top_level(inner, KW_LOOP_FROM)
+        .or_else(|| find_kw_top_level(inner, KW_INSIDE))
+        .ok_or_else(|| generic_syntax_err(line))?;
     let source_tokens = &inner[2..htm_idx];
-    if source_tokens.is_empty() {
-        return Err(generic_syntax_err(line));
-    }
 
     let tcs_idx = htm_idx + 1;
     if tcs_idx >= inner.len() || !ident_eq(&inner[tcs_idx].tok, KW_LOOP_EACH) {
         return Err(generic_syntax_err(line));
     }
 
+    // `x သည် တစ်ခုစီ(1, 2, +1)` -- the source is the parenthesized argument
+    // list, the same one the `အတွက် တစ်ခုစီ(...)` header takes. It replaces
+    // the value before `ထဲ`, so the two are not written together.
+    if matches!(inner.get(tcs_idx + 1).map(|t| &t.tok), Some(Tok::LParen)) {
+        if !source_tokens.is_empty() {
+            return Err(generic_syntax_err(line));
+        }
+        let close = find_close(inner, tcs_idx + 1, line)?;
+        let source = parse_for_source_args(&inner[tcs_idx + 2..close], line)?;
+        return Ok(Stmt::ForLoop {
+            var_name,
+            source,
+            body: parse_block(&inner[close + 1..])?,
+            line,
+        });
+    }
+    if source_tokens.is_empty() {
+        return Err(generic_syntax_err(line));
+    }
+
     // Optionally, a range step + math-fn immediately follows "တစ်ခုစီ"
-    // (e.g. "1 တိုးခြင်းဖြင့်"). If it's not there, this is a plain
-    // collection-iteration loop and the body starts right away.
+    // (e.g. "1 တိုးခြင်းဖြင့်"; the step may carry its sign, "+1 ...").
+    // If it's not there, this is a plain collection-iteration loop and the
+    // body starts right away.
     let mut cursor = tcs_idx + 1;
     let mut range_step: Option<(Expr, char)> = None;
     if cursor < inner.len()
-        && (matches!(inner[cursor].tok, Tok::Num(_)) || matches!(inner[cursor].tok, Tok::Op('-')))
+        && (matches!(inner[cursor].tok, Tok::Num(_))
+            || matches!(inner[cursor].tok, Tok::Op('-'))
+            || matches!(inner[cursor].tok, Tok::Op('+')))
     {
-        if let Ok((step_expr, next)) = parse_term_at(inner, cursor, line) {
+        // A step may carry its sign (`+2`, `-1`), so it is parsed with the
+        // unary tier rather than a bare term.
+        if let Ok((step_expr, next)) = parse_unary_at(inner, cursor, line) {
             if next < inner.len() {
                 if let Tok::Ident(s) = &inner[next].tok {
                     if let Some(op) = loop_fn_op(s) {
@@ -4574,6 +4777,89 @@ fn parse_try_catch(inner: &[Token]) -> Result<Stmt, String> {
         catch_body,
         finally_body,
     })
+}
+
+/// Parse the eng postfix guard, a one-line conditional with its condition
+/// written after the statement it guards:
+///
+///   `print("x") if (age > 18);`
+///
+/// `body` is the statement without its `;`. Returns `None` when the chunk has
+/// no trailing `if (<condition>)`.
+fn try_parse_postfix_guard(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    let Some(if_idx) = find_kw_top_level(body, ENG_IF) else {
+        return Ok(None);
+    };
+    if if_idx == 0 || !matches!(body.get(if_idx + 1).map(|t| &t.tok), Some(Tok::LParen)) {
+        return Ok(None);
+    }
+    let close = find_close(body, if_idx + 1, line)?;
+    if close + 1 != body.len() {
+        return Ok(None);
+    }
+    let cond = parse_eng_cond(&body[if_idx + 1..=close], line)?;
+    // The guarded statement ends at the guard's own ';', so it gets a
+    // terminator of the spelling it was written in.
+    let mut guarded = body[..if_idx].to_vec();
+    guarded.push(Token {
+        tok: if looks_like_eng_stmt(&body[..if_idx]) {
+            Tok::Semicolon
+        } else {
+            Tok::End
+        },
+        line,
+    });
+    let guarded = parse_stmt(&guarded, line)?;
+    Ok(Some(Stmt::If {
+        branches: vec![IfBranch {
+            cond: Some(cond),
+            negate: false,
+            body: vec![guarded],
+        }],
+    }))
+}
+
+/// Parse the Myanmar one-line guard, the short spelling of an if whose body
+/// follows its header's own `။`, so no closing `ပြီး။` is needed:
+///
+///   `(age > 18) ဖြစ်ရင်။ "x" ကို ပြပါ။`
+///
+/// The negative forms (`မဖြစ်ရင်`) guard the other way, exactly like their
+/// block spelling. `body` is a statement chunk with its trailing `။` already
+/// stripped; `None` means the chunk is not a guard, so the ordinary statement
+/// forms still report their own errors.
+fn try_parse_one_line_guard(body: &[Token], line: usize) -> Result<Option<Stmt>, String> {
+    let Some((term, which)) =
+        find_first_at_block_level(body, &[KW_THEN_POS, KW_THEN_POS_ALT, KW_THEN_NEG, KW_THEN_NEG_ALT])
+    else {
+        return Ok(None);
+    };
+    // A guard has a condition in front of its terminator, and only the short
+    // spelling (no leading `အကယ်၍` / `အခြေအနေ`) takes this form.
+    if term == 0 || ident_eq(&body[0].tok, KW_IF) || ident_eq(&body[0].tok, KW_WHILE) {
+        return Ok(None);
+    }
+    let mut start = term + 1;
+    // The header's own `။`.
+    if matches!(body.get(start).map(|t| &t.tok), Some(Tok::End)) {
+        start += 1;
+    }
+    if start >= body.len() {
+        return Ok(None);
+    }
+    let cond = parse_cond_chain(&body[..term], line, false)?;
+    let mut guarded = body[start..].to_vec();
+    guarded.push(Token {
+        tok: Tok::End,
+        line,
+    });
+    Ok(Some(Stmt::If {
+        branches: vec![IfBranch {
+            cond: Some(cond),
+            negate: which >= 2,
+            body: parse_block(&guarded)?,
+        }],
+    }))
 }
 
 fn parse_block(tokens: &[Token]) -> Result<Vec<Stmt>, String> {

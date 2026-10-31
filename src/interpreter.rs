@@ -3929,6 +3929,13 @@ impl Interpreter {
                 let rv = self.eval(r, line, var_ctx)?;
                 Ok(Value::Bool(compare_values(&lv, &rv, op, *op_line)?))
             }
+            // Membership: `x in xs` (eng) and `xs ထဲ x` (Myanmar), the
+            // operator spelling of `contains(xs, x)`.
+            Expr::Contains(haystack, needle, op_line) => {
+                let haystack = self.eval(haystack, line, var_ctx)?;
+                let needle = self.eval(needle, line, var_ctx)?;
+                Ok(Value::Bool(value_contains(&haystack, &needle, *op_line)?))
+            }
             Expr::Logical(l, op, r, op_line) => {
                 let lv = self.eval(l, line, var_ctx)?;
                 let left = bool_operand(&lv, *op_line)?;
@@ -5892,6 +5899,31 @@ fn coerce_eng_input(text: &str, type_name: &str, line: usize) -> Result<Value, S
             _ => Err(eng_input_convert_err(line, text, type_name)),
         },
         _ => Err(eng_input_convert_err(line, text, type_name)),
+    }
+}
+
+/// Membership, as the `in` / `ထဲ` operator evaluates it: a string searches
+/// for a substring, a list / tuple / set for an equal item, and a dict for a
+/// key -- the same rules as the `contains(xs, x)` builtin.
+fn value_contains(haystack: &Value, needle: &Value, line: usize) -> Result<bool, String> {
+    match haystack {
+        Value::Str(s) => match needle {
+            Value::Str(n) => Ok(s.contains(n.as_str())),
+            other => Err(format!(
+                "E110 line {}: `in` needs a string to search for, got {}",
+                line,
+                type_name_mm(other)
+            )),
+        },
+        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+            Ok(items.iter().any(|v| value_eq(v, needle)))
+        }
+        Value::Dict(pairs) => Ok(pairs.iter().any(|(k, _)| value_eq(k, needle))),
+        other => Err(format!(
+            "E110 line {}: `in` needs a string or collection on the left, got {}",
+            line,
+            type_name_mm(other)
+        )),
     }
 }
 
