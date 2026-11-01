@@ -88,6 +88,9 @@ Restart PowerShell and `akk file.akk` works from anywhere.
 - Function definition: `လုပ်ငန်း <name> သည်` ... `ပြီး။` (no parameters),
   `လုပ်ငန်း <name> အတွက် <p1>, <p2> ဖြင့်` ... `ပြီး။`, or a parenthesized header:
   `လုပ်ငန်း <name>() သည်` ... `ပြီး။` / `လုပ်ငန်း <name>(<p1>, <p2>) ဖြင့်` ... `ပြီး။`.
+  Either parameter list may give trailing parameters defaults, the same
+  `name = <value>` spelling an eng `fn` header takes:
+  `လုပ်ငန်း greet(name, punct = "!") သည်` ... `ပြီး။` takes one argument or two.
 - Function call, bare spelling: `<fn>()` / `<fn>(<arg>[, <arg>])` -- the same call
   as `<fn> ကို လုပ်ပါ။`; a trailing `;` or `။` is optional, and one of them is
   needed when another statement follows (`greet();` or `greet()။`).
@@ -448,24 +451,31 @@ switch (n) {
 }
 ```
 
-- **Ternary** — `<cond> ? <then> : <else>`. `<cond>` must be `မှန်/မှား`
-  (`E043` otherwise), only the chosen branch is evaluated, it binds looser
-  than `||`, and it associates to the right
-  (`a ? b : c ? d : e` is `a ? b : (c ? d : e)`). A missing `:` is `E151`.
+- **Ternary** — `<cond> ? <then> : <else>`, or the Myanmar spelling
+  `(<cond>) ဖြစ်ရင် <then> မဟုတ်ရင် <else>` written where a value is expected:
+  `(n % 2 == 0 ဖြစ်ရင် "စုံ" မဟုတ်ရင် "မ") ကို ပြပါ။` `<cond>` must be
+  `မှန်/မှား` (`E043` otherwise), only the chosen branch is evaluated, it
+  binds looser than `||`, and it associates to the right
+  (`a ? b : c ? d : e` is `a ? b : (c ? d : e)`). A missing `:` is `E151`;
+  the Myanmar form's missing `မဟုတ်ရင်` is `E157`.
 - **switch** — `switch (<value>) { case <value>: <statements> default:
-  <statements> }`. Cases are tried in order and only the first match runs, so
-  there is no fall-through and no `break` is needed; `default` runs when none
-  matched, wherever it is written. `break` inside an arm stops the switch.
-  A malformed switch is `E153`.
-- **Default parameters** — `fn f(a, b = 1, c = b * 2)`. Defaults must be the
+  <statements> }`, or the Myanmar spelling
+  `ရွေးရန် (<value>) ... ပြီး။` with `<value> ဖြစ်ရင် <statements>` arms and a
+  `မူလ <statements>` default. Cases are tried in order and only the first
+  match runs, so there is no fall-through and no `break` is needed; `default`
+  runs when none matched, wherever it is written. `break` inside an arm stops
+  the switch. A malformed switch is `E153` (`E156` in the Myanmar spelling).
+- **Default parameters** — `fn f(a, b = 1, c = b * 2)`, and the same
+  `name = <value>` on a Myanmar `လုပ်ငန်း` header. Defaults must be the
   trailing parameters (a required one after a default is `E109`), a call may
   supply any number of arguments from the required count up to the full list
   (`E033` otherwise), and each default is evaluated in the call's own frame,
   so it can read the parameters before it. Lambdas take them too:
   `fn(x, times = 2) { x * times }`.
-- **Destructuring** — `[a, b] = <list or tuple>;` (also `(a, b) = ...`). The
-  value must have exactly one item per name (`E154` for a non-list, `E155`
-  for a count mismatch), and names already declared become assignments.
+- **Destructuring** — `[a, b] = <list or tuple>;` (also `(a, b) = ...`), or
+  the Myanmar spelling `[a, b] သည် <list or tuple> ဖြစ်၏။`. The value must
+  have exactly one item per name (`E154` for a non-list, `E155` for a count
+  mismatch), and names already declared become assignments.
 
 ### eng — library calls
 
@@ -534,8 +544,8 @@ returned nothing, `E118` bad `use` import form.
 ### Known limitations
 - There is no automatic terminator: every statement needs its `;` or `။`,
   even when a line break makes the end obvious.
-- Default parameters are accepted on `fn` and lambda headers only; a Myanmar
-  `လုပ်ငန်း` definition and a class constructor take plain parameter names.
+- Default parameters are accepted on `fn`, lambda and `လုပ်ငန်း` headers only;
+  a class constructor takes plain parameter names.
 - Destructuring takes a list or tuple of plain names: no nested patterns and
   no dict/object destructuring.
 - `switch` is a statement, not a value. Where a value is needed, use a ternary
