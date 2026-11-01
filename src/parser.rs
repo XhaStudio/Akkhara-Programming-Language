@@ -571,6 +571,11 @@ const KW_FUNC_DEF_ALT: &str = "လုပ်ငန်း";
 fn is_func_def_kw(tok: &Tok) -> bool {
     ident_eq(tok, KW_FUNC_DEF) || ident_eq(tok, KW_FUNC_DEF_ALT)
 }
+/// `ရွေးရန်` -- the Myanmar switch header: `ရွေးရန် (<value>) ... ပြီး။`.
+const KW_SWITCH: &str = "ရွေးရန်";
+/// `မူလ` -- the `default:` arm of a `ရွေးရန်` switch, run only when no
+/// `<value> ဖြစ်ရင်` arm matched.
+const KW_SWITCH_DEFAULT: &str = "မူလ";
 const KW_BY: &str = "ဖြင့်";
 const KW_CALL: &str = "လုပ်ပါ";
 const KW_CALL_WITH: &str = "လုပ်ရန်";
@@ -2051,6 +2056,35 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
         Tok::LParen => {
             let close = find_close(tokens, pos, tokens[pos].line)?;
             let inner = &tokens[pos + 1..close];
+            // Myanmar conditional expression, the value form of an if/else:
+            //   (n % 2 == 0 ဖြစ်ရင် "even" မဟုတ်ရင် "odd")
+            // The same node and evaluation rules as the eng
+            // `<cond> ? <then> : <else>`.
+            if let Some((then_idx, _)) =
+                find_first_at_block_level(inner, &[KW_THEN_POS_ALT, KW_THEN_POS])
+            {
+                let (else_rel, _) = find_first_at_block_level(
+                    &inner[then_idx + 1..],
+                    &[KW_ELSE_ALT, KW_ELSE],
+                )
+                .ok_or_else(|| myanmar_ternary_bad_form_err(line))?;
+                let else_idx = then_idx + 1 + else_rel;
+                let cond = parse_expr(&inner[..then_idx], line)
+                    .map_err(|_| myanmar_ternary_bad_form_err(line))?;
+                let then_expr = parse_expr(&inner[then_idx + 1..else_idx], line)
+                    .map_err(|_| myanmar_ternary_bad_form_err(line))?;
+                let else_expr = parse_expr(&inner[else_idx + 1..], line)
+                    .map_err(|_| myanmar_ternary_bad_form_err(line))?;
+                return Ok((
+                    Expr::Ternary(
+                        Box::new(cond),
+                        Box::new(then_expr),
+                        Box::new(else_expr),
+                        tokens[pos].line,
+                    ),
+                    close + 1,
+                ));
+            }
             // A call written with its arguments first -- `(1, 2) add`, `() now`
             // -- is the same call as `add(1, 2)` / `now()`, and `(<args>)`
             // before a class name creates an object the same way
@@ -2220,11 +2254,25 @@ fn is_branch_separator(tok: &Tok) -> bool {
 /// one of the two counts it. An else-if / else separator marks the header as
 /// pending again, which keeps the next branch's terminator neutral -- every
 /// branch belongs to the same level.
-fn advance_block_depth(tok: &Tok, depth: &mut i32, pending_header: &mut i32) {
+fn advance_block_depth(
+    tok: &Tok,
+    depth: &mut i32,
+    pending_header: &mut i32,
+    neutral_terminators: bool,
+) {
     if is_open(tok) {
         *depth += 1;
     } else if is_close(tok) {
         *depth -= 1;
+    } else if ident_eq(tok, KW_SWITCH) {
+        // A switch opens its own level, closed by its trailing `ပြီး`;
+        // its arms' `ဖြစ်ရင်` terminators are neutral (see below).
+        *depth += 1;
+    } else if neutral_terminators && is_cond_terminator(tok) {
+        // The `ဖြစ်ရင်` of a parenthesized conditional expression
+        // (`(cond ဖြစ်ရင် <then> မဟုတ်ရင် <else>)`) is part of a value, and
+        // the `ဖြစ်ရင်` of a switch arm selects a branch -- neither opens a
+        // block of its own.
     } else if ident_eq(tok, KW_LOOP_EACH)
         || is_func_def_kw(tok)
         || ident_eq(tok, KW_CLASS_DEF)
@@ -2261,8 +2309,15 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
     // `guard_headers` says whether that guard's header `။` was consumed.
     let mut guard_levels: Vec<i32> = Vec::new();
     let mut guard_headers: Vec<bool> = Vec::new();
+    // Bracket nesting is tracked separately from block nesting: a `ဖြစ်ရင်`
+    // inside `( ... )` belongs to a conditional expression, not a block.
+    let mut bracket_depth = 0i32;
+    // The block depth of every open `ရွေးရန်` switch. Its arms' terminators
+    // are neutral, so the level stays open until the switch's own `ပြီး`.
+    let mut switch_levels: Vec<i32> = Vec::new();
     for (i, t) in tokens.iter().enumerate() {
         let was_close = is_close(&t.tok);
+        let neutral_terminators = bracket_depth > 0 || !switch_levels.is_empty();
         // A condition terminator written with its own `။` is a guard header,
         // not a block header: no `ပြီး။` will ever close it.
         if pending_header == 0
@@ -2272,7 +2327,25 @@ fn split_statements(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
             guard_levels.push(depth + 1);
             guard_headers.push(false);
         }
-        advance_block_depth(&t.tok, &mut depth, &mut pending_header);
+        advance_block_depth(
+            &t.tok,
+            &mut depth,
+            &mut pending_header,
+            neutral_terminators,
+        );
+        if ident_eq(&t.tok, KW_SWITCH) && bracket_depth == 0 {
+            switch_levels.push(depth);
+        }
+        if ident_eq(&t.tok, KW_LOOP_END) {
+            while switch_levels.last().is_some_and(|level| *level > depth) {
+                switch_levels.pop();
+            }
+        }
+        if is_open(&t.tok) {
+            bracket_depth += 1;
+        } else if was_close {
+            bracket_depth -= 1;
+        }
         if was_close {
             // An eng block statement (`if (...) { ... }`, `while (...) {...}`,
             // `fn ... {...}`, `loop {...}`) or a `= loop { ... }` value has no
@@ -2382,7 +2455,7 @@ fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, u
                 }
             }
         }
-        advance_block_depth(&t.tok, &mut depth, &mut pending_header);
+        advance_block_depth(&t.tok, &mut depth, &mut pending_header, false);
     }
     None
 }
@@ -3023,6 +3096,128 @@ fn parse_eng_switch(tokens: &[Token], line: usize) -> Result<Stmt, String> {
     }
     if arms.is_empty() {
         return Err(eng_switch_form_err(line));
+    }
+    Ok(Stmt::Switch {
+        subject,
+        arms,
+        line,
+    })
+}
+
+fn myanmar_switch_form_err(line: usize) -> String {
+    format!(
+        "E156 လိုင်း {} တွင် \"ရွေးရန် (<တန်ဖိုး>) ... ပြီး။\" ပုံစံဖြင့် ရေးပါ (အကိုင်းတစ်ခုစီသည် \"<တန်ဖိုး> ဖြစ်ရင် ...\" သို့မဟုတ် \"မူလ ...\")။",
+        line
+    )
+}
+
+fn myanmar_ternary_bad_form_err(line: usize) -> String {
+    format!(
+        "E157 လိုင်း {} တွင် \"(<အခြေအနေ>) ဖြစ်ရင် <တန်ဖိုး> မဟုတ်ရင် <တန်ဖိုး>\" ပုံစံဖြင့် ရေးပါ။",
+        line
+    )
+}
+
+fn myanmar_destructure_bad_form_err(line: usize) -> String {
+    format!(
+        "E158 လိုင်း {} တွင် \"[a, b] သည် <စာရင်း> ဖြစ်၏။\" ပုံစံဖြင့် နာမည်များသာ ရေးပါ။",
+        line
+    )
+}
+
+/// Split a `ရွေးရန်` body into its arms. Every `။` at bracket depth 0 ends
+/// an arm statement (the arm's own `ဖြစ်ရင်` is a selector, not a block
+/// header), and the statement's `။` stays in its chunk so the ordinary
+/// statement parser can read it. A header written on a line of its own
+/// (`7 ဖြစ်ရင်`) leaves its body to the following chunks.
+fn split_switch_arms(tokens: &[Token]) -> Vec<(Vec<Token>, usize)> {
+    let mut arms = Vec::new();
+    let mut bracket_depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        if is_open(&t.tok) {
+            bracket_depth += 1;
+        } else if is_close(&t.tok) {
+            bracket_depth -= 1;
+        } else if bracket_depth == 0 && matches!(t.tok, Tok::End) {
+            let slice = &tokens[start..=i];
+            arms.push((slice.to_vec(), slice[0].line));
+            start = i + 1;
+        }
+    }
+    if start < tokens.len() {
+        let slice = &tokens[start..];
+        arms.push((slice.to_vec(), slice[0].line));
+    }
+    arms
+}
+
+/// `ရွေးရန် (<value>) ... ပြီး။` -- the Myanmar switch. Each arm is
+/// `<value> ဖြစ်ရင် <statements>` and the default is `မူလ <statements>`;
+/// arms are tried in order and only the first match runs, so there is no
+/// fall-through and no `break` is needed.
+fn parse_switch_statement(inner: &[Token], line: usize) -> Result<Stmt, String> {
+    if inner.is_empty() || !matches!(inner[0].tok, Tok::LParen) {
+        return Err(myanmar_switch_form_err(line));
+    }
+    let close = find_close(inner, 0, line).map_err(|_| myanmar_switch_form_err(line))?;
+    let subject =
+        parse_expr(&inner[1..close], line).map_err(|_| myanmar_switch_form_err(line))?;
+
+    let mut arms: Vec<SwitchArm> = Vec::new();
+    let mut seen_default = false;
+    for (chunk, chunk_line) in split_switch_arms(&inner[close + 1..]) {
+        if chunk.is_empty() {
+            continue;
+        }
+        if ident_eq(&chunk[0].tok, KW_SWITCH_DEFAULT) {
+            if seen_default {
+                return Err(myanmar_switch_form_err(chunk_line));
+            }
+            seen_default = true;
+            let mut tail = &chunk[1..];
+            if matches!(tail.first().map(|t| &t.tok), Some(Tok::Colon)) {
+                tail = &tail[1..];
+            }
+            let mut body = Vec::new();
+            if !tail.is_empty() {
+                body.push(parse_stmt(tail, chunk_line)?);
+            }
+            arms.push(SwitchArm {
+                case: None,
+                body,
+                line: chunk_line,
+            });
+            continue;
+        }
+        if let Some((then_idx, _)) =
+            find_first_at_block_level(&chunk, &[KW_THEN_POS_ALT, KW_THEN_POS])
+        {
+            if then_idx == 0 {
+                return Err(myanmar_switch_form_err(chunk_line));
+            }
+            let case = parse_expr(&chunk[..then_idx], chunk_line)
+                .map_err(|_| myanmar_switch_form_err(chunk_line))?;
+            let tail = &chunk[then_idx + 1..];
+            let mut body = Vec::new();
+            if !tail.is_empty() {
+                body.push(parse_stmt(tail, chunk_line)?);
+            }
+            arms.push(SwitchArm {
+                case: Some(case),
+                body,
+                line: chunk_line,
+            });
+            continue;
+        }
+        // A further statement of the arm above (its header stood alone).
+        let Some(arm) = arms.last_mut() else {
+            return Err(myanmar_switch_form_err(chunk_line));
+        };
+        arm.body.push(parse_stmt(&chunk, chunk_line)?);
+    }
+    if arms.is_empty() {
+        return Err(myanmar_switch_form_err(line));
     }
     Ok(Stmt::Switch {
         subject,
@@ -3712,6 +3907,10 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 if !body.is_empty() && ident_eq(&body[0].tok, KW_TRY) {
                     let inner = body[1..].to_vec();
                     return parse_try_catch(&inner);
+                }
+                if !body.is_empty() && ident_eq(&body[0].tok, KW_SWITCH) {
+                    let inner = body[1..].to_vec();
+                    return parse_switch_statement(&inner, line);
                 }
                 if is_for_each_header(&body) {
                     return parse_for_each_loop(&body, line);
@@ -4450,6 +4649,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         let label = match &target {
             Expr::Ident(name) => name.clone(),
             Expr::Index(..) => "index".to_string(),
+            Expr::ListLit(_) | Expr::TupleLit(_) => "destructure".to_string(),
             _ => return Err(generic_syntax_err(line)),
         };
         let value_tokens = &body[assign_idx + 1..is_idx];
@@ -4468,6 +4668,21 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         let value = parse_expr(value_tokens, line)?;
         return Ok(match target {
             Expr::Ident(name) => Stmt::VarDecl { name, value, line },
+            // Myanmar destructuring: `[a, b] သည် [1, 2] ဖြစ်၏။` -- one name
+            // per item, in order, the same statement as `[a, b] = [1, 2];`.
+            Expr::ListLit(items) | Expr::TupleLit(items) => {
+                if items.is_empty() {
+                    return Err(myanmar_destructure_bad_form_err(line));
+                }
+                let mut names = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        Expr::Ident(name) => names.push(name),
+                        _ => return Err(myanmar_destructure_bad_form_err(line)),
+                    }
+                }
+                Stmt::Destructure { names, value, line }
+            }
             other => Stmt::IndexAssign {
                 target: other,
                 value,
@@ -5254,19 +5469,11 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     // "ဖြင့်"), so `greet() သည်` and `greet(who) ဖြင့်` both read naturally.
     if !rest.is_empty() && matches!(rest[0].tok, Tok::LParen) {
         let close = find_close(rest, 0, line).map_err(|_| func_bad_param_err(line))?;
-        let param_tokens = &rest[1..close];
-        let mut params: Vec<String> = Vec::new();
-        if !param_tokens.is_empty() {
-            for part in split_top_level(param_tokens, |t| matches!(t, Tok::Comma)) {
-                match part {
-                    [p] => match &p.tok {
-                        Tok::Ident(s) => params.push(s.clone()),
-                        _ => return Err(func_bad_param_err(line)),
-                    },
-                    _ => return Err(func_bad_param_err(line)),
-                }
-            }
-        }
+        // Parameters may carry a trailing default, the same `name = <value>`
+        // spelling an eng `fn` header takes:
+        //   လုပ်ငန်း greet(name, punct = "!") သည် ...
+        let (params, defaults) = parse_eng_fn_sig(&rest[1..close], line)
+            .map_err(|_| func_bad_param_err(line))?;
         let term_idx = close + 1;
         let terminated = matches!(
             rest.get(term_idx).map(|t| &t.tok),
@@ -5279,7 +5486,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
         return Ok(Stmt::FuncDef {
             name,
             params,
-            defaults: Vec::new(),
+            defaults,
             body,
             line,
         });
@@ -5288,25 +5495,14 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     let by_idx = find_kw_top_level(rest, KW_BY).ok_or_else(|| func_missing_by_err(line))?;
     let header_tokens = &rest[..by_idx];
 
-    let params: Vec<String> = if header_tokens.is_empty() {
-        Vec::new()
+    let (params, defaults): (Vec<String>, Vec<Option<Expr>>) = if header_tokens.is_empty() {
+        (Vec::new(), Vec::new())
     } else if ident_eq(&header_tokens[0].tok, KW_FOR) {
         let name_tokens = &header_tokens[1..];
         if name_tokens.is_empty() {
             return Err(func_bad_param_err(line));
         }
-        let parts = split_top_level(name_tokens, |t| matches!(t, Tok::Comma));
-        let mut names = Vec::with_capacity(parts.len());
-        for p in parts {
-            if p.len() != 1 {
-                return Err(func_bad_param_err(line));
-            }
-            match &p[0].tok {
-                Tok::Ident(s) => names.push(s.clone()),
-                _ => return Err(func_bad_param_err(line)),
-            }
-        }
-        names
+        parse_eng_fn_sig(name_tokens, line).map_err(|_| func_bad_param_err(line))?
     } else {
         return Err(func_bad_param_err(line));
     };
@@ -5317,7 +5513,7 @@ fn parse_func_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     Ok(Stmt::FuncDef {
         name,
         params,
-        defaults: Vec::new(),
+        defaults,
         body,
         line,
     })
