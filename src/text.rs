@@ -21,7 +21,19 @@
 //!
 //! One deliberate exception: `file.size` counts **bytes**, because that is
 //! what a file's size is; `len` counts characters.
+//!
+//! Cluster boundaries depend only on the text, never on interpreter state, so
+//! they are cached by content. A program that indexes or measures the same
+//! string in a loop (`s[i]`, `len(s)`) pays for one pass over its graphemes,
+//! not one per read: 5k index reads from a 3072-syllable string cost 1376 ms
+//! before the cache and 4 ms after (benchmarks/BASELINE.md). The cache key is
+//! the text itself, so a changed string is simply a different key -- there is
+//! no stale entry to invalidate, and a mutation costs nothing to "clear". The
+//! cache is thread-local, bounded in entries and bytes, and never changes the
+//! result of any function.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// True for the Myanmar characters that attach to the character before them
@@ -49,8 +61,124 @@ fn is_virama(c: char) -> bool {
     c == '\u{1039}'
 }
 
+/// Whether `next` continues the syllable `current` rather than starting a new
+/// one: a Myanmar mark always attaches, and after a virama the next consonant
+/// (a stacked letter) belongs to the same syllable.
+fn joins(current: &str, next: &str) -> bool {
+    next.chars().next().is_some_and(attaches_to_previous)
+        || current.chars().last().is_some_and(is_virama)
+}
+
+/// The byte offset each cluster starts at, in order. One pass over the
+/// graphemes; everything else in this module is derived from this list.
+fn build_starts(text: &str) -> Vec<usize> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut last_start = 0usize;
+    let mut last_end = 0usize;
+    let mut pos = 0usize;
+    for grapheme in text.graphemes(true) {
+        let start = pos;
+        let end = start + grapheme.len();
+        pos = end;
+        if starts.is_empty() {
+            starts.push(start);
+            last_start = start;
+            last_end = end;
+        } else if joins(&text[last_start..last_end], grapheme) {
+            last_end = end;
+        } else {
+            starts.push(start);
+            last_start = start;
+            last_end = end;
+        }
+    }
+    starts
+}
+
+/// How many texts' cluster boundaries to keep, and how many bytes they may
+/// hold. Both bounds are small: a program normally works on one or two long
+/// strings at a time, and a shorter string's list should not be evicted by a
+/// long one that is read once.
+const MAX_CACHED_TEXTS: usize = 8;
+const MAX_CACHED_BYTES: usize = 1 << 20;
+
+struct StartsCache {
+    /// Most recently used first.
+    entries: Vec<(String, Rc<[usize]>)>,
+    bytes: usize,
+}
+
+impl StartsCache {
+    fn new() -> Self {
+        StartsCache {
+            entries: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    fn get(&mut self, text: &str) -> Option<Rc<[usize]>> {
+        // Compare the length first: it is a couple of instructions, while the
+        // content compare of a long string is real work even when it hits.
+        let index = self
+            .entries
+            .iter()
+            .position(|(key, _)| key.len() == text.len() && key == text)?;
+        let entry = self.entries.remove(index);
+        let starts = Rc::clone(&entry.1);
+        self.entries.insert(0, entry);
+        Some(starts)
+    }
+
+    fn insert(&mut self, text: &str, starts: Rc<[usize]>) {
+        let size = entry_size(text, &starts);
+        if size > MAX_CACHED_BYTES {
+            // Too large to keep. Not caching is always correct; the caller
+            // still gets the list it asked for.
+            return;
+        }
+        self.bytes += size;
+        self.entries.insert(0, (text.to_string(), starts));
+        while self.entries.len() > MAX_CACHED_TEXTS || self.bytes > MAX_CACHED_BYTES {
+            match self.entries.pop() {
+                Some((key, starts)) => self.bytes -= entry_size(&key, &starts),
+                None => break,
+            }
+        }
+    }
+}
+
+fn entry_size(text: &str, starts: &[usize]) -> usize {
+    text.len() + std::mem::size_of_val(starts)
+}
+
+thread_local! {
+    /// The interpreter runs a program on one thread, and the cache is pure
+    /// data derived from the text, so a thread-local is enough here -- no
+    /// lock, and no sharing between program runs.
+    static STARTS: RefCell<StartsCache> = RefCell::new(StartsCache::new());
+}
+
+/// Cluster boundaries for `text`, from the cache when this text was seen
+/// before. Empty for empty text.
+fn starts(text: &str) -> Rc<[usize]> {
+    if let Some(hit) = STARTS.with(|cache| cache.borrow_mut().get(text)) {
+        return hit;
+    }
+    let built: Rc<[usize]> = build_starts(text).into();
+    STARTS.with(|cache| cache.borrow_mut().insert(text, Rc::clone(&built)));
+    built
+}
+
+/// The cluster count of `text`, without touching the cache. `find` counts the
+/// clusters of a prefix, and those prefixes would otherwise evict the string
+/// the program is actually working on.
+fn cluster_count(text: &str) -> usize {
+    build_starts(text).len()
+}
+
 /// The grapheme clusters of `text`, in order. A Myanmar syllable is one
-/// cluster. ASCII text has a fast path that allocates nothing.
+/// cluster. ASCII text has a fast path that allocates nothing beyond the
+/// result.
 pub fn clusters(text: &str) -> Vec<&str> {
     if text.is_ascii() {
         return text
@@ -60,26 +188,13 @@ pub fn clusters(text: &str) -> Vec<&str> {
             .map(|(i, _)| &text[i..i + 1])
             .collect();
     }
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut pos = 0usize;
-    for grapheme in text.graphemes(true) {
-        let start = pos;
-        let end = start + grapheme.len();
-        pos = end;
-        match spans.last_mut() {
-            Some(last) if joins(&text[last.0..last.1], grapheme) => last.1 = end,
-            _ => spans.push((start, end)),
-        }
+    let starts = starts(text);
+    let mut out = Vec::with_capacity(starts.len());
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(text.len());
+        out.push(&text[start..end]);
     }
-    spans.into_iter().map(|(s, e)| &text[s..e]).collect()
-}
-
-/// Whether `next` continues the syllable `current` rather than starting a new
-/// one: a Myanmar mark always attaches, and after a virama the next consonant
-/// (a stacked letter) belongs to the same syllable.
-fn joins(current: &str, next: &str) -> bool {
-    next.chars().next().is_some_and(attaches_to_previous)
-        || current.chars().last().is_some_and(is_virama)
+    out
 }
 
 /// How many characters (grapheme clusters) `text` has.
@@ -87,7 +202,7 @@ pub fn len(text: &str) -> i64 {
     if text.is_ascii() {
         return text.len() as i64;
     }
-    clusters(text).len() as i64
+    starts(text).len() as i64
 }
 
 /// The cluster at `index`, if there is one. A negative index never names a
@@ -96,7 +211,10 @@ pub fn at(text: &str, index: usize) -> Option<&str> {
     if text.is_ascii() {
         return text.get(index..index + 1);
     }
-    clusters(text).into_iter().nth(index)
+    let starts = starts(text);
+    let start = *starts.get(index)?;
+    let end = starts.get(index + 1).copied().unwrap_or(text.len());
+    Some(&text[start..end])
 }
 
 /// The clusters from `start` up to `end` (exclusive), joined back into text.
@@ -107,11 +225,15 @@ pub fn slice(text: &str, start: usize, end: usize) -> String {
         let start = start.min(end);
         return text[start..end].to_string();
     }
-    clusters(text)
-        .into_iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
+    let starts = starts(text);
+    let end = end.min(starts.len());
+    let start = start.min(end);
+    if start == end {
+        return String::new();
+    }
+    let byte_start = starts[start];
+    let byte_end = starts.get(end).copied().unwrap_or(text.len());
+    text[byte_start..byte_end].to_string()
 }
 
 /// The cluster index of the first occurrence of `needle`, or `-1`. The index
@@ -122,7 +244,7 @@ pub fn find(text: &str, needle: &str) -> i64 {
         // `find` returns a byte offset on a character boundary, so the prefix
         // is valid text and counting its clusters is exact.
         Some(byte) if text.is_ascii() => byte as i64,
-        Some(byte) => clusters(&text[..byte]).len() as i64,
+        Some(byte) => cluster_count(&text[..byte]) as i64,
         None => -1,
     }
 }
@@ -189,5 +311,50 @@ mod tests {
         assert_eq!(clusters(text).len() as i64, len(text));
         assert_eq!(clusters(text), vec!["မြ", "န်", "မာ"]);
         assert_eq!(clusters("abc"), vec!["a", "b", "c"]);
+    }
+
+    /// The cache is keyed by content, so growing a string must not reuse the
+    /// boundaries of the text it used to be -- and the same bytes in another
+    /// allocation must reuse them.
+    #[test]
+    fn cached_boundaries_follow_the_text() {
+        let mut text = String::from("မြန်မာ");
+        assert_eq!(len(&text), 3);
+        assert_eq!(at(&text, 1), Some("န်"));
+        text.push_str("ပါ");
+        assert_eq!(len(&text), 4);
+        assert_eq!(at(&text, 3), Some("ပါ"));
+        assert_eq!(slice(&text, 2, 4), "မာပါ");
+
+        // Equal content in a different allocation: same answer.
+        let copy = "မြန်မာပါ".to_string();
+        assert_eq!(len(&copy), 4);
+        assert_eq!(at(&copy, 3), Some("ပါ"));
+
+        // A longer text with the old text as its prefix is its own key.
+        assert_eq!(len("မြန်မာပါပါ"), 5);
+        assert_eq!(at("မြန်မာပါပါ", 4), Some("ပါ"));
+    }
+
+    #[test]
+    fn emoji_and_combining_sequences_keep_their_units() {
+        assert_eq!(len("👍🏽"), 1);
+        assert_eq!(at("👍🏽", 0), Some("👍🏽"));
+        assert_eq!(slice("👍🏽x", 1, 2), "x");
+        assert_eq!(len("👨‍👩‍👧"), 1);
+        assert_eq!(len("e\u{301}x"), 2);
+        assert_eq!(reverse("e\u{301}x"), "xe\u{301}");
+    }
+
+    /// Entries are evicted past the bounds; answers must stay correct for
+    /// every text, cached or not.
+    #[test]
+    fn evicted_entries_do_not_change_answers() {
+        for n in 1..20usize {
+            let text = "မာ".repeat(n);
+            assert_eq!(len(&text), n as i64);
+            assert_eq!(at(&text, n - 1), Some("မာ"));
+            assert_eq!(slice(&text, 0, n), text);
+        }
     }
 }
