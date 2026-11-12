@@ -1,3 +1,4 @@
+use crate::interpreter::Sym;
 use crate::lexer::{Tok, Token};
 
 // --- eng library (English-spelled declarations) ---
@@ -58,7 +59,7 @@ pub enum Expr {
     /// `null` / `ဗလာ` -- JSON's null, now writable as a literal as well as
     /// returned by `json.parse`.
     NullLit,
-    Ident(String),
+    Ident(Sym),
     Binary(Box<Expr>, char, Box<Expr>, usize), // line of the operator
     /// A comparison used as a value: `x > y`, `name == "Aung"`. The same
     /// operators a condition accepts, producing a `bool`.
@@ -123,7 +124,7 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl {
-        name: String,
+        name: Sym,
         value: Expr,
         line: usize,
     },
@@ -301,7 +302,7 @@ pub enum Stmt {
     /// `is_const` is set for the `pin` form. The interpreter enforces the
     /// declared type and refuses reassignment of `pin` values.
     EngDecl {
-        name: String,
+        name: Sym,
         type_name: String,
         value: Expr,
         is_const: bool,
@@ -344,7 +345,7 @@ pub enum Stmt {
     /// eng library assignment: `name = <value>;` -- reassigns an existing
     /// variable (eng `pin` constants are protected).
     EngAssign {
-        name: String,
+        name: Sym,
         value: Expr,
         line: usize,
     },
@@ -352,7 +353,7 @@ pub enum Stmt {
     /// `%=`, `^=`) -- applies the operator to the existing value and stores
     /// the result back into the same variable.
     EngMathAssign {
-        name: String,
+        name: Sym,
         op: char,
         amount: Expr,
         line: usize,
@@ -1895,10 +1896,10 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
                     })?;
                     args.push(arg);
                 }
-                expr = Expr::LibCall(lib, fn_name, args, dot_line);
+                expr = Expr::LibCall(lib.to_string(), fn_name, args, dot_line);
                 i = close + 1;
             } else if let Some(lib) = base {
-                expr = Expr::LibFnRef(lib, fn_name, dot_line);
+                expr = Expr::LibFnRef(lib.to_string(), fn_name, dot_line);
                 i += 2;
             } else {
                 expr = Expr::FieldAccess(Box::new(expr), fn_name, dot_line);
@@ -1919,7 +1920,7 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
             if let Expr::Ident(name) = &expr {
                 if name == LIB_REQUEST {
                     let (arg, ni) = parse_primary_at(tokens, i + 1, line)?;
-                    expr = Expr::HttpGet(name.clone(), Box::new(arg), of_line);
+                    expr = Expr::HttpGet(name.to_string(), Box::new(arg), of_line);
                     i = ni;
                     continue;
                 }
@@ -1931,7 +1932,7 @@ fn parse_term_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, usi
                 // interpreter resolves the name and rejects non-libraries.
                 if !(i + 1 < tokens.len() && matches!(tokens[i + 1].tok, Tok::Ident(_))) {
                     let (arg, ni) = parse_primary_at(tokens, i + 1, line)?;
-                    expr = Expr::HttpGet(name.clone(), Box::new(arg), of_line);
+                    expr = Expr::HttpGet(name.to_string(), Box::new(arg), of_line);
                     i = ni;
                     continue;
                 }
@@ -2040,7 +2041,7 @@ fn parse_primary_at(tokens: &[Token], pos: usize, line: usize) -> Result<(Expr, 
                     }
                     return Ok((Expr::NewObj(s.clone(), args, tokens[pos].line), after));
                 }
-                Ok((Expr::Ident(s.clone()), pos + 1))
+                Ok((Expr::Ident(Sym::new(s.clone())), pos + 1))
             }
         },
         Tok::LBracket => {
@@ -2588,7 +2589,7 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
         };
         let amount = parse_expr(&rest[3..], line).map_err(|_| eng_bad_form_err(line))?;
         return Ok(Stmt::EngMathAssign {
-            name,
+            name: Sym::new(name),
             op,
             amount,
             line,
@@ -2606,7 +2607,11 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
             _ => unreachable!(),
         };
         let value = parse_expr(&rest[2..], line).map_err(|_| eng_bad_form_err(line))?;
-        return Ok(Stmt::EngAssign { name, value, line });
+        return Ok(Stmt::EngAssign {
+            name: Sym::new(name),
+            value,
+            line,
+        });
     }
 
     // --- eng index assignment: `xs[i] = <value>;` and `xs[i] += <value>;` ---
@@ -2733,7 +2738,7 @@ fn parse_eng_decl(body: &[Token], line: usize) -> Result<Stmt, String> {
     let value = parse_expr(value_tokens, line)?;
 
     Ok(Stmt::EngDecl {
-        name,
+        name: Sym::new(name),
         type_name,
         value,
         is_const,
@@ -4525,7 +4530,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 return Err(generic_syntax_err(line));
             }
             match &body[0].tok {
-                Tok::Ident(s) => Expr::Ident(s.clone()),
+                Tok::Ident(s) => Expr::Ident(Sym::new(s.clone())),
                 _ => return Err(generic_syntax_err(line)),
             }
         } else if ident_eq(&body[particle_idx].tok, KW_PARTICLE) {
@@ -4647,7 +4652,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
         };
         let target = parse_expr(&body[..assign_idx], line)?;
         let label = match &target {
-            Expr::Ident(name) => name.clone(),
+            Expr::Ident(name) => name.to_string(),
             Expr::Index(..) => "index".to_string(),
             Expr::ListLit(_) | Expr::TupleLit(_) => "destructure".to_string(),
             _ => return Err(generic_syntax_err(line)),
@@ -4677,7 +4682,7 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
                 let mut names = Vec::with_capacity(items.len());
                 for item in items {
                     match item {
-                        Expr::Ident(name) => names.push(name),
+                        Expr::Ident(name) => names.push(name.to_string()),
                         _ => return Err(myanmar_destructure_bad_form_err(line)),
                     }
                 }
@@ -4723,7 +4728,11 @@ fn parse_stmt(tokens: &[Token], line: usize) -> Result<Stmt, String> {
             _ => unreachable!(),
         };
         let value = parse_expr(&body[2..], line)?;
-        return Ok(Stmt::VarDecl { name, value, line });
+        return Ok(Stmt::VarDecl {
+            name: Sym::new(name),
+            value,
+            line,
+        });
     }
 
     // --- Bare expression statement (e.g. "10 + \"10\"") ---
