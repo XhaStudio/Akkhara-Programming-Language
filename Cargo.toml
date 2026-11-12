@@ -1,6 +1,6 @@
 [package]
 name = "akkhara"
-version = "1.2.1"
+version = "1.3.0"
 edition = "2021"
 
 [[bin]]
@@ -21,6 +21,11 @@ crossterm = "0.27"
 # so one Myanmar syllable (a consonant plus its medials, vowels and tone
 # marks) is one character to a program -- see src/text.rs.
 unicode-segmentation = "1"
+
+# Dicts and sets keep the insertion order they always had (printing and
+# iteration read the same), while a lookup is a hash probe instead of a scan.
+# The crate is already in the dependency graph through eframe.
+indexmap = "2"
 
 # The App GUI library (libraries/App/main.rs). eframe's glow (OpenGL)
 # renderer is used instead of the default wgpu one: a smaller dependency
