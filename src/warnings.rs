@@ -611,7 +611,7 @@ impl Collector {
         self.read(name);
         if matches!(name, "map" | "filter" | "reduce") {
             if let Some(Expr::Ident(callback)) = args.get(1) {
-                self.called.insert(callback.clone());
+                self.called.insert(callback.to_string());
             }
         }
         self.args(args);
