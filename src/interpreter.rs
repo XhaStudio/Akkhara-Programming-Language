@@ -1,5 +1,7 @@
 use crate::library::LibraryLoader;
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, LogicalOp, Stmt, WaitUnit};
+use indexmap::{IndexMap, IndexSet};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -17,8 +19,17 @@ pub enum Value {
     Null,
     List(Vec<Value>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
-    Dict(Vec<(Value, Value)>),
+    /// Insertion order is preserved (a set keeps the first occurrence of a
+    /// value where it first appeared), so printing, iteration and equality
+    /// read exactly as before; membership is a hash probe, not a scan. The
+    /// `Rc` makes handing a set to a function (a read) a refcount bump, not a
+    /// copy of every member.
+    Set(Rc<IndexSet<Key>>),
+    /// Insertion order is preserved: a repeated key keeps its first position
+    /// and takes its last value. Lookup is a hash probe, not a scan, and the
+    /// `Rc` makes copies cheap: a write uses `Rc::make_mut` and only copies
+    /// the map when another binding still shares it.
+    Dict(Rc<IndexMap<Key, Value>>),
     /// A class object: its class name plus its fields, behind an `Rc` (see
     /// `ObjectValue` for why it is not held inline).
     Object(Rc<ObjectValue>),
@@ -26,6 +37,55 @@ pub enum Value {
     /// function) -- e.g. the `Tools.add` in `TOOL = Tools.add;`. Calling
     /// the binding (`TOOL(1, 100)`) forwards to the library function.
     Callable(Rc<Callable>),
+}
+
+/// A dict key or set member.
+///
+/// Hashing has to agree with `value_eq` exactly, or a lookup could miss an
+/// entry the old linear scan found: two values that compare equal must hash
+/// alike. The scalar cases hash their payload; everything else is equal by
+/// its printed form (`value_eq` compares `repr`), so that form is the hash.
+/// A collision only costs a comparison, and never changes an answer.
+#[derive(Debug, Clone)]
+pub struct Key(Value);
+
+impl Key {
+    fn new(value: Value) -> Key {
+        Key(value)
+    }
+
+    fn value(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        value_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Key {}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match &self.0 {
+            Value::Int(i) => {
+                0u8.hash(state);
+                i.hash(state);
+            }
+            Value::Str(s) => {
+                1u8.hash(state);
+                s.hash(state);
+            }
+            Value::Bool(b) => {
+                2u8.hash(state);
+                b.hash(state);
+            }
+            Value::Null => 3u8.hash(state),
+            other => repr(other).hash(state),
+        }
+    }
 }
 
 /// A class object's class name and its fields.
@@ -207,14 +267,14 @@ fn repr_into(v: &Value, out: &mut String) {
         Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => display_into(v, out),
         Value::List(items) => repr_seq(items, '[', ']', out),
         Value::Tuple(items) => repr_seq(items, '(', ')', out),
-        Value::Set(items) => repr_seq(items, '{', '}', out),
+        Value::Set(items) => repr_seq_keys(items, '{', '}', out),
         Value::Dict(pairs) => {
             out.push('{');
             for (i, (k, v)) in pairs.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                repr_into(k, out);
+                repr_into(k.value(), out);
                 out.push_str(": ");
                 repr_into(v, out);
             }
@@ -239,6 +299,17 @@ fn repr_into(v: &Value, out: &mut String) {
 
 /// `repr_into` for a list/tuple/set: the elements separated by ", " between
 /// the given brackets.
+fn repr_seq_keys(items: &IndexSet<Key>, open: char, close: char, out: &mut String) {
+    out.push(open);
+    for (i, k) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        repr_into(k.value(), out);
+    }
+    out.push(close);
+}
+
 fn repr_seq(items: &[Value], open: char, close: char, out: &mut String) {
     out.push(open);
     for (i, item) in items.iter().enumerate() {
@@ -412,18 +483,13 @@ fn match_route(route: &ServerRoute, path: &str) -> Option<Vec<(String, String)>>
 /// Pairs as a dict, a repeated key keeping its first position and its last
 /// value -- the same rule a dict literal and the JSON reader use.
 fn pairs_to_dict(pairs: &[(String, String)]) -> Value {
-    let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+    let mut out: IndexMap<Key, Value> = IndexMap::with_capacity(pairs.len());
     for (k, v) in pairs {
-        let key = Value::Str(k.clone());
-        match out
-            .iter_mut()
-            .find(|(existing, _)| value_eq(existing, &key))
-        {
-            Some(slot) => slot.1 = Value::Str(v.clone()),
-            None => out.push((key, Value::Str(v.clone()))),
-        }
+        // A repeated key keeps its first position and its last value, which
+        // is what `insert` does for a key that is already there.
+        out.insert(Key::new(Value::Str(k.clone())), Value::Str(v.clone()));
     }
-    Value::Dict(out)
+    Value::Dict(Rc::new(out))
 }
 
 /// The request object an Akkhara handler is handed (see the block above), with
@@ -519,7 +585,7 @@ fn server_headers_of(fields: &[(String, Value)]) -> Vec<(String, String)> {
     match server_field(fields, SERVER_HEADERS, SERVER_HEADERS_MM) {
         Some(Value::Dict(pairs)) => pairs
             .iter()
-            .map(|(k, v)| (display(k), display(v)))
+            .map(|(k, v)| (display(k.value()), display(v)))
             .collect(),
         _ => Vec::new(),
     }
@@ -672,12 +738,13 @@ fn json_tree_to_value(tree: crate::json_library::Json) -> Value {
         Json::Float(f) => Value::Float(f),
         Json::Str(s) => Value::Str(s),
         Json::Arr(items) => Value::List(items.into_iter().map(json_tree_to_value).collect()),
-        Json::Obj(members) => Value::Dict(
-            members
-                .into_iter()
-                .map(|(k, v)| (Value::Str(k), json_tree_to_value(v)))
-                .collect(),
-        ),
+        Json::Obj(members) => {
+            let mut out: IndexMap<Key, Value> = IndexMap::with_capacity(members.len());
+            for (k, v) in members {
+                out.insert(Key::new(Value::Str(k)), json_tree_to_value(v));
+            }
+            Value::Dict(Rc::new(out))
+        }
     }
 }
 
@@ -693,16 +760,22 @@ fn value_to_json_tree(v: &Value) -> Result<crate::json_library::Json, String> {
         Value::Int(i) => Json::Int(*i),
         Value::Float(f) => Json::Float(*f),
         Value::Str(s) => Json::Str(s.clone()),
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => Json::Arr(
+        Value::List(items) | Value::Tuple(items) => Json::Arr(
             items
                 .iter()
                 .map(value_to_json_tree)
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        Value::Set(items) => Json::Arr(
+            items
+                .iter()
+                .map(|k| value_to_json_tree(k.value()))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
         Value::Dict(pairs) => Json::Obj(
             pairs
                 .iter()
-                .map(|(k, val)| Ok((display(k), value_to_json_tree(val)?)))
+                .map(|(k, val)| Ok((display(k.value()), value_to_json_tree(val)?)))
                 .collect::<Result<Vec<_>, String>>()?,
         ),
         Value::Object(o) => Json::Obj(
@@ -838,9 +911,8 @@ fn app_func_name(v: &Value, fn_name: &str, line: usize) -> Result<String, String
 /// as text), or a single string used as the only item.
 fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, String> {
     match v {
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-            Ok(items.iter().map(display).collect())
-        }
+        Value::List(items) | Value::Tuple(items) => Ok(items.iter().map(display).collect()),
+        Value::Set(items) => Ok(items.iter().map(|k| display(k.value())).collect()),
         Value::Str(s) => Ok(vec![s.clone()]),
         _ => Err(app_want_text_err(
             fn_name,
@@ -850,19 +922,21 @@ fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, Strin
     }
 }
 
+/// One row of an `App.table`: its cells as text, or a single scalar row.
+fn app_row_cells(row: &Value) -> Vec<String> {
+    match row {
+        Value::List(cells) | Value::Tuple(cells) => cells.iter().map(display).collect(),
+        Value::Set(cells) => cells.iter().map(|k| display(k.value())).collect(),
+        other => vec![display(other)],
+    }
+}
+
 /// A `table` row list: a list whose elements are rows. Each row is either a
 /// list of cells or a single scalar (a one-cell row).
 fn app_rows(v: &Value, fn_name: &str, line: usize) -> Result<Vec<Vec<String>>, String> {
     match v {
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => Ok(items
-            .iter()
-            .map(|row| match row {
-                Value::List(cells) | Value::Tuple(cells) | Value::Set(cells) => {
-                    cells.iter().map(display).collect()
-                }
-                other => vec![display(other)],
-            })
-            .collect()),
+        Value::List(items) | Value::Tuple(items) => Ok(items.iter().map(app_row_cells).collect()),
+        Value::Set(items) => Ok(items.iter().map(|k| app_row_cells(k.value())).collect()),
         Value::Str(s) => Ok(vec![vec![s.clone()]]),
         _ => Err(app_want_text_err(
             fn_name,
@@ -880,7 +954,7 @@ fn app_items_value(
     line: usize,
 ) -> Result<crate::app_library::AppValue, String> {
     match v {
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+        Value::List(items) | Value::Tuple(items) => {
             if items
                 .iter()
                 .any(|e| matches!(e, Value::List(_) | Value::Tuple(_) | Value::Set(_)))
@@ -891,6 +965,20 @@ fn app_items_value(
             } else {
                 Ok(crate::app_library::AppValue::Items(
                     items.iter().map(display).collect(),
+                ))
+            }
+        }
+        Value::Set(items) => {
+            if items
+                .iter()
+                .any(|k| matches!(k.value(), Value::List(_) | Value::Tuple(_) | Value::Set(_)))
+            {
+                Ok(crate::app_library::AppValue::Rows(app_rows(
+                    v, fn_name, line,
+                )?))
+            } else {
+                Ok(crate::app_library::AppValue::Items(
+                    items.iter().map(|k| display(k.value())).collect(),
                 ))
             }
         }
@@ -1120,6 +1208,10 @@ impl std::hash::Hasher for FxHasher {
 /// keys exactly.
 type VarMap = HashMap<Rc<str>, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
+/// "No slot": a map-mode log entry has no slot to restore, and a `Sym` that
+/// has not been resolved yet carries it.
+pub const NO_SLOT: u32 = u32::MAX;
+
 /// The variable table plus the undo log that gives every function call its
 /// own scope.
 ///
@@ -1137,16 +1229,106 @@ type VarMap = HashMap<Rc<str>, Value, std::hash::BuildHasherDefault<FxHasher>>;
 /// drops the binding the frame created, which is the whole of what the
 /// snapshot used to do. Writes made while no frame is active (top-level
 /// statements) are not logged and simply stay.
+
+/// A variable name that remembers its slot.
+///
+/// This language has one flat variable table: a function's parameters and
+/// locals are written into it and undone by the frame's log (see `Env`), not
+/// kept in a per-call scope. The same name therefore always means the same
+/// slot, so resolving it once per occurrence -- the first time that node runs
+/// -- turns every later read and write into a `Vec` index instead of a hash
+/// lookup, without changing which binding the name refers to.
+#[derive(Debug, Clone)]
+pub struct Sym {
+    name: std::sync::Arc<str>,
+    slot: Cell<u32>,
+}
+
+impl Sym {
+    pub fn new(name: impl Into<std::sync::Arc<str>>) -> Sym {
+        Sym {
+            name: name.into(),
+            slot: Cell::new(NO_SLOT),
+        }
+    }
+
+    #[inline]
+    fn as_str(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::ops::Deref for Sym {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for Sym {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+impl PartialEq for Sym {
+    fn eq(&self, other: &Sym) -> bool {
+        self.name == other.name
+    }
+}
+
+impl PartialEq<str> for Sym {
+    fn eq(&self, other: &str) -> bool {
+        &*self.name == other
+    }
+}
+
+impl PartialEq<&str> for Sym {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.name == *other
+    }
+}
+
+impl From<String> for Sym {
+    fn from(name: String) -> Sym {
+        Sym::new(name)
+    }
+}
+
+impl From<&str> for Sym {
+    fn from(name: &str) -> Sym {
+        Sym::new(name)
+    }
+}
+
 struct Env {
+    /// The slot table (see `Sym`) is the default. `AKKHARA_ENV=map` switches
+    /// the variable table back to the hash map this step started from, so the
+    /// old behaviour is one environment variable away if a problem turns up.
+    slots_on: bool,
     map: VarMap,
+    /// Slot storage: one entry per name, indexed by its `VarId`.
+    slots: Vec<Option<Value>>,
+    /// Slot id -> name, for error messages and the undo log.
+    names: Vec<Rc<str>>,
+    /// Name -> slot id. Only the first use of each name probes this.
+    ids: HashMap<Rc<str>, u32, std::hash::BuildHasherDefault<FxHasher>>,
+    /// Has any binding ever held a `Value::Str`? The in-place append path is
+    /// only worth a test when a string can be involved; a program that never
+    /// binds one (an arithmetic loop, say) skips it entirely, which keeps the
+    /// hot `x = x + 1` assignment at its old cost. Conservative: the flag
+    /// stays set once any string is bound.
+    has_strings: bool,
     /// Every name the program has ever bound, held *once* as an interned
     /// `Rc<str>`. A frame pop drops the binding but the interned key stays,
     /// so the next call's parameter binding finds it again without
     /// allocating: a name costs one allocation per program, not per call.
     interner: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Every frame's log entries, oldest first; `marks` says where the
-    /// innermost active frame's own entries start.
-    log: Vec<(Rc<str>, Option<Value>)>,
+    /// innermost active frame's own entries start. The id is `NO_SLOT` for a
+    /// map-mode entry (restored by name), otherwise the slot to restore.
+    log: Vec<(u32, Rc<str>, Option<Value>)>,
     /// The log length each active frame started at, outermost first.
     marks: Vec<usize>,
 }
@@ -1154,7 +1336,14 @@ struct Env {
 impl Env {
     fn new() -> Self {
         Env {
+            slots_on: std::env::var("AKKHARA_ENV")
+                .map(|v| v != "map")
+                .unwrap_or(true),
             map: VarMap::default(),
+            slots: Vec::new(),
+            names: Vec::new(),
+            ids: Default::default(),
+            has_strings: false,
             interner: Default::default(),
             log: Vec::new(),
             marks: Vec::new(),
@@ -1174,17 +1363,35 @@ impl Env {
             return;
         };
         while self.log.len() > mark {
-            if let Some((name, previous)) = self.log.pop() {
-                match previous {
-                    Some(value) => {
-                        self.map.insert(name, value);
-                    }
-                    None => {
-                        self.map.remove(name.as_ref());
+            if let Some((id, name, previous)) = self.log.pop() {
+                if id != NO_SLOT {
+                    self.slots[id as usize] = previous;
+                } else {
+                    match previous {
+                        Some(value) => {
+                            self.map.insert(name, value);
+                        }
+                        None => {
+                            self.map.remove(name.as_ref());
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// The slot for `name`, creating it the first time any use needs it.
+    fn slot_of(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        let rc: Rc<str> = Rc::from(name);
+        self.ids.insert(Rc::clone(&rc), id);
+        self.interner.insert(Rc::clone(&rc));
+        self.names.push(rc);
+        self.slots.push(None);
+        id
     }
 
     /// Records what `name` holds before the innermost frame writes to it, once
@@ -1198,18 +1405,37 @@ impl Env {
     /// instructions and cache lines on the path that never reaches here.
     #[inline(never)]
     fn note(&mut self, name: &str) {
+        if self.slots_on {
+            let id = self.slot_of(name);
+            self.note_slot(id);
+            return;
+        }
         let Some(&mark) = self.marks.last() else {
             return;
         };
         if self.log[mark..]
             .iter()
-            .any(|(logged, _)| logged.as_ref() == name)
+            .any(|(id, logged, _)| *id == NO_SLOT && logged.as_ref() == name)
         {
             return;
         }
         let previous = self.map.get(name).cloned();
         let key = self.intern(name);
-        self.log.push((key, previous));
+        self.log.push((NO_SLOT, key, previous));
+    }
+
+    /// The slot-mode half of `note`: `id` must already exist.
+    #[inline(never)]
+    fn note_slot(&mut self, id: u32) {
+        let Some(&mark) = self.marks.last() else {
+            return;
+        };
+        if self.log[mark..].iter().any(|(logged, _, _)| *logged == id) {
+            return;
+        }
+        let previous = self.slots[id as usize].clone();
+        let name = Rc::clone(&self.names[id as usize]);
+        self.log.push((id, name, previous));
     }
 
     /// The interned key for `name`, creating it once and keeping it for the
@@ -1226,29 +1452,40 @@ impl Env {
 
     #[inline]
     fn get(&self, name: &str) -> Option<&Value> {
-        self.map.get(name)
+        if self.slots_on {
+            match self.ids.get(name) {
+                Some(&id) => self.slots[id as usize].as_ref(),
+                None => None,
+            }
+        } else {
+            self.map.get(name)
+        }
     }
 
     #[inline]
     fn contains_key(&self, name: &str) -> bool {
-        self.map.contains_key(name)
+        if self.slots_on {
+            match self.ids.get(name) {
+                Some(&id) => self.slots[id as usize].is_some(),
+                None => false,
+            }
+        } else {
+            self.map.contains_key(name)
+        }
     }
 
     /// Bind `name` to `value`, reusing the key of an existing binding.
-    ///
-    /// `HashMap::insert` takes an owned key, so assigning to a variable that
-    /// already exists -- by far the common case for `x = ...;`, `x += ...;`,
-    /// the Myanmar assignment forms, and the loop variable of every `for`
-    /// iteration -- allocated a fresh copy of the name on every single
-    /// assignment just to look the same slot up again. `get_mut` updates that
-    /// slot in place; a name that isn't bound yet is inserted as before.
-    ///
-    /// The frame check comes first and stands alone: at top level -- where
-    /// every statement of a program that defines no functions runs, and where
-    /// a loop's `i += 1` lives -- the only cost this adds over a plain map
-    /// write is the emptiness test, and `note` stays out of line.
     #[inline]
     fn assign(&mut self, name: &str, value: Value) {
+        self.has_strings |= matches!(value, Value::Str(_));
+        if self.slots_on {
+            let id = self.slot_of(name);
+            if !self.marks.is_empty() {
+                self.note_slot(id);
+            }
+            self.slots[id as usize] = Some(value);
+            return;
+        }
         if !self.marks.is_empty() {
             self.note(name);
         }
@@ -1260,41 +1497,94 @@ impl Env {
         }
     }
 
-    /// Bind `name` to `value`, reusing an interned key (a fresh declaration
-    /// or a parameter binding). The name is taken by reference: callers no
-    /// longer clone a `String` per binding.
-    fn insert(&mut self, name: &str, value: Value) {
+    /// Move a string binding out of the table, or `None` when `name` holds
+    /// anything else (or nothing). The write is logged first, for the active
+    /// frame, so a frame pop puts the old value back. Used by the in-place
+    /// append: the `String` is grown and stored back with `assign`.
+    fn take_str(&mut self, name: &str) -> Option<String> {
+        if !matches!(self.get(name), Some(Value::Str(_))) {
+            return None;
+        }
         if !self.marks.is_empty() {
             self.note(name);
         }
-        if let Some(slot) = self.map.get_mut(name) {
-            *slot = value;
+        if self.slots_on {
+            let id = self.slot_of(name) as usize;
+            match self.slots[id].take() {
+                Some(Value::Str(text)) => Some(text),
+                other => {
+                    self.slots[id] = other;
+                    None
+                }
+            }
         } else {
-            let key = self.intern(name);
-            self.map.insert(key, value);
+            match self.map.remove(name) {
+                Some(Value::Str(text)) => Some(text),
+                other => {
+                    if let Some(value) = other {
+                        let key = self.intern(name);
+                        self.map.insert(key, value);
+                    }
+                    None
+                }
+            }
         }
+    }
+
+    /// Whether any binding has ever held a string (see `has_strings`).
+    fn has_strings(&self) -> bool {
+        self.has_strings
+    }
+
+    /// Bind `name` to `value`, reusing an interned key (a fresh declaration
+    /// or a parameter binding).
+    fn insert(&mut self, name: &str, value: Value) {
+        self.assign(name, value);
     }
 
     /// `insert`, handing back what the name held before -- the class
     /// constructor's parameter save/restore needs the old value.
     fn insert_returning(&mut self, name: &str, value: Value) -> Option<Value> {
-        if !self.marks.is_empty() {
-            self.note(name);
+        self.has_strings |= matches!(value, Value::Str(_));
+        if self.slots_on {
+            let id = self.slot_of(name);
+            if !self.marks.is_empty() {
+                self.note_slot(id);
+            }
+            self.slots[id as usize].replace(value)
+        } else {
+            if !self.marks.is_empty() {
+                self.note(name);
+            }
+            let key = self.intern(name);
+            self.map.insert(key, value)
         }
-        let key = self.intern(name);
-        self.map.insert(key, value)
     }
 
     /// Reads `name`'s slot, applies `f` to it, and writes the result back
-    /// through the same slot: one hash probe instead of the
-    /// read-clone/arith/store-assign two, and no `Value` copy on the way.
-    /// A name with no binding starts from `0`, the undeclared-name rule of
-    /// both `x += ...;` spellings.
+    /// through the same slot: one probe instead of the read-clone/arith/
+    /// store-assign two, and no `Value` copy on the way. A name with no
+    /// binding starts from `0`, the undeclared-name rule of both `x += ...;`
+    /// spellings.
     fn read_update(
         &mut self,
         name: &str,
         f: impl FnOnce(&Value) -> Result<Value, String>,
     ) -> Result<(), String> {
+        if self.slots_on {
+            let id = self.slot_of(name);
+            if !self.marks.is_empty() {
+                self.note_slot(id);
+            }
+            let slot = &mut self.slots[id as usize];
+            let next = match slot {
+                Some(value) => f(value)?,
+                None => f(&Value::Int(0))?,
+            };
+            self.has_strings |= matches!(next, Value::Str(_));
+            *slot = Some(next);
+            return Ok(());
+        }
         if !self.marks.is_empty() {
             self.note(name);
         }
@@ -1313,16 +1603,26 @@ impl Env {
 
     fn remove(&mut self, name: &str) {
         self.note(name);
-        self.map.remove(name);
+        if self.slots_on {
+            let id = self.slot_of(name) as usize;
+            self.slots[id] = None;
+        } else {
+            self.map.remove(name);
+        }
     }
 
     /// Bind a function's parameter. The one write every call makes, so this
-    /// probes the table once instead of the `note`/`insert` pair's two: the
-    /// slot is read and overwritten in the same lookup, and only a name the
-    /// program binds for the first time takes the intern-and-insert path. A
-    /// repeated parameter name (the only case where the frame has already
-    /// recorded the name) still logs just once.
+    /// probes the table once instead of the `note`/`insert` pair's two.
     fn bind_param(&mut self, name: &str, value: Value) {
+        self.has_strings |= matches!(value, Value::Str(_));
+        if self.slots_on {
+            let id = self.slot_of(name);
+            if self.slots[id as usize].is_some() && !self.marks.is_empty() {
+                self.note_slot(id);
+            }
+            self.slots[id as usize] = Some(value);
+            return;
+        }
         match self.map.get_mut(name) {
             Some(slot) => {
                 let previous = std::mem::replace(slot, value);
@@ -1330,16 +1630,111 @@ impl Env {
                     let mark = *self.marks.last().unwrap();
                     if !self.log[mark..]
                         .iter()
-                        .any(|(logged, _)| logged.as_ref() == name)
+                        .any(|(id, logged, _)| *id == NO_SLOT && logged.as_ref() == name)
                     {
                         let key = self.intern(name);
-                        self.log.push((key, Some(previous)));
+                        self.log.push((NO_SLOT, key, Some(previous)));
                     }
                 }
             }
             None => {
                 let key = self.intern(name);
                 self.map.insert(key, value);
+            }
+        }
+    }
+
+    /// The slot for `sym`, cached in the node itself: only the first run of
+    /// this occurrence of the name probes the name table.
+    #[inline]
+    fn slot_id(&mut self, sym: &Sym) -> u32 {
+        let cached = sym.slot.get();
+        if cached != NO_SLOT {
+            return cached;
+        }
+        let id = self.slot_of(sym.as_str());
+        sym.slot.set(id);
+        id
+    }
+
+    /// `get` for a resolved name (slot mode only; map mode hashes as before).
+    #[inline]
+    fn get_sym(&mut self, sym: &Sym) -> Option<&Value> {
+        if self.slots_on {
+            let id = self.slot_id(sym);
+            self.slots[id as usize].as_ref()
+        } else {
+            self.map.get(sym.as_str())
+        }
+    }
+
+    #[inline]
+    fn contains_sym(&mut self, sym: &Sym) -> bool {
+        if self.slots_on {
+            let id = self.slot_id(sym);
+            self.slots[id as usize].is_some()
+        } else {
+            self.map.contains_key(sym.as_str())
+        }
+    }
+
+    #[inline]
+    fn assign_sym(&mut self, sym: &Sym, value: Value) {
+        if !self.slots_on {
+            self.assign(sym.as_str(), value);
+            return;
+        }
+        self.has_strings |= matches!(value, Value::Str(_));
+        let id = self.slot_id(sym);
+        if !self.marks.is_empty() {
+            self.note_slot(id);
+        }
+        self.slots[id as usize] = Some(value);
+    }
+
+    #[inline]
+    fn insert_sym(&mut self, sym: &Sym, value: Value) {
+        self.assign_sym(sym, value);
+    }
+
+    fn read_update_sym(
+        &mut self,
+        sym: &Sym,
+        f: impl FnOnce(&Value) -> Result<Value, String>,
+    ) -> Result<(), String> {
+        if !self.slots_on {
+            return self.read_update(sym.as_str(), f);
+        }
+        let id = self.slot_id(sym);
+        if !self.marks.is_empty() {
+            self.note_slot(id);
+        }
+        let slot = &mut self.slots[id as usize];
+        let next = match slot {
+            Some(value) => f(value)?,
+            None => f(&Value::Int(0))?,
+        };
+        self.has_strings |= matches!(next, Value::Str(_));
+        *slot = Some(next);
+        Ok(())
+    }
+
+    fn take_str_sym(&mut self, sym: &Sym) -> Option<String> {
+        if !self.slots_on {
+            return self.take_str(sym.as_str());
+        }
+        let id = self.slot_id(sym);
+        if !matches!(self.slots[id as usize], Some(Value::Str(_))) {
+            return None;
+        }
+        if !self.marks.is_empty() {
+            self.note_slot(id);
+        }
+        match self.slots[id as usize].take() {
+            Some(Value::Str(text)) => Some(text),
+            other => {
+                self.slots[id as usize] = other;
+                None
             }
         }
     }
@@ -1501,6 +1896,64 @@ impl Interpreter {
     /// existing binding and logs the write for the active function frame).
     fn store(&mut self, name: &str, value: Value) {
         self.env.assign(name, value);
+    }
+
+    /// `store` for a statement whose name already carries its slot.
+    fn store_sym(&mut self, name: &Sym, value: Value) {
+        self.env.assign_sym(name, value);
+    }
+
+    /// The string half of `name = name + <rhs>`. `Some` means this handled
+    /// the statement (including reporting the `E040` the generic path would);
+    /// `None` means `name` is not a string, and the caller runs the normal
+    /// assignment. Out of line: the branch is rare, and folding it into
+    /// `exec` slowed the plain `x = x + 1` dispatch down.
+    #[inline(never)]
+    fn append_string(
+        &mut self,
+        name: &Sym,
+        rhs: &Expr,
+        line: usize,
+        op_line: usize,
+    ) -> Option<Result<(), String>> {
+        let mut text = self.env.take_str_sym(name)?;
+        let appended = match self.eval(rhs, line, Some(name)) {
+            Ok(value) => value,
+            Err(e) => {
+                // The operand failed: `s` must still hold what it did.
+                self.store_sym(name, Value::Str(text));
+                return Some(Err(e));
+            }
+        };
+        match appended {
+            Value::Str(extra) => {
+                text.push_str(&extra);
+                self.store_sym(name, Value::Str(text));
+                Some(Ok(()))
+            }
+            other => {
+                let previous = Value::Str(text);
+                let result = binary_op(&previous, &other, '+', op_line, Some(name));
+                self.store_sym(name, previous);
+                Some(result.map(|value| {
+                    self.store_sym(name, value);
+                }))
+            }
+        }
+    }
+
+    /// The string half of `name += <amount>`: `Some` when both sides are
+    /// strings and the append happened. A non-string amount returns before
+    /// touching the environment, so an integer `+=` costs nothing here.
+    #[inline(never)]
+    fn append_amount(&mut self, name: &Sym, amount: &Value) -> Option<Result<(), String>> {
+        let Value::Str(extra) = amount else {
+            return None;
+        };
+        let mut text = self.env.take_str_sym(name)?;
+        text.push_str(extra);
+        self.store_sym(name, Value::Str(text));
+        Some(Ok(()))
     }
 
     /// Write `value` through an index target (`xs[0]`, `table[1, 2]`,
@@ -1684,7 +2137,7 @@ impl Interpreter {
                     return Err(eng_const_reassign_err(name, *line));
                 }
                 let v = self.eval(value, *line, Some(name))?;
-                self.store(name, v);
+                self.store_sym(name, v);
                 Ok(())
             }
             Stmt::EngDecl {
@@ -1697,12 +2150,12 @@ impl Interpreter {
                 let v = self.eval(value, *line, Some(name))?;
                 let v = check_eng_value(name, type_name, v, *line)?;
                 if *is_const {
-                    if self.env.contains_key(name) {
+                    if self.env.contains_sym(name) {
                         return Err(eng_pin_redeclare_err(name, *line));
                     }
-                    self.consts.insert(name.clone());
+                    self.consts.insert(name.to_string());
                 }
-                self.env.insert(name, v);
+                self.env.insert_sym(name, v);
                 Ok(())
             }
             Stmt::EngPrint { value, line } => {
@@ -1764,10 +2217,30 @@ impl Interpreter {
                 if self.is_pinned(name) {
                     return Err(eng_const_reassign_err(name, *line));
                 }
+                // `s = s + <expr>`: append into the string `s` already
+                // holds instead of copying it twice. Gated on a program that
+                // has strings at all (see `Env::has_strings`), and kept out
+                // of line so the common `x = x + 1` assignment does not grow
+                // the dispatch.
+                if let Expr::Binary(lhs, '+', rhs, op_line) = value {
+                    if let Expr::Ident(lhs_name) = &**lhs {
+                        // The flag first: a program with no strings (an
+                        // arithmetic loop) leaves after one predictable
+                        // test, without even comparing the names.
+                        if self.env.has_strings()
+                            && lhs_name.as_str() == name.as_str()
+                            && !mentions(rhs, name)
+                        {
+                            if let Some(result) = self.append_string(name, rhs, *line, *op_line) {
+                                return result;
+                            }
+                        }
+                    }
+                }
                 // A first `name = <value>;` declares the variable, so an eng
                 // assignment needs no separate typed declaration.
                 let v = self.eval(value, *line, Some(name))?;
-                self.store(name, v);
+                self.store_sym(name, v);
                 Ok(())
             }
             Stmt::EngMathAssign {
@@ -1783,10 +2256,15 @@ impl Interpreter {
                 // value `name` holds (the slot is only written inside
                 // `read_update`), then read and updated in a single probe.
                 let amt = self.eval(amount, *line, Some(name))?;
-                let result = self
-                    .env
-                    .read_update(name, |current| arith(current, &amt, *op, *line, Some(name)));
-                result
+                // `s += <expr>` on strings appends in place, like
+                // `s = s + x`. Out of line and gated like the assignment.
+                if *op == '+' && self.env.has_strings() {
+                    if let Some(result) = self.append_amount(name, &amt) {
+                        return result;
+                    }
+                }
+                self.env
+                    .read_update_sym(name, |current| arith(current, &amt, *op, *line, Some(name)))
             }
             // `[a, b] = <list>;` -- one name per item, in order. The value
             // is evaluated once, so a call on the right runs once.
@@ -1794,7 +2272,9 @@ impl Interpreter {
                 let v = self.eval(value, *line, None)?;
                 let items = match &v {
                     Value::List(items) | Value::Tuple(items) => items.clone(),
-                    other => return Err(destructure_not_collection_err(*line, &type_name_mm(other))),
+                    other => {
+                        return Err(destructure_not_collection_err(*line, type_name_mm(other)))
+                    }
                 };
                 if items.len() != names.len() {
                     return Err(destructure_count_err(*line, names.len(), items.len()));
@@ -2664,7 +3144,7 @@ impl Interpreter {
                         }
                         Ok(())
                     }
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::List(items) | Value::Tuple(items) => {
                         for item in items {
                             self.env.assign(var_name, item);
                             if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
@@ -2675,9 +3155,22 @@ impl Interpreter {
                         }
                         Ok(())
                     }
+                    // A set yields its members and a dict its keys, in the
+                    // order they were first put there.
+                    Value::Set(items) => {
+                        for key in items.iter() {
+                            self.env.assign(var_name, key.value().clone());
+                            if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
+                                || self.return_signal.is_some()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }
                     Value::Dict(pairs) => {
-                        for (k, _) in pairs {
-                            self.env.assign(var_name, k);
+                        for (k, _) in pairs.iter() {
+                            self.env.assign(var_name, k.value().clone());
                             if matches!(self.run_loop_body(body)?, LoopFlow::Break(_))
                                 || self.return_signal.is_some()
                             {
@@ -2793,7 +3286,7 @@ impl Interpreter {
                         let items: Vec<Value> = match &v {
                             Value::List(items) => items.clone(),
                             Value::Tuple(items) => items.clone(),
-                            Value::Set(items) => items.clone(),
+                            Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
                             Value::Str(s) => crate::text::clusters(s)
                                 .into_iter()
                                 .map(|c| Value::Str(c.to_string()))
@@ -3293,10 +3786,7 @@ impl Interpreter {
                 let key = self.eval(&args[1], line, None)?;
                 let default = self.eval(&args[2], line, None)?;
                 let found = match &container {
-                    Value::Dict(pairs) => pairs
-                        .iter()
-                        .find(|(k, _)| value_eq(k, &key))
-                        .map(|(_, v)| v.clone()),
+                    Value::Dict(pairs) => pairs.get(&Key::new(key.clone())).cloned(),
                     Value::Object(o) => {
                         let name = display(&key);
                         o.fields
@@ -3905,14 +4395,14 @@ impl Interpreter {
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::BoolLit(b) => Ok(Value::Bool(*b)),
             Expr::NullLit => Ok(Value::Null),
-            Expr::Ident(name) => match self.env.get(name).cloned() {
+            Expr::Ident(name) => match self.env.get_sym(name).cloned() {
                 Some(value) => Ok(value),
                 // A name that is not a variable but is a function is the
                 // function itself, the user-function half of `Tools.add`:
                 // `f = double;` then `f(3)` / `map(xs, f)` both work. A typo
                 // that matches no function or variable is still E030.
-                None if self.functions.contains_key(name) => {
-                    Ok(Value::Callable(Rc::new(Callable::User(name.clone()))))
+                None if self.functions.contains_key(name.as_str()) => {
+                    Ok(Value::Callable(Rc::new(Callable::User(name.to_string()))))
                 }
                 None => Err(format!(
                     "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
@@ -4003,29 +4493,48 @@ impl Interpreter {
                 Ok(Value::Tuple(vals))
             }
             Expr::SetLit(items) => {
-                let mut vals: Vec<Value> = Vec::with_capacity(items.len());
+                // `IndexSet` keeps a value where it first appeared and drops
+                // repeats -- the same rule the linear version had.
+                let mut vals: IndexSet<Key> = IndexSet::with_capacity(items.len());
                 for it in items {
                     let v = self.eval(it, line, var_ctx)?;
-                    if !vals.iter().any(|existing| value_eq(existing, &v)) {
-                        vals.push(v);
-                    }
+                    vals.insert(Key::new(v));
                 }
-                Ok(Value::Set(vals))
+                Ok(Value::Set(Rc::new(vals)))
             }
             Expr::DictLit(pairs) => {
-                let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+                // A repeated key keeps its first position and takes the last
+                // value: `insert` updates in place and never moves a key.
+                let mut out: IndexMap<Key, Value> = IndexMap::with_capacity(pairs.len());
                 for (k, v) in pairs {
                     let kv = self.eval(k, line, var_ctx)?;
                     let vv = self.eval(v, line, var_ctx)?;
-                    if let Some(slot) = out.iter_mut().find(|(ek, _)| value_eq(ek, &kv)) {
-                        slot.1 = vv;
-                    } else {
-                        out.push((kv, vv));
-                    }
+                    out.insert(Key::new(kv), vv);
                 }
-                Ok(Value::Dict(out))
+                Ok(Value::Dict(Rc::new(out)))
             }
             Expr::Index(base, indices) => {
+                // `<variable>[<index>]` reads the binding in place, copying
+                // only the item it picks. `eval` on the base first copied the
+                // whole container -- a variable read returns a `Value` by
+                // value -- so 10k reads of `xs[0]` cost 4 ms on a 16-item
+                // list and 588 ms on a 4096-item one (benchmarks/BASELINE.md).
+                // Index expressions run before the borrow: a call written
+                // there runs in its own frame, whose writes `Env`'s undo log
+                // replays, so the binding cannot change here. The existence
+                // check keeps the error order -- a missing base is E030
+                // before the index expressions run.
+                if let Expr::Ident(name) = &**base {
+                    if self.env.contains_key(name) {
+                        let mut keys = Vec::with_capacity(indices.len());
+                        for idx_e in indices {
+                            keys.push(self.eval(idx_e, line, var_ctx)?);
+                        }
+                        if let Some(value) = self.env.get(name) {
+                            return index_value(value, &keys, line);
+                        }
+                    }
+                }
                 let base_v = self.eval(base, line, var_ctx)?;
                 let mut keys = Vec::with_capacity(indices.len());
                 for idx_e in indices {
@@ -4665,9 +5174,8 @@ impl Interpreter {
                     // Characters, not bytes and not scalar values: one
                     // Myanmar syllable is one character (src/text.rs).
                     Value::Str(s) => Ok(Value::Int(crate::text::len(s))),
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-                        Ok(Value::Int(items.len() as i64))
-                    }
+                    Value::List(items) | Value::Tuple(items) => Ok(Value::Int(items.len() as i64)),
+                    Value::Set(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Dict(pairs) => Ok(Value::Int(pairs.len() as i64)),
                     other => Err(bad_arg(format!(
                         "needs a string or collection, got {}",
@@ -4691,9 +5199,8 @@ impl Interpreter {
                 // collection to pick the smallest/largest element of.
                 let candidates: Vec<Value> = if args.len() == 1 {
                     match &args[0] {
-                        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-                            items.clone()
-                        }
+                        Value::List(items) | Value::Tuple(items) => items.clone(),
+                        Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
                         other => vec![other.clone()],
                     }
                 } else {
@@ -4770,10 +5277,14 @@ impl Interpreter {
                             )))
                         }
                     },
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::List(items) | Value::Tuple(items) => {
                         items.iter().any(|v| value_eq(v, needle))
                     }
-                    Value::Dict(pairs) => pairs.iter().any(|(k, _)| value_eq(k, needle)),
+                    // Sets and dict keys are hashed now: one probe instead of
+                    // a scan, with the same equality rule (`Key` compares
+                    // through `value_eq`).
+                    Value::Set(items) => items.contains(&Key::new(needle.clone())),
+                    Value::Dict(pairs) => pairs.contains_key(&Key::new(needle.clone())),
                     other => {
                         return Err(bad_arg(format!(
                             "needs a string or collection first, got {}",
@@ -4829,10 +5340,18 @@ impl Interpreter {
                     }
                 };
                 match &args[0] {
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::List(items) | Value::Tuple(items) => {
                         let text = items
                             .iter()
                             .map(display)
+                            .collect::<Vec<String>>()
+                            .join(&sep);
+                        Ok(Value::Str(text))
+                    }
+                    Value::Set(items) => {
+                        let text = items
+                            .iter()
+                            .map(|k| display(k.value()))
                             .collect::<Vec<String>>()
                             .join(&sep);
                         Ok(Value::Str(text))
@@ -4911,11 +5430,11 @@ impl Interpreter {
                 match &args[0] {
                     Value::Dict(pairs) => {
                         let items: Vec<Value> = match name {
-                            "keys" => pairs.iter().map(|(k, _)| k.clone()).collect(),
-                            "values" => pairs.iter().map(|(_, v)| v.clone()).collect(),
+                            "keys" => pairs.keys().map(|k| k.value().clone()).collect(),
+                            "values" => pairs.values().cloned().collect(),
                             _ => pairs
                                 .iter()
-                                .map(|(k, v)| Value::Tuple(vec![k.clone(), v.clone()]))
+                                .map(|(k, v)| Value::Tuple(vec![k.value().clone(), v.clone()]))
                                 .collect(),
                         };
                         Ok(Value::List(items))
@@ -4938,9 +5457,8 @@ impl Interpreter {
                 }
                 let len = match &args[0] {
                     Value::Str(s) => crate::text::len(s),
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-                        items.len() as i64
-                    }
+                    Value::List(items) | Value::Tuple(items) => items.len() as i64,
+                    Value::Set(items) => items.len() as i64,
                     other => {
                         return Err(bad_arg(format!(
                             "needs a string or collection, got {}",
@@ -4967,16 +5485,25 @@ impl Interpreter {
                 let start = start.min(end);
                 match &args[0] {
                     Value::Str(s) => Ok(Value::Str(crate::text::slice(s, start, end))),
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                    Value::List(items) | Value::Tuple(items) => {
                         Ok(Value::List(items[start..end].to_vec()))
                     }
+                    Value::Set(items) => Ok(Value::List(
+                        items
+                            .iter()
+                            .skip(start)
+                            .take(end - start)
+                            .map(|k| k.value().clone())
+                            .collect(),
+                    )),
                     _ => unreachable!("the length match above rejected everything else"),
                 }
             }
             "sum" => {
                 one_arg()?;
-                let items = match &args[0] {
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => items,
+                let items: Vec<&Value> = match &args[0] {
+                    Value::List(items) | Value::Tuple(items) => items.iter().collect(),
+                    Value::Set(items) => items.iter().map(|k| k.value()).collect(),
                     other => {
                         return Err(bad_arg(format!(
                             "needs a collection of numbers, got {}",
@@ -5010,7 +5537,8 @@ impl Interpreter {
             "enumerate" => {
                 one_arg()?;
                 let items: Vec<Value> = match &args[0] {
-                    Value::List(items) | Value::Tuple(items) | Value::Set(items) => items.clone(),
+                    Value::List(items) | Value::Tuple(items) => items.clone(),
+                    Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
                     Value::Str(s) => crate::text::clusters(s)
                         .into_iter()
                         .map(|c| Value::Str(c.to_string()))
@@ -5233,9 +5761,10 @@ impl Interpreter {
         }
         let collection = self.eval(&arg_exprs[0], line, None)?;
         let items: Vec<Value> = match &collection {
-            Value::List(items) | Value::Tuple(items) | Value::Set(items) => items.clone(),
+            Value::List(items) | Value::Tuple(items) => items.clone(),
+            Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
             // A dict maps over its keys, exactly as a `for` loop does.
-            Value::Dict(pairs) => pairs.iter().map(|(k, _)| k.clone()).collect(),
+            Value::Dict(pairs) => pairs.keys().map(|k| k.value().clone()).collect(),
             Value::Str(s) => crate::text::clusters(s)
                 .into_iter()
                 .map(|c| Value::Str(c.to_string()))
@@ -5306,8 +5835,8 @@ impl Interpreter {
         builtin: &str,
     ) -> Result<Callable, String> {
         if let Expr::Ident(name) = expr {
-            if self.env.get(name).is_none() && self.functions.contains_key(name) {
-                return Ok(Callable::User(name.clone()));
+            if self.env.get(name.as_str()).is_none() && self.functions.contains_key(name.as_str()) {
+                return Ok(Callable::User(name.to_string()));
             }
         }
         match self.eval(expr, line, None)? {
@@ -5356,7 +5885,7 @@ impl Interpreter {
                 for (i, value) in args.into_iter().enumerate() {
                     let name = format!("\u{0}callback:{fn_name}:{i}");
                     self.env.insert(&name, value);
-                    exprs.push(Expr::Ident(name));
+                    exprs.push(Expr::Ident(Sym::new(name)));
                 }
                 let result = self.eval_lib_call(lib, fn_name, &exprs, line);
                 self.env.pop_frame();
@@ -5459,12 +5988,11 @@ fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Res
                     line
                 ));
             }
-            let key = &keys[0];
-            if let Some(slot) = pairs.iter_mut().find(|(k, _)| value_eq(k, key)) {
-                slot.1 = value;
-            } else {
-                pairs.push((key.clone(), value));
-            }
+            // `insert` updates a key where it sits and appends a new one,
+            // which is the rule the linear version had. `make_mut` copies the
+            // map only when another binding still shares it, so a write to a
+            // value nothing else holds stays in place.
+            Rc::make_mut(pairs).insert(Key::new(keys[0].clone()), value);
             Ok(())
         }
         Value::Str(_) => Err(format!(
@@ -5516,8 +6044,12 @@ fn index_target_err(line: usize) -> String {
 
 fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, String> {
     match base {
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-            index_seq(items, keys, line)
+        Value::List(items) | Value::Tuple(items) => index_seq(items, keys, line),
+        // A set is fixed and unordered for writing, but reading `s[i]` by
+        // position still works: the position is the insertion order.
+        Value::Set(items) => {
+            let items: Vec<Value> = items.iter().map(|k| k.value().clone()).collect();
+            index_seq(&items, keys, line)
         }
         // One index picks one character -- a grapheme cluster, so `s[0]` of
         // `မြန်မာ` is `မြ` rather than the consonant alone.
@@ -5550,9 +6082,8 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
             }
             let key = &keys[0];
             pairs
-                .iter()
-                .find(|(k, _)| value_eq(k, key))
-                .map(|(_, v)| v.clone())
+                .get(&Key::new(key.clone()))
+                .cloned()
                 .ok_or_else(|| format!("E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။", line, repr(key)))
         }
         other => Err(format!(
@@ -5915,10 +6446,9 @@ fn value_contains(haystack: &Value, needle: &Value, line: usize) -> Result<bool,
                 type_name_mm(other)
             )),
         },
-        Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
-            Ok(items.iter().any(|v| value_eq(v, needle)))
-        }
-        Value::Dict(pairs) => Ok(pairs.iter().any(|(k, _)| value_eq(k, needle))),
+        Value::List(items) | Value::Tuple(items) => Ok(items.iter().any(|v| value_eq(v, needle))),
+        Value::Set(items) => Ok(items.contains(&Key::new(needle.clone()))),
+        Value::Dict(pairs) => Ok(pairs.contains_key(&Key::new(needle.clone()))),
         other => Err(format!(
             "E110 line {}: `in` needs a string or collection on the left, got {}",
             line,
@@ -6235,5 +6765,264 @@ fn convert_value(v: &Value, target_type: &str, line: usize) -> Result<Value, Str
         // type keyword and quietly answered a bool for the ones it did not
         // really handle (`ကို စာရင်း သို့ ပြောင်းပါ။`).
         _ => Err(fail()),
+    }
+}
+
+/// Does `expr` name `name` anywhere it is sure about? The in-place append
+/// takes the target out of the environment and evaluates the operand, so it
+/// is only sound when the operand cannot read the target: `x = x + x` must
+/// double the old value, which appending to the old value would not express.
+/// Only a literal (no names) and a bare different name are recognised; every
+/// other shape is treated as a possible read, so it takes the always-correct
+/// generic path. That also keeps calls out of the fast path, so nothing can
+/// rebind the target while the operand is evaluated.
+fn mentions(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::StrLit(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::BoolLit(_)
+        | Expr::NullLit
+        | Expr::NumLit(_) => false,
+        Expr::Ident(other) => other == name,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Lex, parse and run `src` with its output captured, the way `akk` runs
+    /// a program (minus the file and the transcript file).
+    fn run(src: &str) -> (Result<(), String>, String, Interpreter) {
+        let tokens = crate::lexer::lex(src).expect("the test program should lex");
+        let stmts = crate::parser::parse(&tokens).expect("the test program should parse");
+        let mut interp = Interpreter::new(PathBuf::from("libraries"));
+        interp.capture_output();
+        interp.silence_output();
+        interp.suppress_warnings();
+        let result = interp.run(&stmts);
+        let output = interp.take_output().unwrap_or_default();
+        (result, output, interp)
+    }
+
+    #[test]
+    fn appending_to_a_string_matches_string_addition() {
+        let (result, output, _) = run("s :str = \"မြန်မာ\";\n\
+             s = s + \"ပါ\";\n\
+             s += \"!\";\n\
+             print(s);\n\
+             print(len(s));\n\
+             x :str = \"ab\";\n\
+             x = x + x;\n\
+             print(x);\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "မြန်မာပါ!\n5\nabab\n");
+    }
+
+    #[test]
+    fn appending_inside_a_function_is_undone_with_its_frame() {
+        let (result, output, _) = run("s :str = \"a\";\n\
+             fn add_b() { s = s + \"b\"; return len(s); }\n\
+             print(add_b());\n\
+             print(s);\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "2\na\n");
+    }
+
+    #[test]
+    fn a_failed_append_keeps_the_old_string() {
+        let (result, _, interp) = run("s :str = \"a\";\ns = s + 1;\n");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("E040"));
+        assert_eq!(display(interp.env.get("s").expect("s is still bound")), "a");
+    }
+
+    #[test]
+    fn a_dict_keeps_the_first_position_of_a_repeated_key() {
+        let (result, output, _) = run(
+            "d မှာ { \"a\" သည် 1 ဖြစ်၏။ \"b\" သည် 2 ဖြစ်၏။ \"a\" သည် 3 ဖြစ်၏။ } ဖြစ်၏။\n\
+             print(d);\n\
+             print(keys(d));\n\
+             print(values(d));\n\
+             print(entries(d));\n",
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            output,
+            "{\"a\": 3, \"b\": 2}\n[\"a\", \"b\"]\n[3, 2]\n[(\"a\", 3), (\"b\", 2)]\n"
+        );
+    }
+
+    #[test]
+    fn a_set_keeps_the_order_of_first_appearance() {
+        let (result, output, _) = run("s မှာ {3, 1, 2, 1, 3} ဖြစ်၏။\n\
+             print(s);\n\
+             print(len(s));\n\
+             for x in s { print(x); }\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "{3, 1, 2}\n3\n3\n1\n2\n");
+    }
+
+    #[test]
+    fn int_float_and_text_keys_stay_distinct() {
+        let (result, output, _) = run(
+            "d မှာ { 1 သည် \"i\" ဖြစ်၏။ 1.0 သည် \"f\" ဖြစ်၏။ \"1\" သည် \"s\" ဖြစ်၏။ } ဖြစ်၏။\n\
+             print(len(d));\n\
+             print(d[1]);\n\
+             print(d[1.0]);\n\
+             print(d[\"1\"]);\n\
+             print(keys(d));\n",
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "3\ni\nf\ns\n[1, 1.0, \"1\"]\n");
+    }
+
+    #[test]
+    fn a_collection_can_still_be_a_key() {
+        let (result, output, _) = run("k မှာ [1, 2] ဖြစ်၏။\n\
+             t မှာ (1, 2) ဖြစ်၏။\n\
+             d မှာ { k သည် \"lk\" ဖြစ်၏။ t သည် \"tk\" ဖြစ်၏။ } ဖြစ်၏။\n\
+             print(d[k]);\n\
+             print(d[t]);\n\
+             print(len(d));\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "lk\ntk\n2\n");
+    }
+
+    #[test]
+    fn a_missing_dict_key_is_still_e053() {
+        let (result, _, _) = run("d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(d[\"zz\"]);\n");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("E053"));
+    }
+
+    #[test]
+    fn writing_a_new_key_appends_and_an_old_key_stays_put() {
+        let (result, output, _) = run("d မှာ { \"a\" သည် 1 ဖြစ်၏။ \"b\" သည် 2 ဖြစ်၏။ } ဖြစ်၏။\n\
+             d[\"a\"] = 9;\n\
+             d[\"c\"] = 4;\n\
+             print(d);\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "{\"a\": 9, \"b\": 2, \"c\": 4}\n");
+    }
+
+    #[test]
+    fn dict_equality_still_reads_the_printed_order() {
+        let (result, output, _) = run("a မှာ { \"x\" သည် 1 ဖြစ်၏။ \"y\" သည် 2 ဖြစ်၏။ } ဖြစ်၏။\n\
+             b မှာ { \"y\" သည် 2 ဖြစ်၏။ \"x\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\n\
+             c မှာ { \"x\" သည် 1 ဖြစ်၏။ \"y\" သည် 2 ဖြစ်၏။ } ဖြစ်၏။\n\
+             print(a == b);\n\
+             print(a == c);\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "False\nTrue\n");
+    }
+
+    // --- Step 6: the scoping rules the slot table must keep ---------------
+
+    #[test]
+    fn a_parameter_shadows_a_global_and_the_global_comes_back() {
+        let (result, output, _) = run(r#"x :int = 10;
+fn f(x) { x = x + 1; return x; }
+print(f(1));
+print(x);
+"#);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "2\n10\n");
+    }
+
+    #[test]
+    fn a_global_written_inside_a_function_is_undone_by_the_call() {
+        let (result, output, _) = run(r#"g :int = 0;
+fn bump() { g = g + 1; return g; }
+print(bump());
+print(bump());
+print(g);
+"#);
+        assert!(result.is_ok(), "{result:?}");
+        // Each call writes `g` inside its own frame, and the frame pop undoes
+        // the write before the next call: `bump()` therefore returns 1 twice,
+        // and `g` is back to 0 afterwards.
+        assert_eq!(output, "1\n1\n0\n");
+    }
+
+    #[test]
+    fn a_local_does_not_leak_out_of_its_function() {
+        let (result, output, _) = run(r#"fn f() { y :int = 5; return y; }
+print(f());
+print(y);
+"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("E030"));
+        assert_eq!(output, "5\n");
+    }
+
+    #[test]
+    fn the_loop_variable_is_the_last_item_and_stays_bound() {
+        let (result, output, _) =
+            run("i :int = 99;\nxs မှာ [1, 2] ဖြစ်၏။\nfor i in xs { print(i); }\nprint(i);\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "1\n2\n2\n");
+    }
+
+    #[test]
+    fn recursion_sees_each_frames_own_parameters() {
+        let (result, output, _) = run(
+            r#"fn fact(n) { if (n < 2) { return 1; } return n * fact(n - 1); }
+fn sum_to(n) { total :int = 0; j :int = 0; while (j < n) { j += 1; total = total + j; } return total; }
+print(fact(5));
+print(sum_to(4));
+"#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "120\n10\n");
+    }
+
+    #[test]
+    fn a_lambda_reads_the_scope_it_is_called_from() {
+        let (result, output, _) = run(r#"g :int = 100;
+fn make() { return fn(x) { x + g; }; }
+h သည် make() ဖြစ်၏။
+print(h(1));
+print(h(2));
+"#);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "101\n102\n");
+    }
+
+    #[test]
+    fn a_lambda_cannot_see_a_finished_functions_local() {
+        let (result, _, _) = run(r#"fn make() { base :int = 7; return fn(x) { x + base; }; }
+h သည် make() ဖြစ်၏။
+print(h(1));
+"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("E030"));
+    }
+
+    #[test]
+    fn an_error_inside_a_call_still_restores_the_environment() {
+        let (result, _, interp) = run(r#"g :int = 1;
+fn boom() { g = 5; return 1 / 0; }
+boom();
+"#);
+        assert!(result.is_err());
+        assert_eq!(display(interp.env.get("g").expect("g is still bound")), "1");
+    }
+
+    #[test]
+    fn pin_still_refuses_a_reassignment() {
+        let (result, _, _) = run("pin p :int = 1;\np = 2;\n");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("E104"));
+    }
+
+    #[test]
+    fn a_default_parameter_sees_the_one_before_it() {
+        let (result, output, _) = run("fn f(a, b = a + 1) { return a + b; }\nprint(f(1));\n");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(output, "3\n");
     }
 }
