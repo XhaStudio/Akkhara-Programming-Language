@@ -243,7 +243,8 @@ impl RunOptions {
 /// Run one program file, honoring `options`, and return the exit code the
 /// process should end with. This is the whole plain run path: `akk file.akk`
 /// and `akk run` both come through here, so the two behave identically apart
-/// from the settings and the extra manifest warnings.
+/// from the settings, the extra manifest warnings and `project` -- the header
+/// lines only a project run prints.
 fn run_program(
     filename: &str,
     options: RunOptions,
@@ -252,7 +253,9 @@ fn run_program(
     project: Option<progress::ProjectHeader>,
 ) -> i32 {
     let reporter = progress::Reporter::new(project);
+    // `Compiling`: the entry file is about to be read, lexed and parsed.
     reporter.compiling();
+
     let src = match fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
@@ -305,20 +308,24 @@ fn run_program(
         search_dirs.push(cwd);
     }
 
-    // Static warnings: what the program -- and every script it imports --
-    // declares but never uses, plus any manifest key this `akk` does not
-    // know. They are shown before the program starts (and saved into its
-    // `.akop` transcript), and they never change what the program does.
-    // Parsing succeeded, so the static phases are over: one line, then the
-    // warnings they produced, then `Running`.
-    reporter.building_done();
-    let warning_prefix = if options.warnings {
+    // `Building`: the static phase. `library_warnings` reads and parses every
+    // script this program brings in, so it is part of this phase and runs
+    // before the `Building` line is printed. The warnings it produces are
+    // shown next (and saved into the `.akop` transcript), and they never
+    // change what the program does.
+    let static_warnings = if options.warnings {
         let mut all: Vec<String> = extra_warnings.to_vec();
         all.extend(library_warnings(&stmts, &search_dirs, dependencies));
-        write_warnings(&all)
+        all
     } else {
-        String::new()
+        Vec::new()
     };
+    reporter.building_done();
+    // `write_warnings` prints each line to stderr and hands back the text the
+    // transcript starts with; it is empty when there is nothing to show.
+    let warning_prefix = write_warnings(&static_warnings);
+
+    // `Running`: the parsed program is about to execute.
     reporter.running();
     let outcome = match interpret(
         stmts,
@@ -408,9 +415,9 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
                     return 1;
                 }
             };
-            // The header exists only here: `akk run` with no file argument.
-            // Built after resolution, so a dependency failure prints with no
-            // `Compiling` line, exactly as before.
+            // The header exists only on this arm: `akk run` in project mode
+            // with no file argument. It is built after resolution succeeded,
+            // so a dependency failure still prints with no `Compiling` line.
             let project = Some(progress::ProjectHeader {
                 name: manifest.package.name.clone(),
                 version: manifest.package.version.clone(),
@@ -476,8 +483,8 @@ fn plain_path(path: &Path) -> String {
 /// every platform we ship. The rule is a blacklist plus a few structural
 /// checks -- deliberately *not* an alphanumeric whitelist, because Myanmar
 /// letters and combining marks (e.g. U+1039) must stay usable. The limit is
-/// 255 bytes: one Myanmar letter is 3 bytes, so a 64-byte cap would refuse
-/// perfectly ordinary names.
+/// 255 bytes: one Myanmar letter is 3 bytes, so a smaller cap would refuse
+/// ordinary names.
 fn valid_project_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
         return false;
@@ -502,8 +509,8 @@ fn valid_project_name(name: &str) -> bool {
 }
 
 /// Create the folder tree and write the three files. Split out so `cmd_new`
-/// can delete the whole folder when any step fails: a half-written project
-/// would make the next `akk new <name>` fail with E166.
+/// can delete the folder when any step fails: a half-written project would
+/// make the next `akk new <name>` fail with E166.
 fn create_project(root: &Path, manifest_text: &str, program_text: &str) -> std::io::Result<()> {
     let src_dir = root.join("src");
     fs::create_dir_all(&src_dir)?;
@@ -517,9 +524,9 @@ fn create_project(root: &Path, manifest_text: &str, program_text: &str) -> std::
 /// first program, then print how to enter it. Nothing outside the new folder
 /// is touched, and no `git` command runs.
 ///
-/// `args.get(2)` hands an explicitly empty argument through as `Some("")`, and
-/// an empty name cannot become a folder -- so it is treated as the missing-name
-/// case and prints the usage line.
+/// `args.get(2)` hands an explicitly empty argument through as `Some("")`; an
+/// empty name cannot become a folder, so it is treated like a missing name and
+/// prints the usage line.
 fn cmd_new(name: Option<&str>) -> i32 {
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         eprintln!("Usage: akk new <name>");
@@ -535,7 +542,10 @@ fn cmd_new(name: Option<&str>) -> i32 {
     }
 
     let root = PathBuf::from(name);
-    if root.exists() {
+    // `symlink_metadata` also succeeds for a dangling symlink, which `exists()`
+    // reports as absent: creating into it would follow the link, and the
+    // cleanup below would then delete a path this command never created.
+    if root.symlink_metadata().is_ok() {
         eprintln!(
             "E166 akk new: \"{}\" သည် ရှိပြီးဖြစ်ပါသည်။ အခြားအမည်ပေးပါ။",
             name
@@ -544,7 +554,7 @@ fn cmd_new(name: Option<&str>) -> i32 {
     }
 
     // Every key below is read by `manifest::load` (`PACKAGE_KEYS`,
-    // `BUILD_KEYS`, `[run]`), so the generated file raises no W008.
+    // `BUILD_KEYS`, `RUN_KEYS`), so the generated file raises no W008.
     let manifest_text = format!(
         "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nentry = \"src/main.akk\"\n\n[build]\nout_dir = \"build\"\n\n[run]\ntranscript = true\nwarnings = true\ntiming = true\n",
         name
@@ -1380,7 +1390,7 @@ mod new_tests {
     fn name_length_limit_is_255_bytes() {
         assert!(valid_project_name(&"a".repeat(255)));
         assert!(!valid_project_name(&"a".repeat(256)));
-        // 85 Myanmar letters are 255 bytes: still allowed.
+        // 85 Myanmar letters are 255 bytes; 86 are 258.
         assert!(valid_project_name(&"က".repeat(85)));
         assert!(!valid_project_name(&"က".repeat(86)));
     }
