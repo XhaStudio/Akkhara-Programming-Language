@@ -264,7 +264,6 @@ fn run_program(
             return 1;
         }
     };
-    reporter.building(1);
 
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
@@ -276,7 +275,6 @@ fn run_program(
             return 1;
         }
     };
-    reporter.building(2);
 
     let stmts = match parser::parse(&tokens) {
         Ok(s) => s,
@@ -311,13 +309,14 @@ fn run_program(
     // declares but never uses, plus any manifest key this `akk` does not
     // know. They are shown before the program starts (and saved into its
     // `.akop` transcript), and they never change what the program does.
+    // Parsing succeeded, so the static phases are over: one line, then the
+    // warnings they produced, then `Running`.
+    reporter.building_done();
     let warning_prefix = if options.warnings {
         let mut all: Vec<String> = extra_warnings.to_vec();
         all.extend(library_warnings(&stmts, &search_dirs, dependencies));
-        reporter.building_done();
         write_warnings(&all)
     } else {
-        reporter.building_done();
         String::new()
     };
     reporter.running();
@@ -410,6 +409,8 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
                 }
             };
             // The header exists only here: `akk run` with no file argument.
+            // Built after resolution, so a dependency failure prints with no
+            // `Compiling` line, exactly as before.
             let project = Some(progress::ProjectHeader {
                 name: manifest.package.name.clone(),
                 version: manifest.package.version.clone(),
@@ -474,9 +475,11 @@ fn plain_path(path: &Path) -> String {
 /// A project name `akk new` accepts: one folder component that is safe on
 /// every platform we ship. The rule is a blacklist plus a few structural
 /// checks -- deliberately *not* an alphanumeric whitelist, because Myanmar
-/// letters and combining marks (e.g. U+1039) must stay usable.
+/// letters and combining marks (e.g. U+1039) must stay usable. The limit is
+/// 255 bytes: one Myanmar letter is 3 bytes, so a 64-byte cap would refuse
+/// perfectly ordinary names.
 fn valid_project_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
+    if name.is_empty() || name.len() > 255 {
         return false;
     }
     if name == "." || name == ".." || name.starts_with('-') {
@@ -513,8 +516,12 @@ fn create_project(root: &Path, manifest_text: &str, program_text: &str) -> std::
 /// `akk new <name>` -- create `<name>/` with a manifest, an ignore file and a
 /// first program, then print how to enter it. Nothing outside the new folder
 /// is touched, and no `git` command runs.
+///
+/// `args.get(2)` hands an explicitly empty argument through as `Some("")`, and
+/// an empty name cannot become a folder -- so it is treated as the missing-name
+/// case and prints the usage line.
 fn cmd_new(name: Option<&str>) -> i32 {
-    let Some(name) = name else {
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
         eprintln!("Usage: akk new <name>");
         return 1;
     };
@@ -1364,9 +1371,18 @@ mod new_tests {
 
     #[test]
     fn accepts_plain_and_myanmar_names() {
-        for name in ["demo", "my-app", "app_2", "မြန်မာ"] {
+        for name in ["demo", "my-app", "app_2", "မြန်မာ", "အက္ခရာ"] {
             assert!(valid_project_name(name), "{name} should be accepted");
         }
+    }
+
+    #[test]
+    fn name_length_limit_is_255_bytes() {
+        assert!(valid_project_name(&"a".repeat(255)));
+        assert!(!valid_project_name(&"a".repeat(256)));
+        // 85 Myanmar letters are 255 bytes: still allowed.
+        assert!(valid_project_name(&"က".repeat(85)));
+        assert!(!valid_project_name(&"က".repeat(86)));
     }
 
     #[test]
