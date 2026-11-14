@@ -3,6 +3,7 @@ mod lexer;
 mod library;
 mod manifest;
 mod parser;
+mod progress;
 mod text;
 mod ui;
 mod warnings;
@@ -57,7 +58,7 @@ mod file_library;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
 /// Pulled from Cargo.toml at build time (`[package] version = "..."`).
@@ -119,6 +120,7 @@ fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str)
 fn print_usage() {
     eprintln!("Usage: akk <file name> [--no-warn]");
     eprintln!("       akk run [file]             (runs the akk.toml project)");
+    eprintln!("       akk new <name>             (creates a new project folder)");
     eprintln!("       akk report [folder]        (runs every .akk in the folder)");
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
@@ -174,6 +176,10 @@ fn main() {
             cmd_install(&args[2]);
             return;
         }
+        "new" => {
+            // Creates `{name}/src/main.akk` and its manifest; see `cmd_new`.
+            process::exit(cmd_new(args.get(2).map(String::as_str)));
+        }
         "run" => {
             process::exit(cmd_run(no_warn, args.get(2).map(String::as_str)));
         }
@@ -197,6 +203,7 @@ fn main() {
         RunOptions::defaults(no_warn),
         &[],
         &[],
+        None,
     ));
 }
 
@@ -242,7 +249,10 @@ fn run_program(
     options: RunOptions,
     extra_warnings: &[String],
     dependencies: &[(String, PathBuf)],
+    project: Option<progress::ProjectHeader>,
 ) -> i32 {
+    let reporter = progress::Reporter::new(project);
+    reporter.compiling();
     let src = match fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
@@ -254,6 +264,7 @@ fn run_program(
             return 1;
         }
     };
+    reporter.building(1);
 
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
@@ -265,6 +276,7 @@ fn run_program(
             return 1;
         }
     };
+    reporter.building(2);
 
     let stmts = match parser::parse(&tokens) {
         Ok(s) => s,
@@ -302,10 +314,13 @@ fn run_program(
     let warning_prefix = if options.warnings {
         let mut all: Vec<String> = extra_warnings.to_vec();
         all.extend(library_warnings(&stmts, &search_dirs, dependencies));
+        reporter.building_done();
         write_warnings(&all)
     } else {
+        reporter.building_done();
         String::new()
     };
+    reporter.running();
     let outcome = match interpret(
         stmts,
         libs_dir,
@@ -381,7 +396,7 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
         None => None,
     };
 
-    let (filename, options, warnings, dependencies) = match (found, file) {
+    let (filename, options, warnings, dependencies, project) = match (found, file) {
         (Some(manifest), None) => {
             if let Err(e) = manifest.validate_entry() {
                 eprintln!("{}", e);
@@ -394,11 +409,20 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
                     return 1;
                 }
             };
+            // The header exists only here: `akk run` with no file argument.
+            let project = Some(progress::ProjectHeader {
+                name: manifest.package.name.clone(),
+                version: manifest.package.version.clone(),
+                root: plain_path(
+                    &fs::canonicalize(&manifest.root).unwrap_or_else(|_| manifest.root.clone()),
+                ),
+            });
             (
                 manifest.entry_path().display().to_string(),
                 RunOptions::from_manifest(&manifest.run, no_warn),
                 manifest.warnings.clone(),
                 dependency_pairs(dependencies),
+                project,
             )
         }
         (Some(manifest), Some(file)) => {
@@ -414,6 +438,7 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
                 RunOptions::from_manifest(&manifest.run, no_warn),
                 manifest.warnings.clone(),
                 dependency_pairs(dependencies),
+                None,
             )
         }
         (None, Some(file)) => (
@@ -421,16 +446,115 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
             RunOptions::defaults(no_warn),
             Vec::new(),
             Vec::new(),
+            None,
         ),
         (None, None) => {
-            eprintln!(
-                "E146 ဤ folder တွင် akk.toml ကို ရှာမတွေ့ပါ။ \"akk run <file>\" ဖြင့် ဖိုင်တစ်ခုကို တိုက်ရိုက် run ပါ။"
-            );
+            eprintln!("error: akk.toml ကို `{}` ၌ မတွေ့ပါ။", plain_path(&cwd));
             return 1;
         }
     };
 
-    run_program(&filename, options, &warnings, &dependencies)
+    run_program(&filename, options, &warnings, &dependencies, project)
+}
+
+/// The folder ignore file `akk new` writes: the default `[build] out_dir` and
+/// the `.akop` transcripts `save_terminal_log` leaves next to a program.
+const NEW_GITIGNORE: &str = "/build/\n*.akop\n";
+
+/// A path as the user should see it: no Windows verbatim (`\\?\`) prefix,
+/// which `canonicalize` and some shells add.
+fn plain_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_string(),
+        None => text,
+    }
+}
+
+/// A project name `akk new` accepts: one folder component that is safe on
+/// every platform we ship. The rule is a blacklist plus a few structural
+/// checks -- deliberately *not* an alphanumeric whitelist, because Myanmar
+/// letters and combining marks (e.g. U+1039) must stay usable.
+fn valid_project_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    if name == "." || name == ".." || name.starts_with('-') {
+        return false;
+    }
+    // Reserved device names, with or without an extension (`CON`, `con.txt`).
+    let stem = name.split('.').next().unwrap_or(name);
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        return false;
+    }
+    name.chars().all(|c| {
+        !c.is_whitespace()
+            && !c.is_control()
+            && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    })
+}
+
+/// Create the folder tree and write the three files. Split out so `cmd_new`
+/// can delete the whole folder when any step fails: a half-written project
+/// would make the next `akk new <name>` fail with E166.
+fn create_project(root: &Path, manifest_text: &str, program_text: &str) -> std::io::Result<()> {
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(root.join("akk.toml"), manifest_text)?;
+    fs::write(root.join(".gitignore"), NEW_GITIGNORE)?;
+    fs::write(src_dir.join("main.akk"), program_text)?;
+    Ok(())
+}
+
+/// `akk new <name>` -- create `<name>/` with a manifest, an ignore file and a
+/// first program, then print how to enter it. Nothing outside the new folder
+/// is touched, and no `git` command runs.
+fn cmd_new(name: Option<&str>) -> i32 {
+    let Some(name) = name else {
+        eprintln!("Usage: akk new <name>");
+        return 1;
+    };
+
+    if !valid_project_name(name) {
+        eprintln!(
+            "E167 akk new: \"{}\" ကို project အမည်အဖြစ် မသုံးနိုင်ပါ။ အမည်တွင် space၊ / \\ : * ? \" < > | နှင့် control character မပါရပါ။",
+            name
+        );
+        return 1;
+    }
+
+    let root = PathBuf::from(name);
+    if root.exists() {
+        eprintln!(
+            "E166 akk new: \"{}\" သည် ရှိပြီးဖြစ်ပါသည်။ အခြားအမည်ပေးပါ။",
+            name
+        );
+        return 1;
+    }
+
+    // Every key below is read by `manifest::load` (`PACKAGE_KEYS`,
+    // `BUILD_KEYS`, `[run]`), so the generated file raises no W008.
+    let manifest_text = format!(
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nentry = \"src/main.akk\"\n\n[build]\nout_dir = \"build\"\n\n[run]\ntranscript = true\nwarnings = true\ntiming = true\n",
+        name
+    );
+    let program_text = format!("# {}\n\"မင်္ဂလာပါ!\" ကို ဖော်ပြပါ။\n", name);
+
+    if let Err(e) = create_project(&root, &manifest_text, &program_text) {
+        let _ = fs::remove_dir_all(&root);
+        eprintln!("akk new: folder ဖန်တီး၍မရပါ - {}", e);
+        return 1;
+    }
+
+    println!(
+        "akk new: \"{}\" folder ကို ဖန်တီးပြီးပါပြီ။ \"cd {}\" ဖြင့် ဝင်ပါ။",
+        name, name
+    );
+    0
 }
 
 /// The `(name, path)` pairs the interpreter registers for `[dependencies]`
@@ -1232,4 +1356,25 @@ fn cmd_uninstall() {
     println!();
     println!("    If you added akk's install directory to your PATH manually,");
     println!("    remove that line from your shell profile (e.g. ~/.bashrc, ~/.zshrc).");
+}
+
+#[cfg(test)]
+mod new_tests {
+    use super::valid_project_name;
+
+    #[test]
+    fn accepts_plain_and_myanmar_names() {
+        for name in ["demo", "my-app", "app_2", "မြန်မာ"] {
+            assert!(valid_project_name(name), "{name} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_names() {
+        for name in [
+            "", ".", "..", "-x", "a/b", "a\\b", "my app", "a:b", "CON", "con.txt", "a*b", "a\tb",
+        ] {
+            assert!(!valid_project_name(name), "{name} should be rejected");
+        }
+    }
 }
