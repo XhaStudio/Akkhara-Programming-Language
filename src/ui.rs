@@ -79,24 +79,24 @@ fn draw_confirm(out: &mut Stdout, question: &str, selected_yes: bool) {
             out,
             SetAttribute(Attribute::Reverse),
             SetForegroundColor(Color::Green),
-            Print(" Yes "),
+            Print(" ဟုတ် "),
             ResetColor,
             SetAttribute(Attribute::Reset),
             Print("   "),
             SetForegroundColor(Color::DarkGrey),
-            Print(" No "),
+            Print(" မဟုတ် "),
             ResetColor,
         );
     } else {
         let _ = queue!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            Print(" Yes "),
+            Print(" ဟုတ် "),
             ResetColor,
             Print("   "),
             SetAttribute(Attribute::Reverse),
             SetForegroundColor(Color::Red),
-            Print(" No "),
+            Print(" မဟုတ် "),
             ResetColor,
             SetAttribute(Attribute::Reset),
         );
@@ -105,7 +105,7 @@ fn draw_confirm(out: &mut Stdout, question: &str, selected_yes: bool) {
     let _ = queue!(
         out,
         SetForegroundColor(Color::DarkGrey),
-        Print("   (\u{2190}/\u{2192}/\u{2191}/\u{2193} choose \u{00b7} Enter confirm)"),
+        Print("   (\u{2190}/\u{2192}/\u{2191}/\u{2193} ရွေး \u{00b7} Enter အတည်ပြု)"),
         ResetColor,
     );
     let _ = out.flush();
@@ -186,7 +186,7 @@ where
     }
 
     handle.join().unwrap_or_else(|_| {
-        eprintln!("    [FAILED] background task panicked");
+        eprintln!("    [FAILED] နောက်ခံ လုပ်ငန်း ပျက်ကျသွားပါသည်");
         process::exit(1);
     })
 }
