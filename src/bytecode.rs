@@ -1,5 +1,5 @@
 //! A real bytecode compiler and virtual machine.
-//!
+//!/
 //! The interpreter walks the parsed statements directly. This module is the
 //! other half: [`compile`] turns the same [`Stmt`] tree into a flat list of
 //! [`Instr`] and [`Vm`] executes that list on a stack machine, so a program
