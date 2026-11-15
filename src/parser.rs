@@ -845,7 +845,7 @@ fn is_close(tok: &Tok) -> bool {
 }
 
 fn missing_period_err(line: usize) -> String {
-    format!("E002 လိုင်း {} ၏စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
+    format!("E002 လိုင်း {} ၏ စာကြောင်းအဆုံးတွင် '။' မရှိပါ။", line)
 }
 
 /// The eng (English-spelled) statement equivalent of `missing_period_err`: an
@@ -853,7 +853,7 @@ fn missing_period_err(line: usize) -> String {
 /// without its ';' terminator. Shares E002, which is the "statement
 /// terminator is missing" code for every statement style.
 fn missing_semicolon_err(line: usize) -> String {
-    format!("E002 Line {}: Its missing semicolon \";\"", line)
+    format!("E002 လိုင်း {} တွင် အဆုံးသတ် \';\' မရှိပါ။", line)
 }
 
 fn generic_syntax_err(line: usize) -> String {
@@ -876,7 +876,7 @@ fn mismatched_bracket_err(line: usize) -> String {
 
 fn dict_entry_err(line: usize) -> String {
     format!(
-        "E005 လိုင်း {} တွင် အဘိဓာန် (dict) အတွင်း <key> သည် <value> ဖြစ်၏။ ပုံစံဖြင့် ရေးရပါမည်။",
+        "E005 လိုင်း {} တွင် အဘိဓာန် အတွင်း <key> သည် <value> ဖြစ်၏။ ပုံစံဖြင့် ရေးရပါမည်။",
         line
     )
 }
@@ -885,7 +885,7 @@ fn dict_entry_err(line: usize) -> String {
 fn fn_missing_particle_err(line: usize, fname: &str) -> String {
     let full = format!("{}။", fname);
     format!(
-        "E006 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  \"{}\" ၏အရှေ့၌ \"ကို\" ခံရေးရန်လိုအပ်သည်။",
+        "E006 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန် \"{}\" ၏အရှေ့၌ \"ကို\" ခံရေးရန်လိုအပ်သည်။",
         line, full, full
     )
 }
@@ -893,7 +893,7 @@ fn fn_missing_particle_err(line: usize, fname: &str) -> String {
 fn fn_missing_value_err(line: usize, fname: &str) -> String {
     let full = format!("{}။", fname);
     format!(
-        "E007 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန်  value မရှိသဖြင့် \"{}\" ကို မလုပ်ဆောင်နိုင်ပါ။",
+        "E007 လိုင်း {}၌ \"{}\" လုပ်ဆောင်ရန် တန်ဖိုး မရှိသဖြင့် \"{}\" ကို မလုပ်ဆောင်နိုင်ပါ။",
         line, full, full
     )
 }
@@ -910,7 +910,7 @@ fn convert_removed_err(line: usize, target: Option<(&'static str, &'static str)>
             line, mm, eng
         ),
         None => format!(
-            "E009 လိုင်း {} တွင် \"ပြောင်းပါ\" ကို ဖယ်ရှားလိုက်ပါပြီ။ ပြောင်းရန်မှာ — ကိန်း(x)/digits(x), ကိန်းပြည့်(x)/int(x), ဒဿမ(x)/float(x), ဘူးလ်(x)/bool(x), စာ(x)/str(x)။",
+            "E009 လိုင်း {} တွင် \"ပြောင်းပါ\" ကို ဖယ်ရှားလိုက်ပါပြီ။ ပြောင်းရန်မှာ — ကိန်း(x)/ဂဏန်း(x), ကိန်းပြည့်(x)/int(x), ဒဿမ(x)/float(x), ဘူးလ်(x)/bool(x), စာ(x)/str(x)။",
             line
         ),
     }
@@ -918,106 +918,106 @@ fn convert_removed_err(line: usize, target: Option<(&'static str, &'static str)>
 
 fn math_missing_value_err(line: usize, fname: &str) -> String {
     format!(
-        "E010 လိုင်း {} တွင် \"{}\" ကိုလုပ်ဆောင်ရန် value မရှိသဖြင့် \"{}\" ကိုမလုပ်ဆောင်နိုင်ပါ။",
+        "E010 လိုင်း {} တွင် \"{}\" ကိုလုပ်ဆောင်ရန် တန်ဖိုး မရှိသဖြင့် \"{}\" ကိုမလုပ်ဆောင်နိုင်ပါ။",
         line, fname, fname
     )
 }
 
 fn if_missing_condition_err(line: usize) -> String {
     format!(
-        "E011 လိုင်း {} တွင် \"အကယ်၍\"/\"သို့မဟုတ်\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        "E011 လိုင်း {} တွင် \"အကယ်၍\"/\"သို့မဟုတ်\" အတွက် အခြေအနေ (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn if_condition_syntax_err(line: usize) -> String {
     format!(
-        "E012 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်လျှင်",
+        "E012 လိုင်း {} တွင် အခြေအနေ ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်လျှင်",
         line
     )
 }
 
 fn if_missing_then_err(line: usize) -> String {
     format!(
-        "E013 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
+        "E013 လိုင်း {} တွင် အခြေအနေ အပြီးမှာ \"ဖြစ်လျှင်\" သို့မဟုတ် \"မဖြစ်လျှင်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn while_missing_condition_err(line: usize) -> String {
     format!(
-        "E015 လိုင်း {} တွင် \"အခြေအနေ\" အတွက် condition (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
+        "E015 လိုင်း {} တွင် \"အခြေအနေ\" အတွက် အခြေအနေ (စည်းကမ်းချက်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn while_condition_syntax_err(line: usize) -> String {
     format!(
-        "E016 လိုင်း {} တွင် condition ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အခြေအနေ (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်နေစဉ်",
+        "E016 လိုင်း {} တွင် အခြေအနေ ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အခြေအနေ (<value> <တန်ဖိုးနှိုင်းယှဉ်ခြင်း> <value>) (နှင့်|သို့) (...) ဖြစ်နေစဉ်",
         line
     )
 }
 
 fn while_missing_then_err(line: usize) -> String {
     format!(
-        "E017 လိုင်း {} တွင် condition အပြီးမှာ \"ဖြစ်နေစဉ်\" / \"ဖြစ်နေရင်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" / \"မဖြစ်နေရင်\" လိုအပ်ပါသည်။",
+        "E017 လိုင်း {} တွင် အခြေအနေ အပြီးမှာ \"ဖြစ်နေစဉ်\" / \"ဖြစ်နေရင်\" သို့မဟုတ် \"မဖြစ်နေစဉ်\" / \"မဖြစ်နေရင်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_missing_name_err(line: usize) -> String {
     format!(
-        "E018 လိုင်း {} တွင် \"အလုပ်\" (function) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
+        "E018 လိုင်း {} တွင် \"အလုပ်\" အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_bad_param_err(line: usize) -> String {
     format!(
-        "E019 လိုင်း {} တွင် \"အလုပ်\" ၏ parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
+        "E019 လိုင်း {} တွင် \"အလုပ်\" ၏ အချက် ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — အလုပ် <fn name> အတွက် <parameter> ဖြင့်",
         line
     )
 }
 
 fn func_missing_by_err(line: usize) -> String {
     format!(
-        "E020 လိုင်း {} တွင် \"အလုပ်\" ၏ header အပြီးမှာ \"ဖြင့်\" (parameter ပါလျှင်) သို့မဟုတ် \"သည်\" (parameter မပါလျှင်) လိုအပ်ပါသည်။",
+        "E020 လိုင်း {} တွင် \"အလုပ်\" ၏ ခေါင်းစီး အပြီးမှာ \"ဖြင့်\" (အချက် ပါလျှင်) သို့မဟုတ် \"သည်\" (အချက် မပါလျှင်) လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_call_bad_name_err(line: usize) -> String {
-    format!("E021 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။", line)
+    format!("E021 လိုင်း {} တွင် ခေါ်လိုသော အလုပ်၏ အမည် မှားနေပါသည်။", line)
 }
 
 fn func_call_missing_particle_err(line: usize) -> String {
     format!(
-        "E022 လိုင်း {} တွင် function ခေါ်ရန် \"<fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        "E022 လိုင်း {} တွင် အလုပ် ခေါ်ရန် \"<fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
         line
     )
 }
 
 fn func_call_missing_by_err(line: usize) -> String {
     format!(
-        "E023 လိုင်း {} တွင် \"လုပ်ရန်\" ၏ argument အပြီးမှာ \"ဖြင့်\" လိုအပ်ပါသည်။",
+        "E023 လိုင်း {} တွင် \"လုပ်ရန်\" ၏ အချက် အပြီးမှာ \"ဖြင့်\" လိုအပ်ပါသည်။",
         line
     )
 }
 
 fn func_call_missing_arg_err(line: usize) -> String {
-    format!("E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် argument (value) လိုအပ်ပါသည်။", line)
+    format!("E024 လိုင်း {} တွင် \"လုပ်ရန်\" ရန် အချက် လိုအပ်ပါသည်။", line)
 }
 
 fn library_use_bad_list_err(line: usize) -> String {
     format!(
-        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ library အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို သုံးမည်။",
+        "E072 လိုင်း {} တွင် \"နည်းပညာများ\" ၏ နည်းပညာ အမည်များကို \",\" ဖြင့် ခွဲ၍ရေးပါ။ အသုံးပြုပုံ — နည်းပညာများ <lib1>, <lib2> ကို သုံးမည်။",
         line
     )
 }
 
 fn library_use_alias_err(line: usize) -> String {
     format!(
-        "E093 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းပညာများ <lib> အဖြစ် <alias> ကို သုံးမည်။",
+        "E093 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် အမည်လွှဲ အမည် တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — နည်းပညာများ <lib> အဖြစ် <alias> ကို သုံးမည်။",
         line
     )
 }
@@ -1052,53 +1052,53 @@ fn library_names_before_use(tokens: &[Token]) -> Option<String> {
 
 fn func_alias_missing_name_err(line: usize) -> String {
     format!(
-        "E075 လိုင်း {} တွင် \"အဖြစ်\" ၏ ရှေ့တွင် alias ပေးလိုသော function အမည် တစ်ခုတည်း လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
+        "E075 လိုင်း {} တွင် \"အဖြစ်\" ၏ ရှေ့တွင် အမည်လွှဲ ပေးလိုသော အလုပ် အမည် တစ်ခုတည်း လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
         line
     )
 }
 
 fn func_alias_missing_alias_err(line: usize) -> String {
     format!(
-        "E076 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် alias အမည် အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
+        "E076 လိုင်း {} တွင် \"အဖြစ်\" ၏ နောက်တွင် အမည်လွှဲ အမည် အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
         line
     )
 }
 
 fn func_alias_bad_alias_err(line: usize) -> String {
     format!(
-        "E077 လိုင်း {} တွင် alias အမည်များကို \",\" ဖြင့် ခွဲ၍ တစ်ခုချင်း ရေးပါ။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
+        "E077 လိုင်း {} တွင် အမည်လွှဲ အမည်များကို \",\" ဖြင့် ခွဲ၍ တစ်ခုချင်း ရေးပါ။ အသုံးပြုပုံ — <fn name> အဖြစ် <alias1>, <alias2>",
         line
     )
 }
 
 fn func_call_assign_missing_var_err(line: usize) -> String {
     format!(
-        "E068 လိုင်း {} တွင် function ခေါ်ပြီး တန်ဖိုးသိမ်းမည့် variable အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — <var> အတွက် <fn name> ကို လုပ်ပါ။ သို့မဟုတ် <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်",
+        "E068 လိုင်း {} တွင် အလုပ် ခေါ်ပြီး တန်ဖိုးသိမ်းမည့် ကိန်းရှင် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — <var> အတွက် <fn name> ကို လုပ်ပါ။ သို့မဟုတ် <var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်",
         line
     )
 }
 
 fn func_call_assign_bad_name_err(line: usize) -> String {
-    format!("E069 လိုင်း {} တွင် ခေါ်လိုသော function ၏ အမည် မှားနေပါသည်။", line)
+    format!("E069 လိုင်း {} တွင် ခေါ်လိုသော အလုပ်၏ အမည် မှားနေပါသည်။", line)
 }
 
 fn func_call_assign_missing_particle_err(line: usize) -> String {
     format!(
-        "E070 လိုင်း {} တွင် function ခေါ်ရန် \"<var> အတွက် <fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
+        "E070 လိုင်း {} တွင် အလုပ် ခေါ်ရန် \"<var> အတွက် <fn name> ကို လုပ်ပါ။\" သို့မဟုတ် \"<var> အတွက် <fn name> ကို လုပ်ရန် <argument> ဖြင့်\" ပုံစံဖြင့် ရေးရပါမည်။",
         line
     )
 }
 
 fn lib_call_syntax_err(line: usize) -> String {
     format!(
-        "E084 လိုင်း {} တွင် library function ခေါ်ရန် ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <lib> ၏ <fn>(<argument>) ကို လုပ်ပါ။ သို့မဟုတ် <lib> ၏ <fn> ကို လုပ်ရန် <argument> ဖြင့်",
+        "E084 လိုင်း {} တွင် နည်းပညာ အလုပ် ခေါ်ရန် ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — <lib> ၏ <fn>(<argument>) ကို လုပ်ပါ။ သို့မဟုတ် <lib> ၏ <fn> ကို လုပ်ရန် <argument> ဖြင့်",
         line
     )
 }
 
 fn class_missing_name_err(line: usize) -> String {
     format!(
-        "E025 လိုင်း {} တွင် \"ပုံသေ\" (class) အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>။",
+        "E025 လိုင်း {} တွင် \"ပုံသေ\" အတွက် အမည် လိုအပ်ပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>။",
         line
     )
 }
@@ -1112,28 +1112,28 @@ fn class_missing_period_err(line: usize) -> String {
 
 fn class_body_not_method_err(line: usize) -> String {
     format!(
-        "E027 လိုင်း {} တွင် \"ပုံသေ\" (class) အတွင်း \"အလုပ်\" (method) များသာ ပါဝင်နိုင်ပါသည်။",
+        "E027 လိုင်း {} တွင် \"ပုံသေ\" အတွင်း \"အလုပ်\" များသာ ပါဝင်နိုင်ပါသည်။",
         line
     )
 }
 
 fn class_bad_param_err(line: usize) -> String {
     format!(
-        "E095 လိုင်း {} တွင် \"ပုံသေ\" (class) ၏ constructor parameter ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>(<parameter>, ...) သည်",
+        "E095 လိုင်း {} တွင် \"ပုံသေ\" ၏ တည်ဆောက်သူ အချက် ရေးသားပုံ မှားနေပါသည်။ အသုံးပြုပုံ — ပုံသေ <class name>(<parameter>, ...) သည်",
         line
     )
 }
 
 fn class_missing_constructor_err(line: usize, name: &str) -> String {
     format!(
-        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor အနေဖြင့် method (function) အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
+        "E028 လိုင်း {} တွင် \"{}\" ပုံသေသည် တည်ဆောက်သူ အနေဖြင့် လုပ်ဆောင်ချက် အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
         line, name
     )
 }
 
 fn new_obj_missing_class_err(line: usize) -> String {
     format!(
-        "E029 လိုင်း {} တွင် object ဖန်တီးသည့် class ရေးပုံ မှားနေပါသည်။ \"အသစ်\" မလိုအပ်တော့ပါ။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
+        "E029 လိုင်း {} တွင် အရာဝတ္ထု ဖန်တီးသည့် ပုံသေ ရေးပုံ မှားနေပါသည်။ \"အသစ်\" မလိုအပ်တော့ပါ။ အသုံးပြုပုံ — <class name> (<argument>, ...)",
         line
     )
 }
@@ -1660,7 +1660,7 @@ fn try_parse_arrow_lambda(
 /// A ternary with its `?` but without the `:` and the else branch.
 fn ternary_bad_form_err(line: usize) -> String {
     format!(
-        "E151 line {}: expected `<condition> ? <then> : <else>` (both the '?' and the ':' are needed)",
+        "E151 လိုင်း {} တွင် `<condition> ? <then> : <else>` ကို မျှော်လင့်ပါသည် ('?' နှင့် ':' နှစ်ခုလုံး လိုအပ်ပါသည်)။",
         line
     )
 }
@@ -2160,7 +2160,7 @@ pub enum WaitUnit {
     Hours,
 }
 
-/// Parse "value ကို <FUNC>" shaped statements (print / input-no-assign),
+/// Parse "တန်ဖိုးကို <FUNC>" shaped statements (print / input-no-assign),
 /// where `body` excludes the trailing End token and the function keyword itself.
 fn parse_particle_call(
     body: &[Token],
@@ -2467,32 +2467,32 @@ fn find_first_at_block_level(tokens: &[Token], kws: &[&str]) -> Option<(usize, u
 
 fn eng_bad_form_err(line: usize) -> String {
     format!(
-        "E100 line {}: expected `<name> :<type> = <value>;` or `pin <name> :<type> = <value>;` (types: int, float, str, bool)",
+        "E100 လိုင်း {} တွင် `<name> :<type> = <value>;` သို့မဟုတ် `pin <name> :<type> = <value>;` ကို မျှော်လင့်ပါသည် (အမျိုးအစားများ — int, float, str, bool)။",
         line
     )
 }
 
 fn eng_bad_type_err(line: usize, type_name: &str) -> String {
     format!(
-        "E101 line {}: unknown type \"{}\" (types: int, float, str, bool)",
+        "E101 လိုင်း {} တွင် \"{}\" ဆိုသော အမျိုးအစားကို မသိပါ (အမျိုးအစားများ — int, float, str, bool)။",
         line, type_name
     )
 }
 
 fn eng_missing_value_err(line: usize) -> String {
     format!(
-        "E102 line {}: declaration is missing a value after '='",
+        "E102 လိုင်း {} တွင် '=' နောက်၌ တန်ဖိုး မပါပါ။",
         line
     )
 }
 
 fn eng_call_bad_form_err(line: usize, fn_name: &str) -> String {
-    format!("E106 line {}: expected {}(...);", line, fn_name)
+    format!("E106 လိုင်း {} တွင် `{}(...);` ကို မျှော်လင့်ပါသည်။", line, fn_name)
 }
 
 fn eng_func_alias_bad_form_err(line: usize) -> String {
     format!(
-        "E137 line {}: expected `function() as alias;` or `function as alias;`",
+        "E137 လိုင်း {} တွင် `function() as alias;` သို့မဟုတ် `function as alias;` ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
@@ -2776,7 +2776,7 @@ fn is_eng_block_keyword(tok: &Tok) -> bool {
 
 fn eng_block_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `if (<cond>) {{ ... }}` (optionally with `else if`/`else`), `while (<cond>) {{ ... }}`, `for (<init>; <cond>; <step>) {{ ... }}`, `loop {{ ... }}`, `switch (<value>) {{ case <value>: ... default: ... }}`, or `fn <name>(<params>) {{ ... }}`",
+        "E109 လိုင်း {} တွင် `if (<cond>) {{ ... }}` (လိုအပ်လျှင် `else if`/`else` ဖြင့်)၊ `while (<cond>) {{ ... }}`၊ `for (<init>; <cond>; <step>) {{ ... }}`၊ `loop {{ ... }}`၊ `switch (<value>) {{ case <value>: ... default: ... }}` သို့မဟုတ် `fn <name>(<params>) {{ ... }}` ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
@@ -2785,28 +2785,28 @@ fn eng_block_form_err(line: usize) -> String {
 /// `fn(<params>) { <body> }`.
 fn lambda_bad_form_err(line: usize) -> String {
     format!(
-        "E150 line {}: expected a lambda `fn(<params>) {{ <body> }}`",
+        "E150 လိုင်း {} တွင် `fn(<params>) {{ <body> }}` ပုံစံ lambda ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
 
 fn eng_for_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `for (<init>; <cond>; <step>) {{ ... }}`, e.g. `for (i = 0; i < 10; i = i + 1) {{ ... }}`",
+        "E109 လိုင်း {} တွင် `for (<init>; <cond>; <step>) {{ ... }}` ကို မျှော်လင့်ပါသည်။ ဥပမာ — `for (i = 0; i < 10; i = i + 1) {{ ... }}`",
         line
     )
 }
 
 fn eng_for_in_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `for <name> in <value> {{ ... }}`, e.g. `for x in xs {{ ... }}`",
+        "E109 လိုင်း {} တွင် `for <name> in <value> {{ ... }}` ကို မျှော်လင့်ပါသည်။ ဥပမာ — `for x in xs {{ ... }}`",
         line
     )
 }
 
 fn eng_return_bad_form_err(line: usize) -> String {
     format!(
-        "E109 line {}: expected `return;` or `return <value>;`",
+        "E109 လိုင်း {} တွင် `return;` သို့မဟုတ် `return <value>;` ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
@@ -3015,7 +3015,7 @@ fn parse_eng_for_in(tokens: &[Token], line: usize) -> Result<Stmt, String> {
 
 fn eng_switch_form_err(line: usize) -> String {
     format!(
-        "E153 line {}: expected `switch (<value>) {{ case <value>: ... default: ... }}`",
+        "E153 လိုင်း {} တွင် `switch (<value>) {{ case <value>: ... default: ... }}` ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
@@ -3295,7 +3295,7 @@ fn parse_eng_loop_block(tokens: &[Token], line: usize) -> Result<Vec<Stmt>, Stri
 
 fn eng_use_bad_form_err(line: usize) -> String {
     format!(
-        "E118 line {}: expected `use <library> [as <alias>] [, ...];`",
+        "E118 လိုင်း {} တွင် `use <library> [as <alias>] [, ...];` ကို မျှော်လင့်ပါသည်။",
         line
     )
 }
@@ -3523,7 +3523,7 @@ fn parse_eng_fn(tokens: &[Token], line: usize) -> Result<Stmt, String> {
 
 fn destructure_bad_form_err(line: usize) -> String {
     format!(
-        "E152 line {}: expected a destructuring assignment like `[a, b] = <list>` (names only, separated by commas)",
+        "E152 လိုင်း {} တွင် `[a, b] = <list>` ပုံစံ ခွဲထုတ်သတ်မှတ်မှုကို မျှော်လင့်ပါသည် (အမည်များသာ၊ ကော်မာဖြင့် ခွဲပါ)။",
         line
     )
 }
@@ -4953,7 +4953,7 @@ fn parse_try_catch(inner: &[Token]) -> Result<Stmt, String> {
                 Tok::Ident(s) => s.clone(),
                 _ => {
                     return Err(format!(
-                        "E001 လိုင်း {} တွင် catch block ထဲတွင် <error_name> မှားနေပါသည်။",
+                        "E001 လိုင်း {} တွင် ဖမ်းသည့်အပိုင်း ထဲတွင် <error_name> မှားနေပါသည်။",
                         try_catch_tokens[idx - 2].line
                     ))
                 }
@@ -4961,7 +4961,7 @@ fn parse_try_catch(inner: &[Token]) -> Result<Stmt, String> {
             // Validate the error-name itself: "E" or "E###".
             if err_name != "E" && !(err_name.len() == 4 && err_name.starts_with('E')) {
                 return Err(format!(
-                    "E001 လိုင်း {} တွင် catch block ၏ error name \"{}\" မှားနေပါသည်။ (E သို့မဟုတ် E001 ကဲ့သို့ ရေးရပါမည်)",
+                    "E001 လိုင်း {} တွင် ဖမ်းသည့်အပိုင်း၏ အမှား name \"{}\" မှားနေပါသည်။ (E သို့မဟုတ် E001 ကဲ့သို့ ရေးရပါမည်)",
                     try_catch_tokens[idx - 2].line,
                     err_name
                 ));
@@ -5606,10 +5606,105 @@ fn parse_class_def(inner: &[Token], line: usize) -> Result<Stmt, String> {
     })
 }
 
+/// `မဖြစ်ရင်` / `မဖြစ်လျှင်` written alone on its own line closes an
+/// if-chain as the else branch, the same job `မဟုတ်ရင်` does:
+///
+/// ```text
+/// (x > 3) ဖြစ်ရင်
+///     "big" ကို ဖော်ပြပါ။
+/// မဖြစ်ရင်
+///     "small" ကို ဖော်ပြပါ။
+/// ပြီး။
+/// ```
+///
+/// The same two words are also the *negative condition terminator* when they
+/// close a header (`အခြား (x > 10) မဖြစ်ရင်`), so the rewrite is only made when
+/// the word stands first on its line with nothing but the line's `။` after
+/// it. Rewriting it to the plain else keyword keeps one branch rule for the
+/// statement splitter, the block-level scans and `parse_if_statement`.
+fn normalize_bare_else(tokens: &mut [Token]) {
+    for i in 0..tokens.len() {
+        let (bare, line) = {
+            let Token { tok, line } = &tokens[i];
+            let Tok::Ident(word) = tok else { continue };
+            if word != KW_THEN_NEG && word != KW_THEN_NEG_ALT {
+                continue;
+            }
+            // The bare spelling has no `။` of its own, so "ends the line"
+            // means: end of input, the line's own `။`, or the next token is
+            // already on a later line.
+            let ends_line = match tokens.get(i + 1) {
+                None => true,
+                Some(next) => matches!(next.tok, Tok::End) || next.line > *line,
+            };
+            let starts_line = i == 0 || tokens[i - 1].line < *line;
+            (ends_line && starts_line, *line)
+        };
+        if bare {
+            tokens[i] = Token {
+                tok: Tok::Ident(KW_ELSE_ALT.to_string()),
+                line,
+            };
+        }
+    }
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Vec<Stmt>, String> {
     let mut stmts = Vec::new();
+    let mut tokens = tokens.to_vec();
+    normalize_bare_else(&mut tokens);
+    let tokens = &tokens[..];
     for (stmt_tokens, line) in split_statements(tokens) {
         stmts.push(parse_stmt(&stmt_tokens, line)?);
     }
     Ok(stmts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `မဖြစ်ရင်` on a line of its own is the chain's else branch, not the
+    /// negative terminator of a header.
+    #[test]
+    fn bare_neg_else_line_closes_an_if_chain() {
+        let src = "x သည် 50 ဖြစ်၏။\n\
+                   (x > 3) ဖြစ်ရင်\n\
+                       \"big\" ကို ဖော်ပြပါ။\n\
+                   အခြား (x > 10) မဖြစ်ရင်\n\
+                       \"huge\" ကို ဖော်ပြပါ။\n\
+                   မဖြစ်ရင်\n\
+                       \"small\" ကို ဖော်ပြပါ။\n\
+                   ပြီး။\n";
+        let stmts = parse(&crate::lexer::lex(src).expect("lexes")).expect("the chain parses");
+        let Some(Stmt::If { branches }) = stmts.last() else {
+            panic!("last statement should be the if chain: {:?}", stmts.last());
+        };
+        assert_eq!(branches.len(), 3, "positive, else-if and else");
+        assert!(branches[0].cond.is_some() && !branches[0].negate);
+        assert!(branches[1].cond.is_some() && branches[1].negate, "the မဖြစ်ရင် header branch");
+        assert!(branches[2].cond.is_none(), "the bare မဖြစ်ရင် line is the else");
+        assert_eq!(branches[2].body.len(), 1);
+    }
+
+    /// The same two words still close a header: `အခြား (c) မဖြစ်ရင်` keeps its
+    /// condition and stays a negated branch, and an if-chain without a bare
+    /// `မဖြစ်ရင်` line is untouched.
+    #[test]
+    fn neg_term_inside_a_header_is_not_an_else() {
+        let src = "(x > 3) ဖြစ်ရင်\n\
+                       \"big\" ကို ဖော်ပြပါ။\n\
+                   အခြား (x > 10) မဖြစ်ရင်\n\
+                       \"huge\" ကို ဖော်ပြပါ။\n\
+                   မဟုတ်ရင်\n\
+                       \"small\" ကို ဖော်ပြပါ။\n\
+                   ပြီး။\n";
+        let stmts = parse(&crate::lexer::lex(src).expect("lexes")).expect("the chain parses");
+        let Some(Stmt::If { branches }) = stmts.last() else {
+            panic!("last statement should be the if chain");
+        };
+        assert_eq!(branches.len(), 3);
+        assert!(branches[1].cond.is_some() && branches[1].negate);
+        assert!(branches[2].cond.is_none());
+    }
 }
