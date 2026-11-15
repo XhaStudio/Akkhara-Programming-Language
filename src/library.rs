@@ -131,6 +131,9 @@ impl LibraryLoader {
         if let Some(path) = self.dependency_path(name) {
             return Some(DependencyResolution::Source(path));
         }
+        if let Some((path, _source)) = crate::bundle::embedded_source(name) {
+            return Some(DependencyResolution::Source(path));
+        }
         if let Some(path) = self.script_path(name) {
             return Some(DependencyResolution::Source(path));
         }
@@ -158,6 +161,12 @@ impl LibraryLoader {
     /// manifest or no `entry` field. Returns `None` if there's no such
     /// package, so the caller can fall back to a "library not found" error.
     pub fn find_dynamic_source(&self, name: &str) -> Option<String> {
+        // An embedded script (only ever set in a built file) comes before an
+        // installed package of the same name; `find_script_source` hands it
+        // back. A plain `akk` has no embedded table, so this is a no-op there.
+        if crate::bundle::has_embedded(name) {
+            return None;
+        }
         let path = self
             .dependency_path(name)
             .or_else(|| self.dynamic_source_path(name))?;
@@ -169,10 +178,21 @@ impl LibraryLoader {
     /// akk binary. A `name` that already ends in `.akk` is used as-is.
     /// Returns `None` when no such script exists.
     pub fn find_script_source(&self, name: &str) -> Option<String> {
+        if let Some((_path, source)) = crate::bundle::embedded_source(name) {
+            return Some(source);
+        }
         let path = self
             .dependency_path(name)
             .or_else(|| self.script_path(name))?;
         fs::read_to_string(path).ok()
+    }
+
+    /// Where `akk build` looks for a script to embed: a `[dependencies] path`
+    /// entry first, then a neighboring `<name>.akk`. Downloading packages
+    /// under `libraries/` are never embedded, so this skips them on purpose.
+    pub fn embeddable_path(&self, name: &str) -> Option<PathBuf> {
+        self.dependency_path(name)
+            .or_else(|| self.script_path(name))
     }
 
     /// Finds a library's Akkhara source and the file it came from, trying a
@@ -184,6 +204,9 @@ impl LibraryLoader {
     /// source; a run uses `find_dynamic_source`/`find_script_source` and does
     /// not need the path.
     pub fn find_source(&self, name: &str) -> Option<(PathBuf, String)> {
+        if let Some(embedded) = crate::bundle::embedded_source(name) {
+            return Some(embedded);
+        }
         let path = self
             .dependency_path(name)
             .or_else(|| self.dynamic_source_path(name))
