@@ -1,3 +1,5 @@
+mod bundle;
+mod bytecode;
 mod interpreter;
 mod lexer;
 mod library;
@@ -112,24 +114,50 @@ fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str)
     log.push_str(closing_line);
     log.push('\n');
     let out_path = PathBuf::from(filename).with_extension("akop");
-    if let Err(e) = fs::write(&out_path, log) {
-        eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), e);
+    let first = match fs::write(&out_path, &log) {
+        Ok(()) => return,
+        Err(e) => e,
+    };
+    // A built file writes beside itself first. When that folder is not
+    // writable, the same `<name>.akop` in the current directory is tried
+    // before the run gives up on the transcript.
+    if let Some(fallback) = out_path.file_name().map(PathBuf::from) {
+        match fs::write(&fallback, &log) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), first);
+                eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", fallback.display(), e);
+                return;
+            }
+        }
     }
+    eprintln!("ဖိုင် \"{}\" ကို ရေး၍မရပါ - {}", out_path.display(), first);
 }
 
 fn print_usage() {
     eprintln!("Usage: akk <file name> [--no-warn]");
-    eprintln!("       akk run [file]             (runs the akk.toml project)");
-    eprintln!("       akk new <name>             (creates a new project folder)");
-    eprintln!("       akk report [folder]        (runs every .akk in the folder)");
+    eprintln!("       akk run [file]             (akk.toml ပရောဂျက်ကို ဖွင့်သည်)");
+    eprintln!("       akk new <name>             (ပရောဂျက် ဖိုဒါ အသစ် ဖန်တီးသည်)");
+    eprintln!("       akk build                  (ပရောဂျက်ကို ဖွင့်ပေးမည့် executable တစ်ခု ရေးသည်)");
+    eprintln!("       akk report [folder]        (ဖိုဒါထဲရှိ .akk အားလုံးကို ဖွင့်သည်)");
     eprintln!("       akk --version | -v");
     eprintln!("       akk --check");
-    eprintln!("       akk install [library]      (no name: installs akk.toml dependencies)");
+    eprintln!("       akk --vm <file name>       (bytecode စက်ဖြင့် ဖွင့်သည်)");
+    eprintln!("       akk install [library]      (အမည် မပါလျှင် akk.toml မှီခိုချက်များကို install လုပ်သည်)");
     eprintln!("       akk update [version]");
     eprintln!("       akk uninstall");
 }
 
 fn main() {
+    // A built file (`akk build`) is this same interpreter with one program
+    // appended: it runs that program and nothing else. This must be the first
+    // statement, before the libraries/ folder is created, before an argument
+    // is looked at and before any dispatch. A plain `akk` reads its own slot
+    // from memory and carries on unchanged.
+    if let Some(bundle) = bundle::probe() {
+        process::exit(run_bundle(bundle));
+    }
+
     // Make sure the libraries/ folder exists next to the binary. Older
     // installs (and fresh downloads of a release tarball/zip) don't ship
     // this folder, so create it lazily on every run rather than relying on
@@ -141,7 +169,13 @@ fn main() {
     // of the argument list here rather than parsed per command.
     let args: Vec<String> = env::args().collect();
     let no_warn = args.iter().any(|a| a == "--no-warn");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--no-warn").collect();
+    // `--vm` runs a program on the bytecode compiler instead of the tree
+    // walker; it is taken out of the argument list like `--no-warn`.
+    let bytecode_mode = args.iter().any(|a| a == "--vm");
+    let args: Vec<String> = args
+        .into_iter()
+        .filter(|a| a != "--no-warn" && a != "--vm")
+        .collect();
 
     if args.len() < 2 {
         print_usage();
@@ -161,6 +195,10 @@ fn main() {
             cmd_check();
             return;
         }
+        _ if bytecode_mode => {
+            // `akk --vm <file>` -- compile to bytecode and run it.
+            process::exit(run_bytecode(&args[1]));
+        }
         "report" => {
             let folder = args.get(2).map(String::as_str).unwrap_or("output");
             cmd_report(folder, no_warn);
@@ -179,6 +217,9 @@ fn main() {
         "new" => {
             // Creates `{name}/src/main.akk` and its manifest; see `cmd_new`.
             process::exit(cmd_new(args.get(2).map(String::as_str)));
+        }
+        "build" => {
+            process::exit(cmd_build(no_warn));
         }
         "run" => {
             process::exit(cmd_run(no_warn, args.get(2).map(String::as_str)));
@@ -238,6 +279,16 @@ impl RunOptions {
             warnings: run.warnings && !no_warn,
         }
     }
+
+    /// The settings a built file baked in at `akk build` time (the header
+    /// flags in `bundle`); `--no-warn` still wins on the command line.
+    fn from_flags(flags: u32) -> Self {
+        RunOptions {
+            transcript: flags & 0b0010 != 0,
+            timing: flags & 0b1000 != 0,
+            warnings: flags & 0b0100 != 0,
+        }
+    }
 }
 
 /// Run one program file, honoring `options`, and return the exit code the
@@ -268,28 +319,6 @@ fn run_program(
         }
     };
 
-    let tokens = match lexer::lex(&src) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{}", e);
-            if options.transcript {
-                save_terminal_log(filename, None, &e);
-            }
-            return 1;
-        }
-    };
-
-    let stmts = match parser::parse(&tokens) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}", e);
-            if options.transcript {
-                save_terminal_log(filename, None, &e);
-            }
-            return 1;
-        }
-    };
-
     // Let this program import a neighboring `<name>.akk` script with
     // `နည်းပညာများ <name> ကို သုံးမည်။`: search the program's own folder
     // first, then the current working directory, before the libraries/
@@ -301,12 +330,60 @@ fn run_program(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let cwd = env::current_dir().ok();
-    let libs_dir = libraries_dir();
 
     let mut search_dirs = vec![script_dir];
     if let Some(cwd) = cwd {
         search_dirs.push(cwd);
     }
+
+    run_source(
+        filename,
+        src,
+        search_dirs,
+        options,
+        extra_warnings,
+        dependencies,
+        &reporter,
+    )
+}
+
+/// The shared run path. `run_program` reads the file first; a built executable
+/// hands over the source it carries instead, so both go through exactly these
+/// steps. `anchor` is the path the `.akop` transcript is written beside, and
+/// the reporter carries the header lines (`None` for a built file, which
+/// prints none of them).
+fn run_source(
+    anchor: &str,
+    src: String,
+    search_dirs: Vec<PathBuf>,
+    options: RunOptions,
+    extra_warnings: &[String],
+    dependencies: &[(String, PathBuf)],
+    reporter: &progress::Reporter,
+) -> i32 {
+    let libs_dir = libraries_dir();
+
+    let tokens = match lexer::lex(&src) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", e);
+            if options.transcript {
+                save_terminal_log(anchor, None, &e);
+            }
+            return 1;
+        }
+    };
+
+    let stmts = match parser::parse(&tokens) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}", e);
+            if options.transcript {
+                save_terminal_log(anchor, None, &e);
+            }
+            return 1;
+        }
+    };
 
     // `Building`: the static phase. `library_warnings` reads and parses every
     // script this program brings in, so it is part of this phase and runs
@@ -347,7 +424,7 @@ fn run_program(
         // A failing run still saves its transcript: what the program managed
         // to print, then the error the terminal showed.
         if options.transcript {
-            save_terminal_log(filename, with_warnings(&warning_prefix, outcome.output), &e);
+            save_terminal_log(anchor, with_warnings(&warning_prefix, outcome.output), &e);
         }
         return 1;
     }
@@ -368,7 +445,7 @@ fn run_program(
     // line.
     if options.transcript {
         save_terminal_log(
-            filename,
+            anchor,
             with_warnings(&warning_prefix, outcome.output),
             &closing_line,
         );
@@ -386,7 +463,7 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
     let cwd = match env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
-            eprintln!("E146 akk.toml ကို ရှာရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
+            eprintln!("E146 akk.toml ကို ရှာရာတွင် အမှား ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
             return 1;
         }
     };
@@ -465,6 +542,427 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
     run_program(&filename, options, &warnings, &dependencies, project)
 }
 
+/// Run the program appended to this executable. `argv` is ignored except for
+/// the literal `--no-warn`: `myapp update` and `myapp build` run the program,
+/// not the updater or the builder. No header lines are printed, no `libraries/`
+/// folder is created, and the `.akop` transcript is written beside the
+/// executable.
+fn run_bundle(program: bundle::Bundle) -> i32 {
+    let no_warn = env::args().skip(1).any(|a| a == "--no-warn");
+    let mut options = RunOptions::from_flags(program.flags);
+    if no_warn {
+        options.warnings = false;
+    }
+
+    let anchor = plain_path(&program.anchor);
+    let exe_dir = program
+        .anchor
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Frozen order for a built file: the embedded scripts (the loader checks
+    // them before any folder) first, then a script in the current directory,
+    // then `<exe dir>/libraries`, then a built-in library.
+    let mut search_dirs = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        search_dirs.push(cwd);
+    }
+    search_dirs.push(exe_dir);
+
+    // A bytecode bundle carries instructions, not source: decode them and run
+    // the VM. Nothing is lexed, parsed or compiled at start-up.
+    if let Some(bytes) = &program.bytecode {
+        return run_bundle_bytecode(bytes, &options, &anchor);
+    }
+
+    let reporter = progress::Reporter::new(None);
+    run_source(
+        &anchor,
+        program.source,
+        search_dirs,
+        options,
+        &[],
+        &[],
+        &reporter,
+    )
+}
+
+/// Run a built file whose payload is compiled instructions.
+///
+/// Output streams as the program produces it (so an input prompt appears
+/// before the read blocks) and `[run] transcript` is honored exactly as the
+/// source-carrying bundle path does it: the same `<anchor>.akop`, the same
+/// contents, the same closing line.
+fn run_bundle_bytecode(bytes: &[u8], options: &RunOptions, anchor: &str) -> i32 {
+    let program = match bytecode::Program::decode(bytes) {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("{}", e);
+            if options.transcript {
+                save_terminal_log(anchor, None, &e);
+            }
+            return 1;
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut vm = bytecode::Vm::streaming(&program);
+    let result = vm.run();
+    match result {
+        Ok(()) => {
+            let closing_line = if options.timing {
+                let line = format!("Interpreted in {:.3}s", started.elapsed().as_secs_f64());
+                println!("{}", line);
+                line
+            } else {
+                String::new()
+            };
+            if options.transcript {
+                save_terminal_log(anchor, Some(vm.log.clone()), &closing_line);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            if options.transcript {
+                save_terminal_log(anchor, Some(vm.log.clone()), &e);
+            }
+            1
+        }
+    }
+}
+
+/// `akk --vm <file>` -- compile the program to bytecode and run it on the
+/// stack machine in `bytecode`. Output goes to stdout exactly as a normal run
+/// prints it; a compile or runtime error is printed once and exits 1.
+fn run_bytecode(file: &str) -> i32 {
+    let src = match fs::read_to_string(file) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", file, e);
+            return 1;
+        }
+    };
+    match bytecode::compile_source(&src) {
+        Ok(program) => {
+            // Streamed, exactly like a normal run: a prompt has to be on
+            // screen before the read that follows it blocks.
+            let mut vm = bytecode::Vm::streaming(&program);
+            match vm.run() {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    1
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
+/// `akk build` -- write one executable that runs this project.
+///
+/// The output is a copy of this interpreter with the program's source, and the
+/// scripts it brings in, appended after it. It is not machine code and it does
+/// not run faster; a built file only saves typing `akk run`. Building never
+/// runs the program and writes no `.akop`.
+fn cmd_build(no_warn: bool) -> i32 {
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("E168 လက်ရှိ ဖိုဒါကို မသိပါ - {}", e);
+            return 1;
+        }
+    };
+
+    let manifest = match manifest::discover(&cwd) {
+        Some(path) => match manifest::load(&path) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                eprintln!("{}", e);
+                return 1;
+            }
+        },
+        None => {
+            eprintln!("error: akk.toml ကို `{}` ၌ မတွေ့ပါ။", plain_path(&cwd));
+            return 1;
+        }
+    };
+
+    // A built file is a copy of this executable plus appended bytes. On macOS
+    // that would invalidate the arm64 signature, and no other platform has
+    // been tried, so only Windows and Linux are offered.
+    if !cfg!(windows) && !cfg!(target_os = "linux") {
+        eprintln!(
+            "E165 ဤ ပလက်ဖောင်း ({}) တွင် ထုပ်ပိုးဖိုင်ကို မထောက်ပံ့ပါ။ Windows သို့မဟုတ် Linux တွင် build ပါ။",
+            std::env::consts::OS
+        );
+        return 1;
+    }
+
+    // `mode = "elf"` never reaches here: `parse_build` refuses an unknown mode
+    // with E147 while the manifest loads. `bundle` (and its `interpreter`
+    // spelling) embeds the source; `bytecode` embeds compiled instructions.
+    let bytecode_mode = matches!(manifest.build.mode, manifest::BuildMode::Bytecode);
+
+    if !manifest.build.include.is_empty() {
+        eprintln!(
+            "E164 [build.bundle] include ကို ဤ ဗားရှင်းတွင် မထောက်ပံ့သေးပါ။ ပါဝင်စေလိုသော ဖိုင်များကို ကိုယ်တိုင် ကူးထည့်ပါ။"
+        );
+        return 1;
+    }
+
+    let mut name = manifest.build.output.clone();
+    if cfg!(windows) {
+        if let Some(windows) = &manifest.windows_output {
+            if !windows.is_empty() {
+                name = windows.clone();
+            }
+        }
+    }
+    if let Err(e) = check_output_name(&name) {
+        eprintln!("{}", e);
+        return 1;
+    }
+    let suffix = std::env::consts::EXE_SUFFIX;
+    if !suffix.is_empty() && !name.ends_with(suffix) {
+        name.push_str(suffix);
+    }
+    let out = manifest.root.join(&manifest.build.out_dir).join(&name);
+
+    if let Err(e) = manifest.validate_entry() {
+        eprintln!("{}", e);
+        return 1;
+    }
+    let dependencies = match manifest.resolve_dependencies(&libraries_dir()) {
+        Ok(resolved) => dependency_pairs(resolved),
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    // The header exists once every option has validated, the same way
+    // `akk run` builds it after resolution succeeds: a rejected manifest
+    // prints no `Compiling` line.
+    let project = Some(progress::ProjectHeader {
+        name: manifest.package.name.clone(),
+        version: manifest.package.version.clone(),
+        root: plain_path(
+            &fs::canonicalize(&manifest.root).unwrap_or_else(|_| manifest.root.clone()),
+        ),
+    });
+    let reporter = progress::Reporter::new(project);
+    // `Compiling`: the entry is read, lexed and parsed.
+    reporter.compiling();
+
+    let filename = manifest.entry_path().display().to_string();
+    let src = match fs::read_to_string(&filename) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", filename, e);
+            return 1;
+        }
+    };
+    let tokens = match lexer::lex(&src) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let stmts = match parser::parse(&tokens) {
+        Ok(stmts) => stmts,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    // The static phase: the same folders a run searches, plus the embed scan.
+    // A run looks beside the entry file first (usually `src/`), so the embed
+    // scan has to look there too or a neighbouring script is never carried.
+    let script_dir = manifest
+        .entry_path()
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| manifest.root.clone());
+    let mut search_dirs = vec![script_dir.clone()];
+    if script_dir != manifest.root {
+        search_dirs.push(manifest.root.clone());
+    }
+    if let Ok(cwd) = env::current_dir() {
+        if !search_dirs.iter().any(|dir| *dir == cwd) {
+            search_dirs.push(cwd);
+        }
+    }
+
+    let mut embedded = match collect_embedded(&stmts, &manifest.root, &search_dirs, &dependencies) {
+        Ok(scripts) => scripts,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    // Dependencies first: a name that is both a path dependency and a
+    // neighbouring script resolves to the dependency at run time.
+    embedded.sort_by_key(|script| script.kind);
+
+    let static_warnings = if no_warn || !manifest.run.warnings {
+        Vec::new()
+    } else {
+        let mut all = manifest.warnings.clone();
+        all.extend(library_warnings(&stmts, &search_dirs, &dependencies));
+        all
+    };
+    reporter.building_done();
+    let _ = write_warnings(&static_warnings);
+
+    // bit0 has deps, bit1 transcript, bit2 warnings, bit3 timing. `--no-warn`
+    // at build time bakes the warnings off; it can still be given at run time.
+    let has_deps: u32 = if embedded.is_empty() { 0 } else { 0b0001 };
+    let transcript_bit: u32 = if manifest.run.transcript { 0b0010 } else { 0 };
+    let warnings_bit: u32 = if manifest.run.warnings && !no_warn {
+        0b0100
+    } else {
+        0
+    };
+    let timing_bit: u32 = if manifest.run.timing { 0b1000 } else { 0 };
+    let run_flags = has_deps | transcript_bit | warnings_bit | timing_bit;
+
+    // `[build] mode = "bytecode"`: compile here, so a program the VM cannot
+    // run fails the build with the compiler's own E170 instead of producing a
+    // file that behaves differently from `akk <file>`.
+    let compiled = if bytecode_mode {
+        if !embedded.is_empty() {
+            eprintln!(
+                "E170 [build] mode = \"bytecode\" သည် နည်းပညာ (library) များကို မထောက်ပံ့သေးပါ။ \"bundle\" ကို သုံးပါ။"
+            );
+            return 1;
+        }
+        match bytecode::compile(&stmts).and_then(|program| program.encode()) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("{}", e);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
+    let input = bundle::BuildInput {
+        source: &src,
+        bytecode: compiled.as_deref(),
+        deps: &embedded,
+        run_flags,
+    };
+    let bytes = match bundle::write_bundle(&out, &input) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    reporter.finished(&plain_path(&out), bytes);
+    0
+}
+
+/// `[build] output` / `[target.windows] output` must be one file name: no
+/// folder, no `..`, not empty. `out_dir` is the only way to choose a folder.
+fn check_output_name(name: &str) -> Result<(), String> {
+    let mut parts = Path::new(name).components();
+    let one_name =
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    if one_name {
+        Ok(())
+    } else {
+        Err(format!(
+            "E147 akk.toml ၏ [build] output \"{}\" သည် ဖိုင်အမည်တစ်ခုတည်း မဟုတ်ပါ။ ဖိုဒါအတွက် [build] out_dir ကို သုံးပါ။",
+            name
+        ))
+    }
+}
+
+/// Walk the `use` statements from the entry and collect every script that can
+/// be found now: `[dependencies] path` sources first (kind 0), then
+/// neighbouring `<name>.akk` scripts (kind 1). A name that is not found is left
+/// to run time, which reports it as usual; a script that is found but cannot be
+/// read is E163, because a run would have used it. Downloaded packages under
+/// `libraries/` are never embedded.
+fn collect_embedded(
+    stmts: &[parser::Stmt],
+    project_root: &Path,
+    search_dirs: &[PathBuf],
+    dependencies: &[(String, PathBuf)],
+) -> Result<Vec<bundle::EmbeddedScript>, String> {
+    let mut loader = library::LibraryLoader::new(libraries_dir());
+    loader.add_script_dir(project_root.to_path_buf());
+    for dir in search_dirs {
+        if dir != project_root {
+            loader.add_script_dir(dir.clone());
+        }
+    }
+    for (name, path) in dependencies {
+        loader.add_dependency(name, path.clone());
+    }
+
+    let mut found: Vec<bundle::EmbeddedScript> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<String> = Vec::new();
+    push_uses(stmts, &mut queue);
+
+    while let Some(name) = queue.pop() {
+        let key = name.strip_suffix(".akk").unwrap_or(&name).to_string();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let Some(path) = loader.embeddable_path(&name) else {
+            continue;
+        };
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(e) => {
+                return Err(format!("E163 \"{}\" ကို ဖတ်၍မရပါ - {}", plain_path(&path), e));
+            }
+        };
+        // The script's own `use` lines are embedded too, transitively. A
+        // cycle stops here (the visited set); run time still reports E119.
+        if let Ok(tokens) = lexer::lex(&source) {
+            if let Ok(inner) = parser::parse(&tokens) {
+                push_uses(&inner, &mut queue);
+            }
+        }
+        let kind = if dependencies.iter().any(|(dep, _)| dep == &key) {
+            bundle::KIND_DEPENDENCY
+        } else {
+            bundle::KIND_SCRIPT
+        };
+        found.push(bundle::EmbeddedScript {
+            kind,
+            name: key,
+            source,
+        });
+    }
+
+    Ok(found)
+}
+
+fn push_uses(stmts: &[parser::Stmt], queue: &mut Vec<String>) {
+    for stmt in stmts {
+        if let parser::Stmt::UseLibrary { libs, .. } = stmt {
+            for (name, _alias) in libs {
+                queue.push(name.clone());
+            }
+        }
+    }
+}
+
 /// The folder ignore file `akk new` writes: the default `[build] out_dir` and
 /// the `.akop` transcripts `save_terminal_log` leaves next to a program.
 const NEW_GITIGNORE: &str = "/build/\n*.akop\n";
@@ -535,7 +1033,7 @@ fn cmd_new(name: Option<&str>) -> i32 {
 
     if !valid_project_name(name) {
         eprintln!(
-            "E167 akk new: \"{}\" ကို project အမည်အဖြစ် မသုံးနိုင်ပါ။ အမည်တွင် space၊ / \\ : * ? \" < > | နှင့် control character မပါရပါ။",
+            "E167 akk new: \"{}\" ကို ပရောဂျက် အမည်အဖြစ် မသုံးနိုင်ပါ။ အမည်တွင် ကွက်လပ်၊ / \\ : * ? \" < > | နှင့် control character မပါရပါ။",
             name
         );
         return 1;
@@ -563,12 +1061,12 @@ fn cmd_new(name: Option<&str>) -> i32 {
 
     if let Err(e) = create_project(&root, &manifest_text, &program_text) {
         let _ = fs::remove_dir_all(&root);
-        eprintln!("akk new: folder ဖန်တီး၍မရပါ - {}", e);
+        eprintln!("akk new: ဖိုဒါ ဖန်တီး၍မရပါ - {}", e);
         return 1;
     }
 
     println!(
-        "akk new: \"{}\" folder ကို ဖန်တီးပြီးပါပြီ။ \"cd {}\" ဖြင့် ဝင်ပါ။",
+        "akk new: \"{}\" ဖိုဒါကို ဖန်တီးပြီးပါပြီ။ \"cd {}\" ဖြင့် ဝင်ပါ။",
         name, name
     );
     0
@@ -591,13 +1089,13 @@ fn cmd_install_manifest() {
     let cwd = match env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
-            eprintln!("E146 akk.toml ကို ရှာရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
+            eprintln!("E146 akk.toml ကို ရှာရာတွင် အမှား ဖြစ်ပေါ်ခဲ့ပါသည် - {}", e);
             process::exit(1);
         }
     };
     let Some(path) = manifest::discover(&cwd) else {
         eprintln!(
-            "E146 ဤ folder တွင် akk.toml ကို ရှာမတွေ့ပါ။ \"akk install <library>\" ဖြင့် library တစ်ခုကို ထည့်သွင်းပါ။"
+            "E146 ဤ ဖိုဒါတွင် akk.toml ကို ရှာမတွေ့ပါ။ \"akk install <library>\" ဖြင့် နည်းပညာ တစ်ခုကို ထည့်သွင်းပါ။"
         );
         process::exit(1);
     };
@@ -617,11 +1115,11 @@ fn cmd_install_manifest() {
         .collect();
 
     if names.is_empty() {
-        println!("==> akk.toml ၏ [dependencies] တွင် install လုပ်ရန် library မရှိပါ။");
+        println!("==> akk.toml ၏ [dependencies] တွင် install လုပ်ရန် နည်းပညာ မရှိပါ။");
         return;
     }
 
-    println!("==> Installing {} akk.toml dependencies...", names.len());
+    println!("==> akk.toml မှီခိုချက် {} ခုကို install လုပ်နေသည်...", names.len());
     for name in names {
         cmd_install(&name);
     }
@@ -692,10 +1190,10 @@ fn interpret(
     let outcome = match run {
         Ok(handle) => handle
             .join()
-            .map_err(|_| ("akk: the interpreter thread panicked".to_string(), 101i32))?,
+            .map_err(|_| ("akk: interpreter thread ပျက်ကျသွားပါသည်".to_string(), 101i32))?,
         Err(e) => {
             return Err((
-                format!("akk: could not start the interpreter thread - {}", e),
+                format!("akk: interpreter thread ကို စတင်၍မရပါ - {}", e),
                 1,
             ))
         }
@@ -780,7 +1278,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
     };
     files.sort();
 
-    println!("==> {} ထဲရှိ .akk program {} ခု", dir.display(), files.len());
+    println!("==> {} ထဲရှိ .akk ပရိုဂရမ် {} ခု", dir.display(), files.len());
 
     let mut successes = 0usize;
     let mut failures = 0usize;
@@ -797,7 +1295,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
         let src = match fs::read_to_string(file) {
             Ok(src) => src,
             Err(e) => {
-                println!("[ERROR] warning 0၊ error 1");
+                println!("[ERROR] သတိပေးချက် 0၊ အမှား 1");
                 println!("    {}", e);
                 failures += 1;
                 continue;
@@ -809,7 +1307,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
         let stmts = match lexer::lex(&src).and_then(|tokens| parser::parse(&tokens)) {
             Ok(stmts) => stmts,
             Err(e) => {
-                println!("[ERROR] warning 0၊ error 1");
+                println!("[ERROR] သတိပေးချက် 0၊ အမှား 1");
                 println!("    {}", e);
                 failures += 1;
                 continue;
@@ -834,7 +1332,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
         ) {
             Ok(outcome) => outcome,
             Err((message, _)) => {
-                println!("[ERROR] warning {}၊ error 1", found_warnings.len());
+                println!("[ERROR] သတိပေးချက် {}၊ အမှား 1", found_warnings.len());
                 println!("    {}", message);
                 failures += 1;
                 continue;
@@ -847,14 +1345,14 @@ fn cmd_report(folder: &str, no_warn: bool) {
         // error that ended a failing run.
         if outcome.error.is_some() {
             println!(
-                "[ERROR] warning {}၊ error 1၊ run {:.3}s",
+                "[ERROR] သတိပေးချက် {}၊ အမှား 1၊ run {:.3}s",
                 found_warnings.len(),
                 outcome.elapsed
             );
             failures += 1;
         } else {
             println!(
-                "[SUCCESS] warning {}၊ error 0၊ run {:.3}s",
+                "[SUCCESS] သတိပေးချက် {}၊ အမှား 0၊ run {:.3}s",
                 found_warnings.len(),
                 outcome.elapsed
             );
@@ -874,7 +1372,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
 
     println!();
     println!(
-        "==> စုစုပေါင်း: success {} ခု၊ error {} ခု၊ warning {} ခု",
+        "==> စုစုပေါင်း - အောင်မြင် {} ခု၊ အမှား {} ခု၊ သတိပေးချက် {} ခု",
         successes, failures, warning_count
     );
     if failures > 0 {
@@ -886,7 +1384,7 @@ fn cmd_report(folder: &str, no_warn: bool) {
 /// against the version this binary was built with. Read-only: it never
 /// downloads or installs anything, unlike `akk update`.
 fn cmd_check() {
-    println!("==> Checking for updates...");
+    println!("==> အပ်ဒိတ် ရှိမရှိ စစ်ဆေးနေသည်...");
 
     let api_url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
 
@@ -918,9 +1416,9 @@ fn cmd_check() {
     let output = match fetch_result {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("    [FAILED] could not check for updates: {}", e);
+            eprintln!("    [FAILED] အပ်ဒိတ်ကို စစ်ဆေး၍မရပါ - {}", e);
             eprintln!(
-                "    Make sure curl (or PowerShell) is available and you have network access."
+                "    curl (သို့မဟုတ် PowerShell) ရရှိနိုင်ပြီး ကွန်ရက် ချိတ်ဆက်မှု ရှိကြောင်း စစ်ပါ။"
             );
             process::exit(1);
         }
@@ -938,30 +1436,30 @@ fn cmd_check() {
     let latest_tag = match extract_json_string_field(&body, "tag_name") {
         Some(t) => t,
         None => {
-            eprintln!("    [FAILED] could not read the latest release info from GitHub");
+            eprintln!("    [FAILED] GitHub မှ နောက်ဆုံး release အချက်အလက်ကို ဖတ်၍မရပါ");
             if let Some(msg) = extract_json_string_field(&body, "message") {
-                eprintln!("    GitHub says: {}", msg);
+                eprintln!("    GitHub ၏ အချက် - {}", msg);
             }
             process::exit(1);
         }
     };
 
     if latest_tag.is_empty() {
-        eprintln!("    [FAILED] GitHub returned no release info for {}", REPO);
+        eprintln!("    [FAILED] GitHub မှ {} အတွက် release အချက်အလက် မပြန်လာပါ", REPO);
         process::exit(1);
     }
 
     let latest_version = latest_tag.trim_start_matches('v');
 
-    println!("    Installed: {}", VERSION);
-    println!("    Latest:    {}", latest_version);
+    println!("    တပ်ဆင်ထားသည် - {}", VERSION);
+    println!("    နောက်ဆုံး -    {}", latest_version);
     println!();
 
     if latest_version == VERSION {
-        println!("    [OK] You're on the latest version.");
+        println!("    [OK] နောက်ဆုံး ဗားရှင်း ဖြစ်ပါသည်။");
     } else {
-        println!("    [!] A different version is available.");
-        println!("        Run 'akk update' to install it.");
+        println!("    [!] အခြား ဗားရှင်း တစ်ခု ရနိုင်ပါသည်။");
+        println!("        တပ်ဆင်ရန် 'akk update' ကို ဖွင့်ပါ။");
     }
 }
 
@@ -1057,15 +1555,15 @@ fn extract_json_string_array(body: &str, field: &str) -> Vec<String> {
 fn cmd_update(version: Option<&str>) {
     let label = version.unwrap_or("latest");
 
-    if !ui::confirm(&format!("Update akk to version \"{}\"?", label)) {
-        println!("    Cancelled.");
+    if !ui::confirm(&format!("akk ကို ဗားရှင်း \"{}\" သို့ အပ်ဒိတ် လုပ်မလား။", label)) {
+        println!("    ပယ်ဖျက်လိုက်ပါသည်။");
         return;
     }
 
-    println!("==> Updating akk to version \"{}\"...", label);
+    println!("==> akk ကို ဗားရှင်း \"{}\" သို့ အပ်ဒိတ် လုပ်နေသည်...", label);
 
     let version_owned = version.map(|s| s.to_string());
-    let spinner_message = format!("Downloading akk {}...", label);
+    let spinner_message = format!("akk {} ကို ဒေါင်းလုဒ် လုပ်နေသည်...", label);
 
     let outcome = ui::with_spinner(
         &spinner_message,
@@ -1109,12 +1607,12 @@ fn cmd_update(version: Option<&str>) {
     match outcome {
         Ok(output) if output.status.success() => {
             println!(
-                "    [OK] Updated to {}. Run 'akk --version' to confirm.",
+                "    [OK] ဗားရှင်း {} သို့ အပ်ဒိတ် ဖြစ်ပါပြီ။ စစ်ဆေးရန် 'akk --version' ကို ဖွင့်ပါ။",
                 label
             );
         }
         Ok(output) => {
-            eprintln!("    [FAILED] updater exited with status: {}", output.status);
+            eprintln!("    [FAILED] updater သည် status {} ဖြင့် ထွက်သွားပါသည်", output.status);
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr.trim_end());
@@ -1122,9 +1620,9 @@ fn cmd_update(version: Option<&str>) {
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("    [FAILED] could not run the installer: {}", e);
+            eprintln!("    [FAILED] installer ကို ဖွင့်၍မရပါ - {}", e);
             eprintln!(
-                "    Make sure curl (or PowerShell) is available and you have network access."
+                "    curl (သို့မဟုတ် PowerShell) ရရှိနိုင်ပြီး ကွန်ရက် ချိတ်ဆက်မှု ရှိကြောင်း စစ်ပါ။"
             );
             process::exit(1);
         }
@@ -1153,17 +1651,17 @@ enum InstallDownload {
 /// akk is needed), and `index.json` is its manifest, carrying a
 /// version/description shown after install.
 fn cmd_install(name: &str) {
-    if !ui::confirm(&format!("Install library \"{}\"?", name)) {
-        println!("    Cancelled.");
+    if !ui::confirm(&format!("နည်းပညာ \"{}\" ကို install လုပ်မလား။", name)) {
+        println!("    ပယ်ဖျက်လိုက်ပါသည်။");
         return;
     }
 
-    println!("==> Installing library: {}...", name);
+    println!("==> နည်းပညာ {} ကို install လုပ်နေသည်...", name);
 
     let dest_dir = libraries_dir().join(name);
     if let Err(e) = fs::create_dir_all(&dest_dir) {
         eprintln!(
-            "    [FAILED] could not create libraries folder {}: {}",
+            "    [FAILED] နည်းပညာ ဖိုဒါ {} ကို ဖန်တီး၍မရပါ - {}",
             dest_dir.display(),
             e
         );
@@ -1236,19 +1734,19 @@ fn cmd_install(name: &str) {
         InstallDownload::Ok { files, manifest } => (files, manifest),
         InstallDownload::NotFound => {
             eprintln!(
-                "    [FAILED] no library named \"{}\" was found in {}",
-                name, LIBRARY_REPO
+                "    [FAILED] {} တွင် \"{}\" ဆိုသော နည်းပညာ မတွေ့ပါ",
+                LIBRARY_REPO, name
             );
             suggest_libraries(name);
             process::exit(1);
         }
         InstallDownload::NetworkError(e) => {
-            eprintln!("    [FAILED] could not reach the library repo: {}", e);
-            eprintln!("    Make sure you have network access.");
+            eprintln!("    [FAILED] နည်းပညာ repo သို့ ချိတ်ဆက်၍မရပါ - {}", e);
+            eprintln!("    ကွန်ရက် ချိတ်ဆက်မှု ရှိကြောင်း စစ်ပါ။");
             process::exit(1);
         }
         InstallDownload::ReadError(e) => {
-            eprintln!("    [FAILED] could not read downloaded source: {}", e);
+            eprintln!("    [FAILED] ဒေါင်းလုဒ် လုပ်ထားသော ရင်းမြစ်ကို ဖတ်၍မရပါ - {}", e);
             process::exit(1);
         }
     };
@@ -1256,7 +1754,7 @@ fn cmd_install(name: &str) {
     let main_dir = dest_dir.join("main");
     if let Err(e) = fs::create_dir_all(&main_dir) {
         eprintln!(
-            "    [FAILED] could not create {}: {}",
+            "    [FAILED] ဖိုဒါ {} ကို ဖန်တီး၍မရပါ - {}",
             main_dir.display(),
             e
         );
@@ -1265,7 +1763,7 @@ fn cmd_install(name: &str) {
     for (file_name, body) in &files {
         let path = main_dir.join(file_name);
         if let Err(e) = fs::write(&path, body) {
-            eprintln!("    [FAILED] could not write {}: {}", path.display(), e);
+            eprintln!("    [FAILED] ဖိုင် {} ကို ရေး၍မရပါ - {}", path.display(), e);
             process::exit(1);
         }
     }
@@ -1273,17 +1771,17 @@ fn cmd_install(name: &str) {
         let _ = fs::write(dest_dir.join("index.json"), manifest);
     }
 
-    println!("    [OK] Installed \"{}\" to {}", name, dest_dir.display());
+    println!("    [OK] \"{}\" ကို {} တွင် တပ်ဆင်ပြီးပါပြီ", name, dest_dir.display());
     if let Some(manifest) = &manifest_body {
         if let Some(v) = extract_json_string_field(manifest, "version") {
-            println!("    Version: {}", v);
+            println!("    ဗားရှင်း - {}", v);
         }
         if let Some(d) = extract_json_string_field(manifest, "description") {
             println!("    {}", d);
         }
     }
     println!();
-    println!("    Use it in a program with:");
+    println!("    ပရောဂျက်တွင် ဤသို့ သုံးပါ —");
     println!("        နည်းပညာများ {} ကို သုံးမည်။", name);
 }
 
@@ -1313,12 +1811,12 @@ fn suggest_libraries(query: &str) {
         .collect();
 
     if !related.is_empty() {
-        eprintln!("    Did you mean:");
+        eprintln!("    ဤအမည် ဖြစ်ပါသလား —");
         for n in related {
             eprintln!("      - {}", n);
         }
     } else {
-        eprintln!("    Available libraries:");
+        eprintln!("    ရနိုင်သော နည်းပညာများ —");
         for n in names.iter().take(20) {
             eprintln!("      - {}", n);
         }
@@ -1335,23 +1833,23 @@ fn cmd_uninstall() {
     let exe_path = match env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("    [FAILED] could not locate akk's own binary: {}", e);
+            eprintln!("    [FAILED] akk ၏ executable ကို ရှာမတွေ့ပါ - {}", e);
             process::exit(1);
         }
     };
 
-    println!("==> Uninstalling akk");
-    println!("    Binary: {}", exe_path.display());
+    println!("==> akk ကို ဖယ်ရှားနေသည်");
+    println!("    ဖိုင် - {}", exe_path.display());
 
     #[cfg(target_os = "windows")]
     {
         let path_str = exe_path.display().to_string();
         let cmd = format!("ping 127.0.0.1 -n 2 >nul & del /f /q \"{}\"", path_str);
         match Command::new("cmd").args(["/C", &cmd]).spawn() {
-            Ok(_) => println!("    [OK] akk will be removed once this process exits."),
+            Ok(_) => println!("    [OK] ဤ လုပ်ငန်းစဉ် ပြီးဆုံးပါက akk ဖယ်ရှားခံရမည်။"),
             Err(e) => {
-                eprintln!("    [FAILED] could not schedule removal: {}", e);
-                eprintln!("    Delete it manually: {}", path_str);
+                eprintln!("    [FAILED] ဖယ်ရှားမှုကို အစီအစဉ် မဆွဲနိုင်ပါ - {}", e);
+                eprintln!("    ကိုယ်တိုင် ဖျက်ပါ - {}", path_str);
                 process::exit(1);
             }
         }
@@ -1361,18 +1859,18 @@ fn cmd_uninstall() {
     {
         if let Err(e) = fs::remove_file(&exe_path) {
             eprintln!(
-                "    [FAILED] could not remove {}: {}",
+                "    [FAILED] {} ကို ဖျက်၍မရပါ - {}",
                 exe_path.display(),
                 e
             );
             process::exit(1);
         }
-        println!("    [OK] Removed {}", exe_path.display());
+        println!("    [OK] {} ကို ဖယ်ရှားပြီးပါပြီ", exe_path.display());
     }
 
     println!();
-    println!("    If you added akk's install directory to your PATH manually,");
-    println!("    remove that line from your shell profile (e.g. ~/.bashrc, ~/.zshrc).");
+    println!("    akk ၏ install ဖိုဒါကို PATH ထဲ ကိုယ်တိုင် ထည့်ထားပါက၊");
+    println!("    shell profile (ဥပမာ ~/.bashrc, ~/.zshrc) မှ ထို လိုင်းကို ဖယ်ပါ။");
 }
 
 #[cfg(test)]
