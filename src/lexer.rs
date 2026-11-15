@@ -155,7 +155,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     }
                     if i >= n {
                         return Err(format!(
-                            "E003 လိုင်း {} တွင် string တန်ဖိုးအတွက် ပိတ် '\"\"\"' မရှိပါ။",
+                            "E003 လိုင်း {} တွင် စာသား တန်ဖိုးအတွက် ပိတ် '\"\"\"' မရှိပါ။",
                             start_line
                         ));
                     }
