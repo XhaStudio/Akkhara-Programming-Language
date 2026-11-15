@@ -50,11 +50,11 @@ pub enum Value {
 pub struct Key(Value);
 
 impl Key {
-    fn new(value: Value) -> Key {
+    pub(crate) fn new(value: Value) -> Key {
         Key(value)
     }
 
-    fn value(&self) -> &Value {
+    pub(crate) fn value(&self) -> &Value {
         &self.0
     }
 }
@@ -164,7 +164,7 @@ const TYPE_STR: &str = "စာသား";
 const TYPE_NUM: &str = "ကိန်း";
 const TYPE_BOOL: &str = "မှန်/မှား";
 
-fn type_name_mm(v: &Value) -> &'static str {
+pub(crate) fn type_name_mm(v: &Value) -> &'static str {
     match v {
         Value::Str(_) => "စာသား",
         Value::Int(_) => "ကိန်းပြည့်",
@@ -192,7 +192,7 @@ fn type_name_mm(v: &Value) -> &'static str {
 /// ends, so equal reprs mean equal contents. Everything else -- including
 /// mixed types such as Int(1) vs Float(1.0), which must stay unequal -- still
 /// goes through `repr`, so no other result changes.
-fn value_eq(a: &Value, b: &Value) -> bool {
+pub(crate) fn value_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
@@ -249,7 +249,7 @@ pub fn display_into(v: &Value, out: &mut String) {
 
 /// Element-level representation used inside collections (quotes strings),
 /// and as the top-level rendering for collection values themselves.
-fn repr(v: &Value) -> String {
+pub(crate) fn repr(v: &Value) -> String {
     let mut out = String::new();
     repr_into(v, &mut out);
     out
@@ -639,7 +639,7 @@ fn server_response_of(value: Option<Value>) -> (u16, String, String, Vec<(String
 
 fn server_arg_err(fn_name: &str, wants: &str, line: usize) -> String {
     format!(
-        "E129 လိုင်း {} တွင် server ၏ \"{}\" function သည် {} လိုအပ်ပါသည်။",
+        "E129 လိုင်း {} တွင် ဆာဗာ၏ \"{}\" အလုပ်သည် {} လိုအပ်ပါသည်။",
         line, fn_name, wants
     )
 }
@@ -649,7 +649,7 @@ fn server_route_err(msg: &str, line: usize) -> String {
 }
 
 fn server_listen_err(msg: &str, line: usize) -> String {
-    format!("E131 လိုင်း {} တွင် server သည် port ကို ဖွင့်၍မရပါ - {}", line, msg)
+    format!("E131 လိုင်း {} တွင် ဆာဗာသည် ဆိပ်ကမ်းကို ဖွင့်၍မရပါ - {}", line, msg)
 }
 
 /// A text argument of a server function: paths, methods, handler names and
@@ -659,7 +659,7 @@ fn server_text_arg(v: &Value, fn_name: &str, what: &str, line: usize) -> Result<
         Value::Str(s) => Ok(s.clone()),
         _ => Err(server_arg_err(
             fn_name,
-            &format!("{} ကို စာသား (str) အဖြစ်", what),
+            &format!("{} ကို စာသားအဖြစ်", what),
             line,
         )),
     }
@@ -707,7 +707,7 @@ fn file_delete_err(path: &str, detail: &str, line: usize) -> String {
 
 fn file_list_err(path: &str, detail: &str, line: usize) -> String {
     format!(
-        "E143 လိုင်း {} တွင် folder \"{}\" ထဲက စာရင်းကို ဖတ်၍မရပါ - {}",
+        "E143 လိုင်း {} တွင် ဖိုဒါ \"{}\" ထဲက စာရင်းကို ဖတ်၍မရပါ - {}",
         line, path, detail
     )
 }
@@ -721,7 +721,7 @@ fn file_size_err(path: &str, detail: &str, line: usize) -> String {
 
 fn file_path_arg_err(fn_name: &str, got: &str, line: usize) -> String {
     format!(
-        "E144 လိုင်း {} တွင် \"{}\" function ၏ ဖိုင် လမ်းကြောင်း (path) သည် စာသား (str) ဖြစ်ရပါမည်၊ {} ပေးထားပါသည်။",
+        "E144 လိုင်း {} တွင် \"{}\" အလုပ်၏ ဖိုင် လမ်းကြောင်းသည် စာသား ဖြစ်ရပါမည်၊ {} ပေးထားပါသည်။",
         line, fn_name, got
     )
 }
@@ -851,7 +851,7 @@ fn app_handle_id(v: &Value, fn_name: &str, line: usize) -> Result<u64, String> {
         }
     }
     Err(format!(
-        "E120 လိုင်း {} တွင် \"App.{}\" သည် App handle တစ်ခု လိုအပ်ပါသည်၊ {} ရရှိပါသည်။",
+        "E120 လိုင်း {} တွင် \"App.{}\" သည် App ကိုင်တွယ်မှု တစ်ခု လိုအပ်ပါသည်၊ {} ရရှိပါသည်။",
         line,
         fn_name,
         type_name_mm(v)
@@ -867,12 +867,12 @@ fn app_argc(fn_name: &str, got: usize, min: usize, max: usize, line: usize) -> R
     }
     if min == max {
         Err(format!(
-            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" အလုပ်သည် အချက် {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
             line, fn_name, min, got
         ))
     } else {
         Err(format!(
-            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" function သည် argument {} မှ {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            "E087 လိုင်း {} တွင် \"App\" ၏ \"{}\" အလုပ်သည် အချက် {} မှ {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
             line, fn_name, min, max, got
         ))
     }
@@ -880,7 +880,7 @@ fn app_argc(fn_name: &str, got: usize, min: usize, max: usize, line: usize) -> R
 
 fn app_want_text_err(fn_name: &str, line: usize, want: &str) -> String {
     format!(
-        "E126 လိုင်း {} တွင် \"App.{}\" ၏ argument သည် {} ဖြစ်ရပါသည်။",
+        "E126 လိုင်း {} တွင် \"App.{}\" ၏ အချက်သည် {} ဖြစ်ရပါသည်။",
         line, fn_name, want
     )
 }
@@ -889,7 +889,7 @@ fn app_want_text_err(fn_name: &str, line: usize, want: &str) -> String {
 fn app_num(v: &Value, fn_name: &str, line: usize) -> Result<f32, String> {
     as_f64(v).map(|f| f as f32).ok_or_else(|| {
         format!(
-            "E090 လိုင်း {} တွင် \"App.{}\" ၏ argument များသည် ကိန်းဂဏန်း ဖြစ်ရပါသည်။",
+            "E090 လိုင်း {} တွင် \"App.{}\" ၏ အချက် များသည် ကိန်းဂဏန်း ဖြစ်ရပါသည်။",
             line, fn_name
         )
     })
@@ -902,7 +902,7 @@ fn app_func_name(v: &Value, fn_name: &str, line: usize) -> Result<String, String
         _ => Err(app_want_text_err(
             fn_name,
             line,
-            "callback function နာမည် စာသား (ဥပမာ \"on_save\")",
+            "ပြန်ခေါ် အလုပ် နာမည် စာသား (ဥပမာ \"on_save\")",
         )),
     }
 }
@@ -917,7 +917,7 @@ fn app_items(v: &Value, fn_name: &str, line: usize) -> Result<Vec<String>, Strin
         _ => Err(app_want_text_err(
             fn_name,
             line,
-            "ရွေးစရာ item များ ပါသော list တစ်ခု",
+            "ရွေးစရာ အချက် များ ပါသော စာရင်း တစ်ခု",
         )),
     }
 }
@@ -941,7 +941,7 @@ fn app_rows(v: &Value, fn_name: &str, line: usize) -> Result<Vec<Vec<String>>, S
         _ => Err(app_want_text_err(
             fn_name,
             line,
-            "အတန်းများ ပါသော list တစ်ခု (အတန်းတစ်ခုစီသည် cell စာသားများ၏ list)",
+            "အတန်းများ ပါသော စာရင်း တစ်ခု (အတန်းတစ်ခုစီသည် cell စာသားများ၏ စာရင်း)",
         )),
     }
 }
@@ -986,7 +986,7 @@ fn app_items_value(
         _ => Err(app_want_text_err(
             fn_name,
             line,
-            "item များ (သို့) အတန်းများ ပါသော list တစ်ခု",
+            "အချက် များ (သို့) အတန်းများ ပါသော စာရင်း တစ်ခု",
         )),
     }
 }
@@ -1084,14 +1084,14 @@ fn app_parse_number(text: &str) -> Option<Value> {
 
 fn lib_unknown_err(lib: &str, line: usize) -> String {
     format!(
-        "E085 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
+        "E085 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများကို ရှာမတွေ့ပါ။",
         line, lib
     )
 }
 
 fn lib_fn_unknown_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
-        "E086 လိုင်း {} တွင် \"{}\" နည်းပညာများတွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+        "E086 လိုင်း {} တွင် \"{}\" နည်းပညာများတွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
         line, lib, fn_name
     )
 }
@@ -1107,7 +1107,7 @@ fn lib_fn_argc(
         Ok(())
     } else {
         Err(format!(
-            "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် အချက် {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
             line,
             lib,
             fn_name,
@@ -1137,7 +1137,7 @@ fn lib_fn_argc_range(
         format!("{} မှ {} ခု", min, max)
     };
     Err(format!(
-        "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် argument {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+        "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် အချက် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
         line,
         lib,
         fn_name,
@@ -1148,7 +1148,7 @@ fn lib_fn_argc_range(
 
 fn lib_fn_argtype_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
-        "E090 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် ကိန်းဂဏန်း argument များ လိုအပ်ပါသည်။",
+        "E090 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် ကိန်းဂဏန်း အချက် များ လိုအပ်ပါသည်။",
         line, lib, fn_name
     )
 }
@@ -1158,7 +1158,7 @@ fn lib_fn_argtype_err(lib: &str, fn_name: &str, line: usize) -> String {
 /// something like an int.
 fn lib_fn_collection_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
-        "E092 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် စာရင်း (list), အစု (tuple), အုပ်စု (set) သို့ စာသား (str) argument တစ်ခု လိုအပ်ပါသည်။",
+        "E092 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် စာရင်း, အစု, အုပ်စုသို့ စာသား အချက် တစ်ခု လိုအပ်ပါသည်။",
         line, lib, fn_name
     )
 }
@@ -1982,7 +1982,7 @@ impl Interpreter {
             Some(v) => v.clone(),
             None => {
                 return Err(format!(
-                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
                     line, name
                 ))
             }
@@ -2602,7 +2602,7 @@ impl Interpreter {
                 };
                 let value = result.ok_or_else(|| {
                     format!(
-                        "E071 လိုင်း {} တွင် \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ function ၏ နောက်ဆုံး statement သည် value တစ်ခု ဖြစ်ရပါမည်။",
+                        "E071 လိုင်း {} တွင် \"{}\" အလုပ်သည် တန်ဖိုး ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ အလုပ်၏ နောက်ဆုံး ညွှန်ကြားချက်သည် တန်ဖိုး တစ်ခု ဖြစ်ရပါမည်။",
                         line, fn_name, name
                     )
                 })?;
@@ -2628,7 +2628,7 @@ impl Interpreter {
                 let result = self.eval_lib_call(lib, fn_name, args, *line)?;
                 let value = result.ok_or_else(|| {
                     format!(
-                        "E088 လိုင်း {} တွင် \"{}\" ၏ \"{}\" function သည် value ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။",
+                        "E088 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် တန်ဖိုး ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။",
                         line, lib, fn_name, name
                     )
                 })?;
@@ -2654,7 +2654,7 @@ impl Interpreter {
                 }
                 let def = self.functions.get(original).cloned().ok_or_else(|| {
                     format!(
-                        "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                        "E031 လိုင်း {} တွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
                         line, original
                     )
                 })?;
@@ -2682,7 +2682,7 @@ impl Interpreter {
                         }
                         _ => {
                             return Err(format!(
-                                "E027 လိုင်း {} တွင် \"{}\" class အတွင်း method (function) များသာ ပါဝင်နိုင်ပါသည်။",
+                                "E027 လိုင်း {} တွင် \"{}\" ပုံသေ အတွင်း လုပ်ဆောင်ချက် များသာ ပါဝင်နိုင်ပါသည်။",
                                 line, name
                             ));
                         }
@@ -2690,7 +2690,7 @@ impl Interpreter {
                 }
                 if methods.is_empty() {
                     return Err(format!(
-                        "E028 လိုင်း {} တွင် \"{}\" class သည် constructor method အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
+                        "E028 လိုင်း {} တွင် \"{}\" ပုံသေသည် တည်ဆောက်သူ လုပ်ဆောင်ချက် အနည်းဆုံး တစ်ခု လိုအပ်ပါသည်။",
                         line, name
                     ));
                 }
@@ -2699,7 +2699,7 @@ impl Interpreter {
                 // written without a parameter list of its own.
                 if params.is_some() && !methods[0].1.is_empty() {
                     return Err(format!(
-                        "E096 လိုင်း {} တွင် \"{}\" class ၏ header တွင် constructor parameter များ ရေးထားပြီးဖြစ်၍ ပထမ method သည် parameter များ ထပ်မံမရေးရပါ။",
+                        "E096 လိုင်း {} တွင် \"{}\" ပုံသေ၏ ခေါင်းစီးတွင် တည်ဆောက်သူ အချက် များ ရေးထားပြီးဖြစ်၍ ပထမ လုပ်ဆောင်ချက်သည် အချက် များ ထပ်မံမရေးရပါ။",
                         line, name
                     ));
                 }
@@ -2724,7 +2724,7 @@ impl Interpreter {
                         Ok(())
                     }
                     None => Err(format!(
-                        "E035 လိုင်း {} တွင် \"အတု\" ကို class constructor အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+                        "E035 လိုင်း {} တွင် \"အတု\" ကို ပုံသေ တည်ဆောက်သူ အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
                         line
                     )),
                 }
@@ -2784,7 +2784,7 @@ impl Interpreter {
             } => {
                 if !self.libraries.is_loaded("ကျပန်း") {
                     return Err(format!(
-                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်း ကို သုံးမည်။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E064 လိုင်း {} တွင် \"ကျပန်းကိန်း\" ကို သုံးရန် \"နည်းပညာများ ကျပန်းကို သုံးမည်။\" ဖြင့် ကျပန်းနည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         line
                     ));
                 }
@@ -2811,7 +2811,7 @@ impl Interpreter {
             Stmt::Wait { amount, unit, line } => {
                 if !self.libraries.is_loaded("အချိန်") {
                     return Err(format!(
-                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန် ကို သုံးမည်။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+                        "E063 လိုင်း {} တွင် \"စောင့်ပါ\" ကို သုံးရန် \"နည်းပညာများ အချိန်ကို သုံးမည်။\" ဖြင့် အချိန်နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
                         line
                     ));
                 }
@@ -2836,7 +2836,7 @@ impl Interpreter {
                 let resolved = self.resolve_lib(lib);
                 if resolved != "request" {
                     return Err(format!(
-                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
+                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများကို ရှာမတွေ့ပါ။",
                         line, resolved
                     ));
                 }
@@ -2861,96 +2861,39 @@ impl Interpreter {
     /// Substitute "{VarName}" placeholders inside a string literal with the
     /// current value of that variable, e.g. "Hello!, {Name}".
     /// The self keyword inside a `{...}` placeholder: "{အတု <field>}".
-    const SELF_PREFIX: &'static str = "အတု ";
+    const SELF_PREFIX: &'static str = SELF_PREFIX;
 
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
-        // The fast path is only for a string with nothing to look at: no
-        // placeholder can start without a `{`, and an escaped brace cannot be
-        // unescaped without a `\`. Guarding on `{` alone would leave the
-        // backslash in `"...\}"` -- the piece that closes a JSON body.
-        if !s.contains(['{', '\\']) {
-            return Ok(s.to_string());
-        }
-        let mut out = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            // "\{" and "\}" are literal braces. Without them a string could
-            // not carry JSON, CSS, a template or any other brace-carrying text:
-            // every "{" would be read as the start of a placeholder (and the
-            // lexer keeps the backslash, so this is the last place that can
-            // tell the two apart).
-            if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
-                out.push(chars.next().unwrap());
-                continue;
-            }
-            if c == '{' {
-                let mut name = String::new();
-                let mut closed = false;
-                for nc in chars.by_ref() {
-                    if nc == '}' {
-                        closed = true;
-                        break;
-                    }
-                    name.push(nc);
-                }
-                if !closed {
-                    return Err(format!(
-                        "E056 လိုင်း {} တွင် string ထဲက \"{{\" ကိုပိတ်ရန် \"}}\" မရှိပါ။",
-                        line
-                    ));
-                }
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    return Err(format!(
-                        "E057 လိုင်း {} တွင် string interpolation \"{{}}\" ထဲမှာ variable အမည် လိုအပ်ပါသည်။",
-                        line
-                    ));
-                }
-                // "{အတု <field>}" reads the given field off the object
-                // currently under construction (inside a class method), rather
-                // than a plain global variable.
-                let self_field = trimmed.strip_prefix(Self::SELF_PREFIX);
-                if let Some(field_name) = self_field {
-                    let field_name = field_name.trim();
-                    if field_name.is_empty() {
-                        return Err(format!(
-                            "E059 လိုင်း {} တွင် string interpolation \"{{{}}}\" ထဲမှာ field အမည် လိုအပ်ပါသည်။",
-                            line, trimmed
-                        ));
-                    }
-                    let fields = self.self_stack.last().ok_or_else(|| {
-                        format!(
-                            "E060 လိုင်း {} တွင် \"{{{}}}\" ကို class method အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
-                            line, trimmed
-                        )
-                    })?;
-                    let val = fields
-                        .iter()
-                        .find(|(k, _)| k == field_name)
-                        .map(|(_, v)| v)
-                        .ok_or_else(|| {
-                            format!(
-                                "E059 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော field ကို ရှာမတွေ့ပါ။",
-                                line, trimmed, field_name
-                            )
-                        })?;
-                    out.push_str(&display(val));
-                    continue;
-                }
-                let val = self.env.get(trimmed).ok_or_else(|| {
-                    format!(
-                        "E058 လိုင်း {} တွင် string ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
-                        line, trimmed, trimmed
-                    )
-                })?;
-                out.push_str(&display(val));
-            } else {
-                out.push(c);
-            }
-        }
-        Ok(out)
+        interpolate_text(
+            s,
+            line,
+            |name| {
+                self.env
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| interpolate_missing_var_err(name, line))
+            },
+            |field_name, whole| self.self_field_value(field_name, whole, line),
+        )
     }
 
+    /// The `{အတု <field>}` half of interpolation: reads a field off the object
+    /// currently under construction (inside a class method).
+    fn self_field_value(
+        &self,
+        field_name: &str,
+        whole: &str,
+        line: usize,
+    ) -> Result<Value, String> {
+        self_field_lookup(
+            self.self_stack.last().map(|fields| fields.as_slice()),
+            field_name,
+            whole,
+            line,
+        )
+    }
+
+    /// Type-check for the "<var/val> သည် <type>" condition form.
     /// Type-check for the "<var/val> သည် <type>" condition form.
     /// "ကိန်း" (num) and "ဒဿမကိန်း" (float) also accept numeric-looking strings,
     /// per spec: `"10" သည် ကိန်း` must be true.
@@ -2993,7 +2936,7 @@ impl Interpreter {
                     Value::Bool(b) => b,
                     other => {
                         return Err(format!(
-                            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+                            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို အခြေအနေအဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
                             atom.line,
                             type_name_mm(&other)
                         ))
@@ -3378,7 +3321,7 @@ impl Interpreter {
                 let handler_v = self.eval(&args[2], line, None)?;
                 let method = server_text_arg(&method_v, fn_name, "method", line)?;
                 let path = server_text_arg(&path_v, fn_name, "path", line)?;
-                let handler = server_text_arg(&handler_v, fn_name, "handler အမည်", line)?;
+                let handler = server_text_arg(&handler_v, fn_name, "ကိုင်တွယ်သူ အမည်", line)?;
                 self.add_server_route(&method, &path, &handler, line)?;
                 Ok(None)
             }
@@ -3390,11 +3333,11 @@ impl Interpreter {
                 let status_v = self.eval(&args[0], line, None)?;
                 let body_v = self.eval(&args[1], line, None)?;
                 let status = as_i64(&status_v)
-                    .ok_or_else(|| server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line))?;
+                    .ok_or_else(|| server_arg_err(fn_name, "အခြေအနေကို ကိန်းပြည့်အဖြစ်", line))?;
                 if !(100..=599).contains(&status) {
                     return Err(server_arg_err(
                         fn_name,
-                        "100 မှ 599 အတွင်း HTTP status ကုဒ်",
+                        "100 မှ 599 အတွင်း HTTP အခြေအနေ ကုဒ်",
                         line,
                     ));
                 }
@@ -3419,7 +3362,7 @@ impl Interpreter {
                 let response_v = self.eval(&args[0], line, None)?;
                 let name_v = self.eval(&args[1], line, None)?;
                 let value_v = self.eval(&args[2], line, None)?;
-                let name = server_text_arg(&name_v, fn_name, "header အမည်", line)?;
+                let name = server_text_arg(&name_v, fn_name, "ခေါင်းစီး အမည်", line)?;
                 match response_v {
                     Value::Object(o) if o.class == SERVER_RESPONSE_CLASS => {
                         let mut headers = server_headers_of(&o.fields);
@@ -3437,7 +3380,7 @@ impl Interpreter {
                     }
                     _ => Err(server_arg_err(
                         fn_name,
-                        "\"အဖြေ\" (reply) မှ ရသော response တန်ဖိုးတစ်ခုကို ပထမ argument အဖြစ်",
+                        "\"အဖြေ\" မှ ရသော response တန်ဖိုးတစ်ခုကို ပထမ အချက်အဖြစ်",
                         line,
                     )),
                 }
@@ -3452,12 +3395,12 @@ impl Interpreter {
                     Some(expr) => {
                         let v = self.eval(expr, line, None)?;
                         let code = as_i64(&v).ok_or_else(|| {
-                            server_arg_err(fn_name, "status ကို ကိန်းပြည့် (int) အဖြစ်", line)
+                            server_arg_err(fn_name, "အခြေအနေကို ကိန်းပြည့်အဖြစ်", line)
                         })?;
                         if !(300..=399).contains(&code) {
                             return Err(server_arg_err(
                                 fn_name,
-                                "300 မှ 399 အတွင်း redirect status",
+                                "300 မှ 399 အတွင်း redirect အခြေအနေ",
                                 line,
                             ));
                         }
@@ -3476,9 +3419,9 @@ impl Interpreter {
                 lib_fn_argc(LIB_SERVER_NAME, fn_name, args, 1, line)?;
                 let port_v = self.eval(&args[0], line, None)?;
                 let port = as_i64(&port_v)
-                    .ok_or_else(|| server_arg_err(fn_name, "port ကို ကိန်းပြည့် (int) အဖြစ်", line))?;
+                    .ok_or_else(|| server_arg_err(fn_name, "ဆိပ်ကမ်းကို ကိန်းပြည့်အဖြစ်", line))?;
                 if !(1..=65535).contains(&port) {
-                    return Err(server_arg_err(fn_name, "1 မှ 65535 အတွင်း port", line));
+                    return Err(server_arg_err(fn_name, "1 မှ 65535 အတွင်း ဆိပ်ကမ်း", line));
                 }
                 self.serve_server(port as u16, line)?;
                 Ok(None)
@@ -3500,7 +3443,7 @@ impl Interpreter {
         let path_v = self.eval(&args[0], line, None)?;
         let handler_v = self.eval(&args[1], line, None)?;
         let path = server_text_arg(&path_v, fn_name, "path", line)?;
-        let handler = server_text_arg(&handler_v, fn_name, "handler အမည်", line)?;
+        let handler = server_text_arg(&handler_v, fn_name, "ကိုင်တွယ်သူ အမည်", line)?;
         self.add_server_route(method, &path, &handler, line)?;
         Ok(None)
     }
@@ -3521,7 +3464,7 @@ impl Interpreter {
         if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
             return Err(server_route_err(
                 &format!(
-                    "\"{}\" သည် HTTP method မဟုတ်ပါ - \"GET\", \"POST\" စသည်ဖြင့် စာလုံးကြီးဖြင့် ရေးပါ။",
+                    "\"{}\" သည် HTTP လုပ်ဆောင်ချက် မဟုတ်ပါ - \"GET\", \"POST\" စသည်ဖြင့် စာလုံးကြီးဖြင့် ရေးပါ။",
                     method
                 ),
                 line,
@@ -3529,14 +3472,14 @@ impl Interpreter {
         }
         if !path.starts_with('/') {
             return Err(server_route_err(
-                &format!("route path \"{}\" သည် \"/\" ဖြင့် စရပါမည်။", path),
+                &format!("လမ်းကြောင်း လမ်းကြောင်း \"{}\" သည် \"/\" ဖြင့် စရပါမည်။", path),
                 line,
             ));
         }
         if !self.functions.contains_key(handler) {
             return Err(server_route_err(
                 &format!(
-                    "\"{}\" ဆိုသော handler function ကို ရှာမတွေ့ပါ။ route မမှတ်ခင် function ကို အရင်ရေးပါ။",
+                    "\"{}\" ဆိုသော ကိုင်တွယ်သူ အလုပ်ကို ရှာမတွေ့ပါ။ လမ်းကြောင်း မမှတ်ခင် အလုပ်ကို အရင်ရေးပါ။",
                     handler
                 ),
                 line,
@@ -3551,7 +3494,7 @@ impl Interpreter {
                 if name.is_empty() {
                     return Err(server_route_err(
                         &format!(
-                            "route path \"{}\" တွင် \":\" နောက်၌ parameter အမည် လိုအပ်ပါသည်။",
+                            "လမ်းကြောင်း လမ်းကြောင်း \"{}\" တွင် \":\" နောက်၌ အချက် အမည် လိုအပ်ပါသည်။",
                             path
                         ),
                         line,
@@ -3560,7 +3503,7 @@ impl Interpreter {
                 if names.contains(&name.as_str()) {
                     return Err(server_route_err(
                         &format!(
-                            "route path \"{}\" တွင် \":{}\" ကို နှစ်ခါ ရေးထားပါသည်။",
+                            "လမ်းကြောင်း လမ်းကြောင်း \"{}\" တွင် \":{}\" ကို နှစ်ခါ ရေးထားပါသည်။",
                             path, name
                         ),
                         line,
@@ -3579,7 +3522,7 @@ impl Interpreter {
             .any(|r| r.method == method && r.shape == shape)
         {
             return Err(server_route_err(
-                &format!("{} {} route ကို နှစ်ခါ မှတ်ထားပါသည် ({})။", method, path, shape),
+                &format!("{} {} လမ်းကြောင်းကို နှစ်ခါ မှတ်ထားပါသည် ({})။", method, path, shape),
                 line,
             ));
         }
@@ -4124,7 +4067,7 @@ impl Interpreter {
                                 return Err(app_want_text_err(
                                     fn_name,
                                     line,
-                                    "စာသား (text) သို့မဟုတ် ကိန်းဂဏန်း",
+                                    "စာသား သို့မဟုတ် ကိန်းဂဏန်း",
                                 ))
                             }
                         }
@@ -4321,7 +4264,7 @@ impl Interpreter {
         match src {
             Some(src) => self.run_library_source(name, &src, line),
             None => Err(format!(
-                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ၊ သို့မဟုတ် program နှင့် တစ်ခုတည်းသော folder တွင် \"{}.akk\" ဖိုင်ကို ထားပါ။",
+                "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများကို ရှာမတွေ့ပါ။ \"akk install {}\" ဖြင့် ထည့်သွင်းကြည့်ပါ၊ သို့မဟုတ် program နှင့် တစ်ခုတည်းသော ဖိုဒါတွင် \"{}.akk\" ဖိုင်ကို ထားပါ။",
                 line, name, name, name
             )),
         }
@@ -4335,7 +4278,7 @@ impl Interpreter {
     fn run_library_source(&mut self, name: &str, src: &str, line: usize) -> Result<(), String> {
         if !self.libraries.begin_loading(name) {
             return Err(format!(
-                "E119 လိုင်း {} တွင် \"{}\" နည်းပညာများကို အပြန်အလှန် import လုပ်နေပါသည် (import cycle)။",
+                "E119 လိုင်း {} တွင် \"{}\" နည်းပညာများကို အပြန်အလှန် သွင်းယူမှု လုပ်နေပါသည်။",
                 line, name
             ));
         }
@@ -4343,13 +4286,13 @@ impl Interpreter {
         let result = (|| -> Result<(), String> {
             let tokens = crate::lexer::lex(src).map_err(|e| {
                 format!(
-                    "E066 လိုင်း {} တွင် \"{}\" library ကို ဖတ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                    "E066 လိုင်း {} တွင် \"{}\" နည်းပညာကို ဖတ်ရာတွင် အမှား ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
                     line, name, e
                 )
             })?;
             let stmts = crate::parser::parse(&tokens).map_err(|e| {
                 format!(
-                    "E067 လိုင်း {} တွင် \"{}\" library ကို parse လုပ်ရာတွင် error ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
+                    "E067 လိုင်း {} တွင် \"{}\" နည်းပညာကို ခွဲခြမ်းစိတ်ဖြာ လုပ်ရာတွင် အမှား ဖြစ်ပေါ်ခဲ့ပါသည် - {}",
                     line, name, e
                 )
             })?;
@@ -4405,7 +4348,7 @@ impl Interpreter {
                     Ok(Value::Callable(Rc::new(Callable::User(name.to_string()))))
                 }
                 None => Err(format!(
-                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
                     line, name
                 )),
             },
@@ -4626,7 +4569,7 @@ impl Interpreter {
                 let resolved = self.resolve_lib(lib);
                 if resolved != LIB_REQUEST_NAME {
                     return Err(format!(
-                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများ (library) ကို ရှာမတွေ့ပါ။",
+                        "E062 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများကို ရှာမတွေ့ပါ။",
                         gline, resolved
                     ));
                 }
@@ -4687,7 +4630,7 @@ impl Interpreter {
         match self.functions.get(name) {
             Some(v) => Ok(Rc::clone(v)),
             None => Err(format!(
-                "E031 လိုင်း {} တွင် \"{}\" ဆိုသော function ကို ရှာမတွေ့ပါ။",
+                "E031 လိုင်း {} တွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
                 line, name
             )),
         }
@@ -4707,12 +4650,12 @@ impl Interpreter {
         let required = function.2.iter().filter(|d| d.is_none()).count();
         if argc < required || argc > total {
             let expected = if required == total {
-                format!("argument {} ခု", total)
+                format!("အချက် {} ခု", total)
             } else {
-                format!("argument {} မှ {} ခု", required, total)
+                format!("အချက် {} မှ {} ခု", required, total)
             };
             return Err(format!(
-                "E033 လိုင်း {} တွင် \"{}\" function သည် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                "E033 လိုင်း {} တွင် \"{}\" အလုပ်သည် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                 line, name, expected, argc
             ));
         }
@@ -4795,7 +4738,7 @@ impl Interpreter {
                         self.env.pop_frame();
                         self.loop_depth = outer_loop_depth;
                         return Err(format!(
-                            "E033 လိုင်း {} တွင် \"{}\" function သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                            "E033 လိုင်း {} တွင် \"{}\" အလုပ်သည် အချက် {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                             line,
                             "?",
                             params.len(),
@@ -4844,7 +4787,7 @@ impl Interpreter {
                         }
                     },
                     // A function ending in "<var> သည် <expr> ဖြစ်၏။" -- the
-                    // idiomatic "ရလဒ် သည် ... ဖြစ်၏။" pattern -- also counts
+                    // idiomatic "ရလဒ်သည် ... ဖြစ်၏။" pattern -- also counts
                     // as an implicit return: the variable still gets
                     // assigned as normal, and its value is also returned.
                     Stmt::VarDecl {
@@ -4909,7 +4852,7 @@ impl Interpreter {
             Some(c) => c.clone(),
             None => {
                 return Err(format!(
-                    "E032 လိုင်း {} တွင် \"{}\" ဆိုသော class ကို ရှာမတွေ့ပါ။",
+                    "E032 လိုင်း {} တွင် \"{}\" ဆိုသော ပုံသေကို ရှာမတွေ့ပါ။",
                     line, class_name
                 ));
             }
@@ -4926,7 +4869,7 @@ impl Interpreter {
 
         if arg_exprs.len() != params.len() {
             return Err(format!(
-                "E034 လိုင်း {} တွင် \"{}\" class ၏ constructor သည် argument {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+                "E034 လိုင်း {} တွင် \"{}\" ပုံသေ၏ တည်ဆောက်သူသည် အချက် {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
                 line,
                 class_name,
                 params.len(),
@@ -5047,7 +4990,7 @@ impl Interpreter {
                 if !warned && iterations > MAX_ITERS {
                     warned = true;
                     self.warn(&format!(
-                        "E046 လိုင်း {} ၏ {} သည် ကြိမ်ရေ အလွန်များနေပါသည် (loop ထဲက variable ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
+                        "E046 လိုင်း {} ၏ {} သည် ကြိမ်ရေ အလွန်များနေပါသည် (ကွင်း ထဲက ကိန်းရှင်ကို update မလုပ်ထားလို့ အဆုံးမရှိ ပတ်နေခြင်း ဖြစ်နိုင်ပါသည်)။",
                         line, label
                     ));
                 }
@@ -5161,7 +5104,7 @@ impl Interpreter {
                 Err(eng_builtin_err(
                     line,
                     name,
-                    &format!("takes exactly one argument, got {}", args.len()),
+                    &format!("အချက် တစ်ခုတည်း လိုအပ်ပါသည်၊ {} ရပါသည်", args.len()),
                 ))
             }
         };
@@ -5178,7 +5121,7 @@ impl Interpreter {
                     Value::Set(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Dict(pairs) => Ok(Value::Int(pairs.len() as i64)),
                     other => Err(bad_arg(format!(
-                        "needs a string or collection, got {}",
+                        "စာသား သို့မဟုတ် စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         type_name_mm(other)
                     ))),
                 }
@@ -5189,7 +5132,7 @@ impl Interpreter {
                     Value::Int(i) => Ok(Value::Int(i.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
                     other => Err(bad_arg(format!(
-                        "needs a number, got {}",
+                        "ကိန်း လိုအပ်ပါသည်၊ {} ရပါသည်",
                         type_name_mm(other)
                     ))),
                 }
@@ -5207,7 +5150,7 @@ impl Interpreter {
                     args.clone()
                 };
                 if candidates.is_empty() {
-                    return Err(bad_arg("needs at least one value".to_string()));
+                    return Err(bad_arg("အနည်းဆုံး တန်ဖိုး တစ်ခု လိုအပ်ပါသည်".to_string()));
                 }
                 let mut best = candidates[0].clone();
                 for c in &candidates[1..] {
@@ -5226,7 +5169,7 @@ impl Interpreter {
             "sqrt" => {
                 one_arg()?;
                 let f = as_f64(&args[0]).ok_or_else(|| {
-                    bad_arg(format!("needs a number, got {}", type_name_mm(&args[0])))
+                    bad_arg(format!("ကိန်း လိုအပ်ပါသည်၊ {} ရပါသည်", type_name_mm(&args[0])))
                 })?;
                 if f < 0.0 {
                     return Err(eng_sqrt_negative_err(line, &args[0]));
@@ -5236,7 +5179,7 @@ impl Interpreter {
             "floor" | "ceil" | "round" => {
                 one_arg()?;
                 let f = as_f64(&args[0]).ok_or_else(|| {
-                    bad_arg(format!("needs a number, got {}", type_name_mm(&args[0])))
+                    bad_arg(format!("ကိန်း လိုအပ်ပါသည်၊ {} ရပါသည်", type_name_mm(&args[0])))
                 })?;
                 let rounded = match name {
                     "floor" => f.floor(),
@@ -5254,7 +5197,7 @@ impl Interpreter {
                         _ => s.trim().to_string(),
                     })),
                     other => Err(bad_arg(format!(
-                        "needs a string, got {}",
+                        "စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
                         type_name_mm(other)
                     ))),
                 }
@@ -5262,7 +5205,7 @@ impl Interpreter {
             "contains" => {
                 if args.len() != 2 {
                     return Err(bad_arg(format!(
-                        "takes exactly two arguments, got {}",
+                        "အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5272,7 +5215,7 @@ impl Interpreter {
                         Value::Str(n) => s.contains(n.as_str()),
                         other => {
                             return Err(bad_arg(format!(
-                                "needs a string to search for, got {}",
+                                "ရှာဖွေမည့် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
                                 type_name_mm(other)
                             )))
                         }
@@ -5287,7 +5230,7 @@ impl Interpreter {
                     Value::Dict(pairs) => pairs.contains_key(&Key::new(needle.clone())),
                     other => {
                         return Err(bad_arg(format!(
-                            "needs a string or collection first, got {}",
+                            "ပထမ အချက်သည် စာသား သို့မဟုတ် စုစည်းမှု ဖြစ်ရပါမည်၊ {} ရပါသည်",
                             type_name_mm(other)
                         )))
                     }
@@ -5297,7 +5240,7 @@ impl Interpreter {
             "split" => {
                 if args.len() != 2 {
                     return Err(bad_arg(format!(
-                        "takes exactly two arguments, got {}",
+                        "အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5319,14 +5262,14 @@ impl Interpreter {
                         Ok(Value::List(parts))
                     }
                     _ => Err(bad_arg(
-                        "needs a string to split and a string separator".to_string(),
+                        "ခွဲရမည့် စာသား နှင့် ခွဲခြားမည့် စာသား နှစ်ခု လိုအပ်ပါသည်".to_string(),
                     )),
                 }
             }
             "join" => {
                 if args.len() != 2 {
                     return Err(bad_arg(format!(
-                        "takes exactly two arguments, got {}",
+                        "အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5334,7 +5277,7 @@ impl Interpreter {
                     Value::Str(s) => s.clone(),
                     other => {
                         return Err(bad_arg(format!(
-                            "needs a string separator, got {}",
+                            "ခွဲခြားမည့် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
                             type_name_mm(other)
                         )))
                     }
@@ -5357,7 +5300,7 @@ impl Interpreter {
                         Ok(Value::Str(text))
                     }
                     other => Err(bad_arg(format!(
-                        "needs a collection first, got {}",
+                        "ပထမ အချက်သည် စုစည်းမှု ဖြစ်ရပါမည်၊ {} ရပါသည်",
                         type_name_mm(other)
                     ))),
                 }
@@ -5365,7 +5308,7 @@ impl Interpreter {
             "replace" => {
                 if args.len() != 3 {
                     return Err(bad_arg(format!(
-                        "takes exactly three arguments, got {}",
+                        "အချက် သုံးခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5381,14 +5324,14 @@ impl Interpreter {
                         }
                     }
                     _ => Err(bad_arg(
-                        "needs three strings: text, what to find, what to put there".to_string(),
+                        "စာသား သုံးခု လိုအပ်ပါသည် — မူရင်းစာသား၊ ရှာရမည့်စာသား၊ အစားထိုးမည့်စာသား".to_string(),
                     )),
                 }
             }
             "find" | "index_of" => {
                 if args.len() != 2 {
                     return Err(bad_arg(format!(
-                        "takes exactly two arguments, got {}",
+                        "အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5401,14 +5344,14 @@ impl Interpreter {
                         Ok(Value::Int(crate::text::find(s, needle)))
                     }
                     _ => Err(bad_arg(
-                        "needs a string to search and a string to look for".to_string(),
+                        "ရှာဖွေမည့် စာသား နှင့် ရှာရမည့် စာသား နှစ်ခု လိုအပ်ပါသည်".to_string(),
                     )),
                 }
             }
             "starts_with" | "ends_with" => {
                 if args.len() != 2 {
                     return Err(bad_arg(format!(
-                        "takes exactly two arguments, got {}",
+                        "အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5421,7 +5364,7 @@ impl Interpreter {
                         }))
                     }
                     _ => Err(bad_arg(
-                        "needs a string and the text to look for".to_string(),
+                        "စာသား နှင့် ရှာရမည့် စာသား နှစ်ခု လိုအပ်ပါသည်".to_string(),
                     )),
                 }
             }
@@ -5440,7 +5383,7 @@ impl Interpreter {
                         Ok(Value::List(items))
                     }
                     other => Err(bad_arg(format!(
-                        "needs a dict, got {}",
+                        "အဘိဓာန် လိုအပ်ပါသည်၊ {} ရပါသည်",
                         type_name_mm(other)
                     ))),
                 }
@@ -5451,7 +5394,7 @@ impl Interpreter {
                 // `xs[i]`, which refuses an out-of-range index).
                 if args.len() < 2 || args.len() > 3 {
                     return Err(bad_arg(format!(
-                        "takes a collection, a start and an optional end, got {} arguments",
+                        "စုစည်းမှု၊ စတင်ချက် နှင့် ရွေးချယ်နိုင်သော အဆုံးချက် လိုအပ်ပါသည်၊ အချက် {} ခု ရပါသည်",
                         args.len()
                     )));
                 }
@@ -5461,7 +5404,7 @@ impl Interpreter {
                     Value::Set(items) => items.len() as i64,
                     other => {
                         return Err(bad_arg(format!(
-                            "needs a string or collection, got {}",
+                            "စာသား သို့မဟုတ် စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်",
                             type_name_mm(other)
                         )))
                     }
@@ -5473,7 +5416,7 @@ impl Interpreter {
                 };
                 if start < 0 || end < 0 {
                     return Err(bad_arg(format!(
-                        "needs non-negative indices, got start {} and end {}",
+                        "အနုတ်မဟုတ်သော အညွှန်းများ လိုအပ်ပါသည်၊ စတင် {} နှင့် အဆုံး {} ရပါသည်",
                         start, end
                     )));
                 }
@@ -5506,7 +5449,7 @@ impl Interpreter {
                     Value::Set(items) => items.iter().map(|k| k.value()).collect(),
                     other => {
                         return Err(bad_arg(format!(
-                            "needs a collection of numbers, got {}",
+                            "ကိန်းများ ပါသော စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်",
                             type_name_mm(other)
                         )))
                     }
@@ -5522,7 +5465,7 @@ impl Interpreter {
                         }
                         other => {
                             return Err(bad_arg(format!(
-                                "needs numbers, got {}",
+                                "ကိန်းများ လိုအပ်ပါသည်၊ {} ရပါသည်",
                                 type_name_mm(other)
                             )))
                         }
@@ -5545,7 +5488,7 @@ impl Interpreter {
                         .collect(),
                     other => {
                         return Err(bad_arg(format!(
-                            "needs a collection or string, got {}",
+                            "စုစည်းမှု သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
                             type_name_mm(other)
                         )))
                     }
@@ -5591,7 +5534,7 @@ impl Interpreter {
                 return Err(eng_builtin_err(
                     line,
                     name,
-                    "needs a list variable as its first argument, e.g. push(xs, 4)",
+                    "ပထမ အချက်သည် စာရင်း ကိန်းရှင် ဖြစ်ရပါမည်၊ ဥပမာ — push(xs, 4)",
                 ))
             }
         };
@@ -5602,7 +5545,7 @@ impl Interpreter {
             Some(value) => value,
             None => {
                 return Err(format!(
-                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော variable ကို ရှာမတွေ့ပါ။",
+                    "E030 လိုင်း {} တွင် \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
                     line, var
                 ))
             }
@@ -5613,7 +5556,7 @@ impl Interpreter {
                 return Err(eng_builtin_err(
                     line,
                     name,
-                    &format!("needs a list, got {}", type_name_mm(&other)),
+                    &format!("စာရင်း လိုအပ်ပါသည်၊ {} ရပါသည်", type_name_mm(&other)),
                 ))
             }
         };
@@ -5628,7 +5571,7 @@ impl Interpreter {
                     return Err(eng_builtin_err(
                         line,
                         name,
-                        &format!("takes a list and one value, got {} values", extra.len()),
+                        &format!("စာရင်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ တန်ဖိုး {} ခု ရပါသည်", extra.len()),
                     ));
                 }
                 items.push(extra.pop().unwrap());
@@ -5639,13 +5582,13 @@ impl Interpreter {
                     return Err(eng_builtin_err(
                         line,
                         name,
-                        "takes a list and no other arguments",
+                        "စာရင်း တစ်ခုသာ လိုအပ်ပြီး အခြားအချက် မလိုပါ",
                     ));
                 }
                 match items.pop() {
                     Some(v) => v,
                     None => {
-                        return Err(eng_builtin_err(line, name, "cannot pop from an empty list"))
+                        return Err(eng_builtin_err(line, name, "စာရင်းအလွတ်မှ ဖယ်၍မရပါ"))
                     }
                 }
             }
@@ -5655,7 +5598,7 @@ impl Interpreter {
                         line,
                         name,
                         &format!(
-                            "takes a list, an index and one value, got {} arguments after the list",
+                            "စာရင်း၊ အညွှန်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ စာရင်းနောက်တွင် အချက် {} ခု ရပါသည်",
                             extra.len()
                         ),
                     ));
@@ -5664,7 +5607,7 @@ impl Interpreter {
                 let at = index_as_int(&extra[0], line)?;
                 if at < 0 || at as usize > items.len() {
                     return Err(format!(
-                        "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                        "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
                         line, at
                     ));
                 }
@@ -5676,7 +5619,7 @@ impl Interpreter {
                     return Err(eng_builtin_err(
                         line,
                         name,
-                        &format!("takes a list and one index, got {} indices", extra.len()),
+                        &format!("စာရင်း နှင့် အညွှန်း တစ်ခု လိုအပ်ပါသည်၊ အညွှန်း {} ခု ရပါသည်", extra.len()),
                     ));
                 }
                 let at = index_as_int(&extra[0], line)?;
@@ -5688,13 +5631,13 @@ impl Interpreter {
                     return Err(eng_builtin_err(
                         line,
                         name,
-                        "takes a list and no other arguments",
+                        "စာရင်း တစ်ခုသာ လိုအပ်ပြီး အခြားအချက် မလိုပါ",
                     ));
                 }
                 sort_items(&mut items, line, name)?;
                 Value::List(items.clone())
             }
-            _ => unreachable!("is_mutating_builtin lists exactly these names"),
+            _ => unreachable!("is_mutating_builtin တွင် ဤအမည်များသာ ပါဝင်ပါသည်"),
         };
         self.store(&var, Value::List(items));
         Ok(result)
@@ -5709,7 +5652,7 @@ impl Interpreter {
             return Err(eng_builtin_err(
                 line,
                 "reverse",
-                &format!("takes one list or string, got {}", arg_exprs.len()),
+                &format!("စာရင်း သို့မဟုတ် စာသား တစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်", arg_exprs.len()),
             ));
         }
         // A list variable is reversed in place, like `sort`.
@@ -5737,7 +5680,7 @@ impl Interpreter {
             other => Err(eng_builtin_err(
                 line,
                 "reverse",
-                &format!("needs a list or string, got {}", type_name_mm(&other)),
+                &format!("စာရင်း သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", type_name_mm(&other)),
             )),
         }
     }
@@ -5756,7 +5699,7 @@ impl Interpreter {
             return Err(eng_builtin_err(
                 line,
                 name,
-                &format!("takes {want} arguments, got {}", arg_exprs.len()),
+                &format!("အချက် {want} ခု လိုအပ်ပါသည်၊ {} ရပါသည်", arg_exprs.len()),
             ));
         }
         let collection = self.eval(&arg_exprs[0], line, None)?;
@@ -5773,7 +5716,7 @@ impl Interpreter {
                 return Err(eng_builtin_err(
                     line,
                     name,
-                    &format!("needs a collection or string, got {}", type_name_mm(other)),
+                    &format!("စုစည်းမှု သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", type_name_mm(other)),
                 ))
             }
         };
@@ -5806,7 +5749,7 @@ impl Interpreter {
                                 line,
                                 name,
                                 &format!(
-                                    "needs a callback that returns True or False, got {}",
+                                    "True သို့မဟုတ် False ပြန်ပေးသော ပြန်ခေါ် အလုပ် လိုအပ်ပါသည်၊ {} ရပါသည်",
                                     type_name_mm(&other)
                                 ),
                             ))
@@ -5816,7 +5759,7 @@ impl Interpreter {
                 Ok(Value::List(out))
             }
             _ => {
-                let mut acc = initial.expect("reduce always evaluated its start value");
+                let mut acc = initial.expect("reduce သည် ၎င်း၏ စတင်တန်ဖိုးကို အမြဲ တွက်ချက်ပါသည်");
                 for item in items {
                     acc = self.call_callback(&callback, vec![acc, item], line)?;
                 }
@@ -5845,7 +5788,7 @@ impl Interpreter {
                 line,
                 builtin,
                 &format!(
-                    "needs a function as its callback, got {}",
+                    "ပြန်ခေါ် အလုပ်အဖြစ် အလုပ် တစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
                     type_name_mm(&other)
                 ),
             )),
@@ -5898,7 +5841,7 @@ impl Interpreter {
 /// Error-code helpers for try/catch. All runtime errors are formatted as
 /// "E### <message>". `<error_name> ကို ဖမ်းပါ` binds the code (e.g. "E030")
 /// into a string variable so scripts can match on it.
-fn extract_error_code(msg: &str) -> String {
+pub(crate) fn extract_error_code(msg: &str) -> String {
     let code = msg.split_whitespace().next().unwrap_or("E");
     code.to_string()
 }
@@ -5907,20 +5850,20 @@ fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
     match v {
         Value::Int(i) => Ok(*i),
         Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
-        _ => Err(format!("E048 လိုင်း {} တွင် index သည် ကိန်းပြည့် ဖြစ်ရပါမည်။", line)),
+        _ => Err(format!("E048 လိုင်း {} တွင် အညွှန်းသည် ကိန်းပြည့် ဖြစ်ရပါမည်။", line)),
     }
 }
 
 fn get_seq_item(items: &[Value], idx: i64, line: usize) -> Result<Value, String> {
     if idx < 0 {
         return Err(format!(
-            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
             line, idx
         ));
     }
     items.get(idx as usize).cloned().ok_or_else(|| {
         format!(
-            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
             line, idx
         )
     })
@@ -5938,13 +5881,13 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
             match get_seq_item(items, row, line)? {
                 Value::List(cols) | Value::Tuple(cols) => get_seq_item(&cols, col, line),
                 other => Err(format!(
-                    "E054 လိုင်း {} တွင် {} ကို [row, column] ဖြင့် index ယူ၍မရပါ။",
+                    "E054 လိုင်း {} တွင် {} ကို [row, column] ဖြင့် အညွှန်း ယူ၍မရပါ။",
                     line,
                     type_name_mm(&other)
                 )),
             }
         }
-        _ => Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line)),
+        _ => Err(format!("E050 လိုင်း {} တွင် အညွှန်း အရေအတွက်မှားနေပါသည်။", line)),
     }
 }
 
@@ -5954,7 +5897,7 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
 fn seq_slot(len: usize, idx: i64, line: usize) -> Result<usize, String> {
     if idx < 0 || idx as usize >= len {
         return Err(format!(
-            "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+            "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
             line, idx
         ));
     }
@@ -5965,7 +5908,7 @@ fn seq_slot(len: usize, idx: i64, line: usize) -> Result<usize, String> {
 /// `[row, column]` pair writes into a table's inner list, and a dict takes a
 /// key (updating the entry in place or appending a new one). A tuple or set is
 /// refused: those exist to be fixed.
-fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Result<(), String> {
+pub(crate) fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Result<(), String> {
     match base {
         Value::List(items) => match keys {
             [only] => {
@@ -5979,12 +5922,12 @@ fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Res
                 let slot = seq_slot(items.len(), row, line)?;
                 set_index(&mut items[slot], rest, value, line)
             }
-            [] => Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line)),
+            [] => Err(format!("E050 လိုင်း {} တွင် အညွှန်း အရေအတွက်မှားနေပါသည်။", line)),
         },
         Value::Dict(pairs) => {
             if keys.len() != 1 {
                 return Err(format!(
-                    "E052 လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
+                    "E052 လိုင်း {} တွင် အဘိဓာန်ကို သော့ တစ်ခုဖြင့်သာ အညွှန်း ယူရပါမည်။",
                     line
                 ));
             }
@@ -5996,16 +5939,16 @@ fn set_index(base: &mut Value, keys: &[Value], value: Value, line: usize) -> Res
             Ok(())
         }
         Value::Str(_) => Err(format!(
-            "E139 လိုင်း {} တွင် စာသား (string) ၏ အက္ခရာကို ပြောင်း၍မရပါ။ စာသားအသစ်တစ်ခု ဖန်တီးပါ။",
+            "E139 လိုင်း {} တွင် စာသား၏ အက္ခရာကို ပြောင်း၍မရပါ။ စာသားအသစ်တစ်ခု ဖန်တီးပါ။",
             line
         )),
         Value::Tuple(_) | Value::Set(_) => Err(format!(
-            "E139 လိုင်း {} တွင် {} ၏ element ကို ပြောင်း၍မရပါ။ ပြောင်းလဲနိုင်သော စာရင်း (list) ကို အသုံးပြုပါ။",
+            "E139 လိုင်း {} တွင် {} ၏ အစိတ်အပိုင်းကို ပြောင်း၍မရပါ။ ပြောင်းလဲနိုင်သော စာရင်းကို အသုံးပြုပါ။",
             line,
             type_name_mm(base)
         )),
         other => Err(format!(
-            "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
+            "E051 လိုင်း {} တွင် {} ကို အညွှန်း ယူ၍မရပါ။",
             line,
             type_name_mm(other)
         )),
@@ -6037,12 +5980,12 @@ fn sort_items(items: &mut [Value], line: usize, name: &str) -> Result<(), String
 
 fn index_target_err(line: usize) -> String {
     format!(
-        "E138 လိုင်း {} တွင် ဤနေရာ၌ index ကို သတ်မှတ်၍မရပါ။ ပြောင်းလိုသော စာရင်းကို variable တစ်ခုတွင် ထားပါ။",
+        "E138 လိုင်း {} တွင် ဤနေရာ၌ အညွှန်းကို သတ်မှတ်၍မရပါ။ ပြောင်းလိုသော စာရင်းကို ကိန်းရှင် တစ်ခုတွင် ထားပါ။",
         line
     )
 }
 
-fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, String> {
+pub(crate) fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, String> {
     match base {
         Value::List(items) | Value::Tuple(items) => index_seq(items, keys, line),
         // A set is fixed and unordered for writing, but reading `s[i]` by
@@ -6055,12 +5998,12 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
         // `မြန်မာ` is `မြ` rather than the consonant alone.
         Value::Str(s) => {
             if keys.len() != 1 {
-                return Err(format!("E050 လိုင်း {} တွင် index အရေအတွက်မှားနေပါသည်။", line));
+                return Err(format!("E050 လိုင်း {} တွင် အညွှန်း အရေအတွက်မှားနေပါသည်။", line));
             }
             let idx = index_as_int(&keys[0], line)?;
             if idx < 0 {
                 return Err(format!(
-                    "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                    "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
                     line, idx
                 ));
             }
@@ -6068,7 +6011,7 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
                 .map(|c| Value::Str(c.to_string()))
                 .ok_or_else(|| {
                     format!(
-                        "E049 လိုင်း {} တွင် index {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                        "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
                         line, idx
                     )
                 })
@@ -6076,7 +6019,7 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
         Value::Dict(pairs) => {
             if keys.len() != 1 {
                 return Err(format!(
-                    "E052 လိုင်း {} တွင် အဘိဓာန် (dict) ကို key တစ်ခုဖြင့်သာ index ယူရပါမည်။",
+                    "E052 လိုင်း {} တွင် အဘိဓာန်ကို သော့ တစ်ခုဖြင့်သာ အညွှန်း ယူရပါမည်။",
                     line
                 ));
             }
@@ -6084,10 +6027,10 @@ fn index_value(base: &Value, keys: &[Value], line: usize) -> Result<Value, Strin
             pairs
                 .get(&Key::new(key.clone()))
                 .cloned()
-                .ok_or_else(|| format!("E053 လိုင်း {} တွင် key {} ကို ရှာမတွေ့ပါ။", line, repr(key)))
+                .ok_or_else(|| format!("E053 လိုင်း {} တွင် သော့ {} ကို ရှာမတွေ့ပါ။", line, repr(key)))
         }
         other => Err(format!(
-            "E051 လိုင်း {} တွင် {} ကို index ယူ၍မရပါ။",
+            "E051 လိုင်း {} တွင် {} ကို အညွှန်း ယူ၍မရပါ။",
             line,
             type_name_mm(other)
         )),
@@ -6112,14 +6055,14 @@ fn as_i64(v: &Value) -> Option<i64> {
 
 fn loop_not_numeric_err(line: usize) -> String {
     format!(
-        "E044 လိုင်း {} တွင် for loop ၏ အစ/အဆုံး/step တန်ဖိုးများသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
+        "E044 လိုင်း {} တွင် for ကွင်း၏ အစ/အဆုံး/အဆင့် တန်ဖိုးများသည် ကိန်းဂဏန်း ဖြစ်ရပါမည်။",
         line
     )
 }
 
 fn loop_not_iterable_err(line: usize, type_name: &str) -> String {
     format!(
-        "E045 လိုင်း {} တွင် {} ကို for loop ဖြင့် ထပ်ခါထပ်ခါ လည်ပတ်၍မရပါ။",
+        "E045 လိုင်း {} တွင် {} ကို for ကွင်းဖြင့် ထပ်ခါထပ်ခါ လည်ပတ်၍မရပါ။",
         line, type_name
     )
 }
@@ -6134,7 +6077,7 @@ fn cmp_type_err(line: usize, t1: &str, t2: &str, op: &str) -> String {
 /// Read a field off a class object. `<obj> ၏ <field>` and `<obj>.<field>`
 /// are the same access; a missing field is E082 and a value that is not an
 /// object at all is E083.
-fn field_of(v: &Value, field: &str, line: usize) -> Result<Value, String> {
+pub(crate) fn field_of(v: &Value, field: &str, line: usize) -> Result<Value, String> {
     match v {
         Value::Object(o) => o
             .fields
@@ -6143,12 +6086,12 @@ fn field_of(v: &Value, field: &str, line: usize) -> Result<Value, String> {
             .map(|(_, v)| v.clone())
             .ok_or_else(|| {
                 format!(
-                    "E082 လိုင်း {} တွင် object ၌ \"{}\" ဆိုသော field မရှိပါ။",
+                    "E082 လိုင်း {} တွင် အရာဝတ္ထု ၌ \"{}\" ဆိုသော အကွက် မရှိပါ။",
                     line, field
                 )
             }),
         other => Err(format!(
-            "E083 လိုင်း {} တွင် {} အပေါ် \"၏\" / \".\" ဖြင့် field ဖတ်၍မရပါ (Object တစ်ခု ဖြစ်ရပါမည်)။",
+            "E083 လိုင်း {} တွင် {} အပေါ် \"၏\" / \".\" ဖြင့် အကွက် ဖတ်၍မရပါ (Object တစ်ခု ဖြစ်ရပါမည်)။",
             line,
             type_name_mm(other)
         )),
@@ -6163,7 +6106,7 @@ fn bool_operand(v: &Value, line: usize) -> Result<bool, String> {
     match v {
         Value::Bool(b) => Ok(*b),
         other => Err(format!(
-            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို condition အဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို အခြေအနေအဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
             line,
             type_name_mm(other)
         )),
@@ -6366,19 +6309,19 @@ fn numeric_op(a: f64, b: f64, op: char, line: usize) -> Result<Value, String> {
 /// `float` both accept any number, so they share one phrasing.
 fn eng_type_expectation(type_name: &str) -> &'static str {
     match type_name {
-        "int" | "float" => "a number",
-        "str" => "a string",
-        "bool" => "true or false",
-        _ => "a value of the declared type",
+        "int" | "float" => "ကိန်း",
+        "str" => "စာသား",
+        "bool" => "မှန် သို့မဟုတ် မှား",
+        _ => "ကြေညာထားသော အမျိုးအစား၏ တန်ဖိုး",
     }
 }
 
 /// Error for assigning (or redeclaring) a name that was declared with the
 /// eng `pin` form. Raised from any assignment path -- Myanmar sentence
 /// forms included -- so `pin` really is immutable for the whole program.
-fn eng_const_reassign_err(name: &str, line: usize) -> String {
+pub(crate) fn eng_const_reassign_err(name: &str, line: usize) -> String {
     format!(
-        "E104 line {}: \"{}\" was declared with 'pin' and cannot be reassigned",
+        "E104 လိုင်း {} တွင် \"{}\" ကို 'pin' ဖြင့် ကြေညာထားသဖြင့် ပြန်မသတ်မှတ်နိုင်ပါ။",
         line, name
     )
 }
@@ -6387,7 +6330,7 @@ fn eng_const_reassign_err(name: &str, line: usize) -> String {
 /// tuple, so there are no items to hand out.
 fn destructure_not_collection_err(line: usize, got: &str) -> String {
     format!(
-        "E154 line {}: destructuring needs a list or tuple to take items from, got {}",
+        "E154 လိုင်း {} တွင် ခွဲထုတ်ရန် စာရင်း သို့မဟုတ် tuple လိုအပ်ပါသည်၊ {} ရပါသည်။",
         line, got
     )
 }
@@ -6395,7 +6338,7 @@ fn destructure_not_collection_err(line: usize, got: &str) -> String {
 /// A destructuring assignment whose names and items don't line up.
 fn destructure_count_err(line: usize, names: usize, items: usize) -> String {
     format!(
-        "E155 line {}: destructuring lists {} name(s) but the value has {} item(s)",
+        "E155 လိုင်း {} တွင် အမည် {} ခု ခွဲထုတ်ရန် ရေးထားပြီး တန်ဖိုးတွင် အချက် {} ခု ရှိပါသည်။",
         line, names, items
     )
 }
@@ -6403,7 +6346,7 @@ fn destructure_count_err(line: usize, names: usize, items: usize) -> String {
 /// Error for console input that doesn't parse as the declared type.
 fn eng_input_convert_err(line: usize, text: &str, type_name: &str) -> String {
     format!(
-        "E107 line {}: cannot convert input \"{}\" to {}",
+        "E107 လိုင်း {} တွင် ထည့်သွင်းလိုက်သော \"{}\" ကို {} အဖြစ် ပြောင်း၍မရပါ။",
         line,
         text,
         eng_type_expectation(type_name)
@@ -6413,7 +6356,7 @@ fn eng_input_convert_err(line: usize, text: &str, type_name: &str) -> String {
 /// Coerce one line of console input to an eng-declared type. `str` keeps
 /// the raw text; `int`/`float` parse numbers; `bool` accepts true/false
 /// (any casing) plus the 1/0 spellings.
-fn coerce_eng_input(text: &str, type_name: &str, line: usize) -> Result<Value, String> {
+pub(crate) fn coerce_eng_input(text: &str, type_name: &str, line: usize) -> Result<Value, String> {
     match type_name {
         "str" => Ok(Value::Str(text.to_string())),
         "int" => text
@@ -6436,12 +6379,12 @@ fn coerce_eng_input(text: &str, type_name: &str, line: usize) -> Result<Value, S
 /// Membership, as the `in` / `ထဲ` operator evaluates it: a string searches
 /// for a substring, a list / tuple / set for an equal item, and a dict for a
 /// key -- the same rules as the `contains(xs, x)` builtin.
-fn value_contains(haystack: &Value, needle: &Value, line: usize) -> Result<bool, String> {
+pub(crate) fn value_contains(haystack: &Value, needle: &Value, line: usize) -> Result<bool, String> {
     match haystack {
         Value::Str(s) => match needle {
             Value::Str(n) => Ok(s.contains(n.as_str())),
             other => Err(format!(
-                "E110 line {}: `in` needs a string to search for, got {}",
+                "E110 လိုင်း {} တွင် `in` အတွက် ရှာဖွေမည့် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်။",
                 line,
                 type_name_mm(other)
             )),
@@ -6450,7 +6393,7 @@ fn value_contains(haystack: &Value, needle: &Value, line: usize) -> Result<bool,
         Value::Set(items) => Ok(items.contains(&Key::new(needle.clone()))),
         Value::Dict(pairs) => Ok(pairs.contains_key(&Key::new(needle.clone()))),
         other => Err(format!(
-            "E110 line {}: `in` needs a string or collection on the left, got {}",
+            "E110 လိုင်း {} တွင် `in` ၏ ဘယ်ဘက်တွင် စာသား သို့မဟုတ် စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်။",
             line,
             type_name_mm(other)
         )),
@@ -6528,7 +6471,12 @@ fn convert_target(name: &str) -> Option<&'static str> {
 /// Enforce an eng declaration's type rule on a value and coerce an int to
 /// float for a `:float` annotation (`pi :float = 3;` holds 3.0). Shared by
 /// every eng declaration form, loop-value declarations included.
-fn check_eng_value(name: &str, type_name: &str, v: Value, line: usize) -> Result<Value, String> {
+pub(crate) fn check_eng_value(
+    name: &str,
+    type_name: &str,
+    v: Value,
+    line: usize,
+) -> Result<Value, String> {
     // A callable (a library function bound to a name) may be declared under
     // any type: the annotation describes the value the function returns,
     // which is enforced when it is actually called.
@@ -6545,7 +6493,7 @@ fn check_eng_value(name: &str, type_name: &str, v: Value, line: usize) -> Result
     };
     if !type_ok {
         return Err(format!(
-            "E103 line {}: cannot assign {} to \"{}\" (declared :{}; value must be {})",
+            "E103 လိုင်း {} တွင် {} ကို \"{}\" သို့ သတ်မှတ်၍မရပါ (:{} ဟု ကြေညာထားသဖြင့် တန်ဖိုးသည် {} ဖြစ်ရပါမည်)။",
             line,
             type_name_mm(&v),
             name,
@@ -6575,28 +6523,28 @@ fn eng_type_default(type_name: &str) -> Value {
 }
 
 /// Error for a `pin` name that would redeclare an existing variable.
-fn eng_pin_redeclare_err(name: &str, line: usize) -> String {
+pub(crate) fn eng_pin_redeclare_err(name: &str, line: usize) -> String {
     format!(
-        "E105 line {}: pin \"{}\" cannot redeclare an existing variable",
+        "E105 လိုင်း {} တွင် pin \"{}\" သည် ရှိပြီးသား ကိန်းရှင်ကို ထပ်ကြေညာ၍ မရပါ။",
         line, name
     )
 }
 
 /// `break` (eng or `ရပ်ပါ`) used where there is no loop to stop.
-fn eng_break_outside_loop_err(line: usize) -> String {
-    format!("E116 line {}: 'break' outside a loop", line)
+pub(crate) fn eng_break_outside_loop_err(line: usize) -> String {
+    format!("E116 လိုင်း {} တွင် 'break' ကို ကွင်းအပြင်တွင် သုံး၍မရပါ။", line)
 }
 
 /// A `continue` with no enclosing loop to restart.
-fn eng_continue_outside_loop_err(line: usize) -> String {
-    format!("E134 line {}: 'continue' outside a loop", line)
+pub(crate) fn eng_continue_outside_loop_err(line: usize) -> String {
+    format!("E134 လိုင်း {} တွင် 'continue' ကို ကွင်းအပြင်တွင် သုံး၍မရပါ။", line)
 }
 
 /// A recursion deeper than `MAX_CALL_DEPTH`, reported as a catchable error
 /// instead of letting the interpreter's own stack overflow.
 fn recursion_depth_err(line: usize, limit: usize) -> String {
     format!(
-        "E135 လိုင်း {} တွင် function ခေါ်ဆိုမှု အနက် (recursion) သည် ကန့်သတ်ချက် {} ကို ကျော်လွန်သွားပါသည်။ ထပ်ခါထပ်ခါ မခေါ်ဘဲ ပြန်လည်ရေးသားပါ။",
+        "E135 လိုင်း {} တွင် အလုပ် ခေါ်ဆိုမှု အနက်သည် ကန့်သတ်ချက် {} ကို ကျော်လွန်သွားပါသည်။ ထပ်ခါထပ်ခါ မခေါ်ဘဲ ပြန်လည်ရေးသားပါ။",
         line, limit
     )
 }
@@ -6604,7 +6552,7 @@ fn recursion_depth_err(line: usize, limit: usize) -> String {
 /// A range `for` loop whose step is zero would never reach its end.
 fn zero_step_err(line: usize) -> String {
     format!(
-        "E136 လိုင်း {} တွင် for loop ၏ အဆင့် (step) သည် သုည ဖြစ်၍မရပါ။ သုည ဖြင့် လည်ပတ်လျှင် အဆုံးသို့ ရောက်နိုင်မည် မဟုတ်ပါ။",
+        "E136 လိုင်း {} တွင် for ကွင်း၏ အဆင့်သည် သုည ဖြစ်၍မရပါ။ သုညဖြင့် လည်ပတ်လျှင် အဆုံးသို့ ရောက်နိုင်မည် မဟုတ်ပါ။",
         line
     )
 }
@@ -6613,19 +6561,19 @@ fn zero_step_err(line: usize) -> String {
 /// nothing to assign.
 fn eng_loop_no_value_err(line: usize) -> String {
     format!(
-        "E115 line {}: loop used as a value ended with a bare 'break' -- use `break <value>;`",
+        "E115 လိုင်း {} တွင် တန်ဖိုးအဖြစ် သုံးသော ကွင်းသည် 'break' ဖြင့်သာ ဆုံးသွားပါသည် — `break <value>;` ကို သုံးပါ။",
         line
     )
 }
 
 /// Error for a builtin called with the wrong number or kind of arguments.
 fn eng_builtin_err(line: usize, name: &str, detail: &str) -> String {
-    format!("E110 line {}: {}() {}", line, name, detail)
+    format!("E110 လိုင်း {} တွင် {}() {}", line, name, detail)
 }
 
 fn eng_sqrt_negative_err(line: usize, v: &Value) -> String {
     format!(
-        "E111 line {}: sqrt() needs a non-negative number, got {}",
+        "E111 လိုင်း {} တွင် sqrt() သည် အနုတ်မဟုတ်သော ကိန်း လိုအပ်ပါသည်၊ {} ရပါသည်။",
         line,
         display(v)
     )
@@ -6657,15 +6605,15 @@ fn value_ordering(
 }
 
 /// `return` used where there is no enclosing function to return from.
-fn eng_return_outside_fn_err(line: usize) -> String {
-    format!("E108 line {}: 'return' outside a function", line)
+pub(crate) fn eng_return_outside_fn_err(line: usize) -> String {
+    format!("E108 လိုင်း {} တွင် 'return' ကို အလုပ်အပြင်တွင် သုံး၍မရပါ။", line)
 }
 
 /// A library function used as a value didn't produce one (e.g. the `အချိန်`
 /// library's `စောင့်`/wait, which only carries out an action).
 fn eng_lib_no_value_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
-        "E117 line {}: {}.{}() did not return a value",
+        "E117 လိုင်း {} တွင် {}.{}() သည် တန်ဖိုး ပြန်မပေးပါ။",
         line, lib, fn_name
     )
 }
@@ -6673,7 +6621,7 @@ fn eng_lib_no_value_err(lib: &str, fn_name: &str, line: usize) -> String {
 /// A `name(...)` call naming something that is neither a function nor a builtin.
 fn eng_unknown_fn_err(line: usize, name: &str) -> String {
     format!(
-        "E113 line {}: \"{}\" is not a function or builtin",
+        "E113 လိုင်း {} တွင် \"{}\" သည် အလုပ် သို့မဟုတ် builtin မဟုတ်ပါ။",
         line, name
     )
 }
@@ -6681,12 +6629,12 @@ fn eng_unknown_fn_err(line: usize, name: &str) -> String {
 /// A user function used as a value didn't return anything.
 fn eng_no_return_err(name: &str, line: usize) -> String {
     format!(
-        "E114 line {}: function \"{}\" did not return a value",
+        "E114 လိုင်း {} တွင် အလုပ် \"{}\" သည် တန်ဖိုး ပြန်မပေးပါ။",
         line, name
     )
 }
 
-fn infer_value(s: &str) -> Value {
+pub(crate) fn infer_value(s: &str) -> Value {
     if s == "True" || s == "မှန်" {
         return Value::Bool(true);
     }
@@ -6788,6 +6736,118 @@ fn mentions(expr: &Expr, name: &str) -> bool {
         _ => true,
     }
 }
+
+pub(crate) const SELF_PREFIX: &str = "အတု ";
+
+/// A `{name}` placeholder whose name is not a known variable (`E058`), worded
+/// once for both backends.
+pub(crate) fn interpolate_missing_var_err(name: &str, line: usize) -> String {
+    format!(
+        "E058 လိုင်း {} တွင် စာသား ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
+        line, name, name
+    )
+}
+
+/// The `{အတု <field>}` half of interpolation, shared by both backends: reads a
+/// field off the object currently under construction. `fields` is `None` when
+/// there is no constructor running, which is `E060`.
+pub(crate) fn self_field_lookup(
+    fields: Option<&[(String, Value)]>,
+    field_name: &str,
+    whole: &str,
+    line: usize,
+) -> Result<Value, String> {
+    let fields = fields.ok_or_else(|| {
+        format!(
+            "E060 လိုင်း {} တွင် \"{{{}}}\" ကို ပုံသေ လုပ်ဆောင်ချက် အတွင်းမှာသာ သုံးနိုင်ပါသည်။",
+            line, whole
+        )
+    })?;
+    fields
+        .iter()
+        .find(|(k, _)| k == field_name)
+        .map(|(_, v)| v.clone())
+        .ok_or_else(|| {
+            format!(
+                "E059 လိုင်း {} တွင် စာသား ထဲက \"{{{}}}\" ၌ \"{}\" ဆိုသော အကွက်ကို ရှာမတွေ့ပါ။",
+                line, whole, field_name
+            )
+        })
+}
+
+pub(crate) fn interpolate_text(
+    s: &str,
+    line: usize,
+    mut lookup: impl FnMut(&str) -> Result<Value, String>,
+    mut self_field: impl FnMut(&str, &str) -> Result<Value, String>,
+) -> Result<String, String> {
+    // The fast path is only for a string with nothing to look at: no
+    // placeholder can start without a `{`, and an escaped brace cannot be
+    // unescaped without a `\`. Guarding on `{` alone would leave the
+    // backslash in `"...\}"` -- the piece that closes a JSON body.
+    if !s.contains(['{', '\\']) {
+        return Ok(s.to_string());
+    }
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        // "\{" and "\}" are literal braces. Without them a string could
+        // not carry JSON, CSS, a template or any other brace-carrying text:
+        // every "{" would be read as the start of a placeholder (and the
+        // lexer keeps the backslash, so this is the last place that can
+        // tell the two apart).
+        if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
+            out.push(chars.next().unwrap());
+            continue;
+        }
+        if c == '{' {
+            let mut name = String::new();
+            let mut closed = false;
+            for nc in chars.by_ref() {
+                if nc == '}' {
+                    closed = true;
+                    break;
+                }
+                name.push(nc);
+            }
+            if !closed {
+                return Err(format!(
+                    "E056 လိုင်း {} တွင် စာသား ထဲက \"{{\" ကိုပိတ်ရန် \"}}\" မရှိပါ။",
+                    line
+                ));
+            }
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(format!(
+                    "E057 လိုင်း {} တွင် စာသား ထည့်သွင်းရေးသားမှု \"{{}}\" ထဲမှာ ကိန်းရှင် အမည် လိုအပ်ပါသည်။",
+                    line
+                ));
+            }
+            // "{အတု <field>}" reads the given field off the object currently
+            // under construction (inside a class method), rather than a plain
+            // variable.
+            let field_name = trimmed.strip_prefix(crate::interpreter::SELF_PREFIX);
+            if let Some(field_name) = field_name {
+                let field_name = field_name.trim();
+                if field_name.is_empty() {
+                    return Err(format!(
+                        "E059 လိုင်း {} တွင် စာသား ထည့်သွင်းရေးသားမှု \"{{{}}}\" ထဲမှာ အကွက် အမည် လိုအပ်ပါသည်။",
+                        line, trimmed
+                    ));
+                }
+                let val = self_field(field_name, trimmed)?;
+                out.push_str(&display(&val));
+                continue;
+            }
+            let val = lookup(trimmed)?;
+            out.push_str(&display(&val));
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
 
 #[cfg(test)]
 mod tests {
