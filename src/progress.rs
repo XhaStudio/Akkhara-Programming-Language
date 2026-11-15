@@ -14,6 +14,12 @@
 
 use std::io::IsTerminal;
 
+/// The phase words, in one place so a rename is a one-line change.
+pub const COMPILING: &str = "Compiling";
+pub const BUILDING: &str = "Building";
+pub const RUNNING: &str = "Running";
+pub const FINISHED: &str = "Finished";
+
 /// What the header prints: `[package] name`, `[package] version`, and the
 /// project root, already rendered as a display string.
 pub struct ProjectHeader {
@@ -54,7 +60,7 @@ impl Reporter {
     /// `Compiling {name} {version} ({root})`, before the entry file is read.
     pub fn compiling(&self) {
         if let Some(h) = &self.header {
-            eprintln!("Compiling {} {} ({})", h.name, h.version, h.root);
+            eprintln!("{} {} {} ({})", COMPILING, h.name, h.version, h.root);
         }
     }
 
@@ -66,15 +72,22 @@ impl Reporter {
         }
         let cell = if self.blocks { "\u{2588}" } else { "#" };
         let bar = cell.repeat(WIDTH);
-        eprintln!("Building [{}] 100% ({}/{})", bar, STEPS, STEPS);
+        eprintln!("{} [{}] 100% ({}/{})", BUILDING, bar, STEPS, STEPS);
     }
 
     /// `Running`, then the one blank line the program's output follows.
     pub fn running(&self) {
         if self.header.is_some() {
-            eprintln!("Running");
+            eprintln!("{}", RUNNING);
             eprintln!();
         }
+    }
+
+    /// `Finished {path} ({bytes} bytes)`: `akk build`'s closing line, printed
+    /// once the file is complete and verified. Not tied to a project header:
+    /// a build has none and still reports what it wrote.
+    pub fn finished(&self, path: &str, bytes: u64) {
+        eprintln!("{} {} ({} bytes)", FINISHED, path, bytes);
     }
 }
 
