@@ -257,7 +257,7 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
     // Parse once as a `toml::Value` so the key walk below can see every key
     // that was written, then once through serde for the values themselves.
     let raw_value: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("E146 akk.toml ကို parse လုပ်၍မရပါ - {}", e))?;
+        toml::from_str(&text).map_err(|e| format!("E146 akk.toml ကို ခွဲခြမ်းစိတ်ဖြာ လုပ်၍မရပါ - {}", e))?;
     let raw: RawManifest =
         toml::from_str(&text).map_err(|e| format!("E147 akk.toml ၏ တန်ဖိုး မမှန်ပါ - {}", e))?;
 
@@ -322,11 +322,13 @@ fn parse_build(raw: Option<RawBuild>, package: &Package) -> Result<Build, String
     let raw = raw.unwrap_or_default();
 
     let mode = match raw.mode.as_deref().unwrap_or("bundle") {
-        "bundle" => BuildMode::Bundle,
+        // `interpreter` is the long spelling of the default: the built file
+        // carries the source and runs it on the tree-walking interpreter.
+        "bundle" | "interpreter" => BuildMode::Bundle,
         "bytecode" => BuildMode::Bytecode,
         other => {
             return Err(format!(
-                "E147 akk.toml ၏ [build] mode \"{}\" ကို မသိပါ။ \"bundle\" သို့မဟုတ် \"bytecode\" ကို သုံးပါ။",
+                "E147 akk.toml ၏ [build] mode \"{}\" ကို မသိပါ။ \"ထုပ်ပိုးဖိုင်\" သို့မဟုတ် \"bytecode\" ကို သုံးပါ။",
                 other
             ))
         }
@@ -401,14 +403,14 @@ fn parse_dependencies(raw: Option<toml::Table>) -> Result<Vec<Dependency>, Strin
                     return Err(invalid_value(
                         "[dependencies]",
                         &name,
-                        "path နှင့် git ကို တစ်ခုတည်း ရွေးပါ",
+                        "လမ်းကြောင်းနှင့် git ကို တစ်ခုတည်း ရွေးပါ",
                     ))
                 }
                 _ => {
                     return Err(invalid_value(
                         "[dependencies]",
                         &name,
-                        "path သို့မဟုတ် git ကို ပေးရပါမည်",
+                        "လမ်းကြောင်း သို့မဟုတ် git ကို ပေးရပါမည်",
                     ))
                 }
             }
@@ -475,11 +477,11 @@ fn warn_unknown(table: &toml::Table, known: &[&str], section: Option<&str>, out:
         }
         out.push(match section {
             Some(section) => format!(
-                "W008 akk.toml ၏ {} တွင် \"{}\" ဆိုသော key ကို မသိပါ (unknown key)။",
+                "W008 akk.toml ၏ {} တွင် \"{}\" ဆိုသော သော့ကို မသိပါ။",
                 section, key
             ),
             None => format!(
-                "W008 akk.toml တွင် \"{}\" ဆိုသော key ကို မသိပါ (unknown key)။",
+                "W008 akk.toml တွင် \"{}\" ဆိုသော သော့ကို မသိပါ။",
                 key
             ),
         });
@@ -534,7 +536,7 @@ impl Manifest {
                 if !full.exists() {
                     return Err(unresolved(
                         &dependency.name,
-                        &format!("\"{}\" path ကို ရှာမတွေ့ပါ", full.display()),
+                        &format!("\"{}\" လမ်းကြောင်းကို ရှာမတွေ့ပါ", full.display()),
                     ));
                 }
                 loader.add_dependency(&dependency.name, full);
@@ -570,7 +572,7 @@ fn unresolved(name: &str, detail: &str) -> String {
         format!(" ({})", detail)
     };
     format!(
-        "E149 akk.toml ၏ dependency \"{}\" ကို ရှာမတွေ့ပါ{}။ \"akk install {}\" ဖြင့် ထည့်သွင်းပါ၊ [dependencies] တွင် path ကို သတ်မှတ်ပါ၊ သို့မဟုတ် \"{}.akk\" ဖိုင်ကို project root တွင် ထားပါ။",
+        "E149 akk.toml ၏ မှီခိုချက် \"{}\" ကို ရှာမတွေ့ပါ{}။ \"akk install {}\" ဖြင့် ထည့်သွင်းပါ၊ [dependencies] တွင် လမ်းကြောင်းကို သတ်မှတ်ပါ၊ သို့မဟုတ် \"{}.akk\" ဖိုင်ကို ပရောဂျက် root တွင် ထားပါ။",
         name, hint, name, name
     )
 }
