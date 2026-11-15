@@ -41,6 +41,84 @@ when it succeeds, the error message when it fails (a program that fails
 before printing anything leaves just the error). The file is written on every
 run, success or failure, and each run overwrites it.
 
+### akk build
+
+`akk build` writes one executable for the project in the current folder:
+
+```
+cd demo
+akk build
+.\build\demo.exe
+```
+
+The output file is **a copy of the `akk` you ran, with the program appended
+to the end of it**. It is not machine code, nothing is translated, and it does
+not start or run any faster than `akk run` on the same source: a built program
+only saves typing the command. Open the built file in a text editor and the
+program's source is there, readable, after the interpreter's bytes — so a
+built file is not a way to keep source secret.
+
+When the file starts, the interpreter inside it finds the appended program and
+runs it exactly as `akk run src/main.akk` would: same output, same error
+messages, same exit code, and the same `<name>.akop` transcript, written
+beside the executable (`build\demo.akop`). Every command-line argument is
+ignored except `--no-warn` — `demo.exe update` runs the program, not the
+updater. A built program makes no `libraries` folder and prints no
+`Compiling`/`Building`/`Running` header.
+
+What is carried inside the file:
+
+- the entry file's source (from `[package] entry`, default `src/main.akk`);
+- every `[dependencies] ... { path = ... }` script it uses;
+- every neighbouring `<name>.akk` script its `use` statements reach, directly
+  or through another script.
+
+What is **not** carried inside:
+
+- packages installed under `libraries\` (anything `akk install` put there).
+  They are read from the `libraries` folder next to the built executable at
+  run time, so copy that folder beside the executable if the program uses an
+  installed library;
+- `[build.bundle] include` files — not implemented yet, and a manifest with a
+  non-empty `include` is refused instead of silently dropped;
+- the source text, when `[build] mode = "bytecode"`: the program is compiled
+  to bytecode first (`AKKBC001` plus the instruction stream) and the build
+  embeds that instead of the `.akk` source. A construct the bytecode backend
+  does not implement yet is refused at build time with `E170` rather than
+  compiled into behaviour that differs from `akk run`.
+
+At run time the file checks the appended program first: the length, the
+header, and three CRC-32 checksums. A file that was truncated, edited or
+partly copied prints an error and runs nothing.
+
+Platforms: **Windows and Linux**. macOS and anything else are refused with
+`E165`, because appending bytes to a signed arm64 binary would break its
+signature.
+
+Where the output goes: `[build] out_dir` (default `build`) under the project
+root, named `[build] output` (default the package name) plus `.exe` on
+Windows, or `[target.windows] output` on Windows when the manifest sets it.
+The name must be one file name — no folder, no `..` — otherwise `E147`.
+Building writes no `.akop` and does not run the program.
+
+Errors `akk build` can report:
+
+| Code | Meaning |
+| --- | --- |
+| `E159` | a built file is damaged (run time: trailer, header, length or CRC) |
+| `E160` | a built file's format version or kind is not understood (run time) |
+| `E161` | the slot was not found exactly once in the copy, or `akk` is itself a built file |
+| `E163` | a `use` script was found but could not be read |
+| `E164` | a build option is not implemented (`[build.bundle] include`) |
+| `E170` | the program uses something `mode = "bytecode"` cannot compile yet |
+| `E165` | bundles are not supported on this platform |
+| `E168` | writing the output failed (creating `out_dir`, copying, writing, renaming) |
+
+> Antivirus note: a program that copies its own executable and writes it to
+> disk looks like a packer to some scanners, and a freshly built file may be
+> quarantined. That is a false positive about the copying, not about the
+> program; add an exclusion for the project folder if it happens.
+
 ## Performance
 
 The interpreter is a Rust binary, and for anything with functions in it most of
