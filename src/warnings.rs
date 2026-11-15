@@ -862,7 +862,7 @@ fn stmt_line(s: &Stmt) -> Option<usize> {
 
 fn w001(line: usize, name: &str) -> String {
     format!(
-        "W001 လိုင်း {} ၏ variable \"{}\" ကို အသုံးမပြုထားပါ (unused variable)။",
+        "W001 လိုင်း {} ၏ ကိန်းရှင် \"{}\" ကို အသုံးမပြုထားပါ။",
         line, name
     )
 }
@@ -883,39 +883,39 @@ fn library_sibling(name: &str) -> Option<&'static str> {
 
 fn w002(line: usize, lib: &str) -> String {
     format!(
-        "W002 လိုင်း {} ၏ အသုံးပြုရန် ခေါ်ထားသော \"{}\" library ကို အသုံးမပြုထားပါ (unused import)။",
+        "W002 လိုင်း {} ၏ အသုံးပြုရန် ခေါ်ထားသော \"{}\" နည်းပညာကို အသုံးမပြုထားပါ။",
         line, lib
     )
 }
 
 fn w003(line: usize) -> String {
-    format!("W003 လိုင်း {} ၏ statement ကို ရောက်ရှိမည် မဟုတ်ပါ (dead code)။", line)
+    format!("W003 လိုင်း {} ၏ ညွှန်ကြားချက်ကို ရောက်ရှိမည် မဟုတ်ပါ။", line)
 }
 
 fn w004(line: usize, func: &str, param: &str) -> String {
     format!(
-        "W004 လိုင်း {} ၏ function \"{}\" argument \"{}\" ကို အသုံးမပြုထားပါ (unused argument)။",
+        "W004 လိုင်း {} ၏ အလုပ် \"{}\" အချက် \"{}\" ကို အသုံးမပြုထားပါ။",
         line, func, param
     )
 }
 
 fn w005(line: usize, name: &str) -> String {
     format!(
-        "W005 လိုင်း {} ၏ function \"{}\" ကို ခေါ်သုံးမထားပါ (unused function)။",
+        "W005 လိုင်း {} ၏ အလုပ် \"{}\" ကို ခေါ်သုံးမထားပါ။",
         line, name
     )
 }
 
 fn w006(line: usize) -> String {
     format!(
-        "W006 လိုင်း {} ၏ statement သည် ဘာအကျိုးသက်ရောက်မှုမှ မရှိပါ (statement with no effect)။",
+        "W006 လိုင်း {} ၏ ညွှန်ကြားချက်သည် ဘာအကျိုးသက်ရောက်မှုမှ မရှိပါ။",
         line
     )
 }
 
 fn w007(line: usize) -> String {
     format!(
-        "W007 လိုင်း {} ၏ နှိုင်းယှဉ်ချက် ရလဒ်ကို အသုံးမပြုထားပါ (unused comparison)။",
+        "W007 လိုင်း {} ၏ နှိုင်းယှဉ်ချက် ရလဒ်ကို အသုံးမပြုထားပါ။",
         line
     )
 }
