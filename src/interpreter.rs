@@ -1082,14 +1082,134 @@ fn app_parse_number(text: &str) -> Option<Value> {
 
 // --- Errors for the `<lib> ၏ <fn>(...) ကို လုပ်ပါ။` library-call syntax. ---
 
-fn lib_unknown_err(lib: &str, line: usize) -> String {
+/// Is `lib` one of the libraries whose functions only read their argument
+/// values? Those are dispatched by [`lib_value_call`], from both backends.
+pub(crate) fn lib_is_value_library(lib: &str) -> bool {
+    matches!(lib, "ကျပန်း" | "အချိန်")
+}
+
+/// How many arguments the value-only library function `fn_name` takes, or
+/// `E086` when the library has no such function. Resolved before the arguments
+/// are evaluated, exactly as the arms used to do it.
+pub(crate) fn lib_value_arity(lib: &str, fn_name: &str, line: usize) -> Result<usize, String> {
+    let want = match (lib, fn_name) {
+        ("ကျပန်း", "ကိန်း" | "ကိန်ပြည့်" | "random_int") => 2,
+        ("ကျပန်း", "ဒဿမ" | "random_float") => 2,
+        ("ကျပန်း", "တန်ဖိုး" | "value") => 1,
+        ("အချိန်", "စောင့်" | "wait") => 1,
+        ("အချိန်", "ယခု" | "now") => 0,
+        _ => return Err(lib_fn_unknown_err(lib, fn_name, line)),
+    };
+    Ok(want)
+}
+
+/// The value-based calls of the value-only libraries. `အချိန် ၏ စောင့်`
+/// answers `None` (it acts, it has no result); everything else is `Some`.
+pub(crate) fn lib_value_call(
+    lib: &str,
+    fn_name: &str,
+    args: &[Value],
+    line: usize,
+) -> Result<Option<Value>, String> {
+    match lib {
+            "ကျပန်း" => {
+                match fn_name {
+                    "ကိန်း" | "ကိန်ပြည့်" | "random_int" => {
+                        let min_v = args[0].clone();
+                        let max_v = args[1].clone();
+                        let min_i =
+                            as_i64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_i =
+                            as_i64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        Ok(Some(Value::Int(crate::random_library::random_int(
+                            min_i, max_i,
+                        )?)))
+            }
+                    "ဒဿမ" | "random_float" => {
+                        let min_v = args[0].clone();
+                        let max_v = args[1].clone();
+                        let min_f =
+                            as_f64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        let max_f =
+                            as_f64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        Ok(Some(Value::Float(crate::random_library::random_float(
+                            min_f, max_f,
+                        )?)))
+            }
+                    // တန်ဖိုး(<collection>) -- pick one element at random from a
+                    // list / tuple / set / string.
+                    "တန်ဖိုး" | "value" => {
+                        let v = args[0].clone();
+                        let items: Vec<Value> = match &v {
+                            Value::List(items) => items.clone(),
+                            Value::Tuple(items) => items.clone(),
+                            Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
+                            Value::Str(s) => crate::text::clusters(s)
+                                .into_iter()
+                                .map(|c| Value::Str(c.to_string()))
+                                .collect(),
+                            _ => return Err(lib_fn_collection_err(lib, fn_name, line)),
+                        };
+                        let picked = crate::random_library::random_value(&items)
+                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
+                        Ok(Some(picked))
+            }
+                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+        }
+            }
+            "အချိန်" => {
+                match fn_name {
+                    "စောင့်" | "wait" => {
+                        let amount_v = args[0].clone();
+                        let secs = as_f64(&amount_v)
+                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
+                        crate::time_library::wait(secs, crate::time_library::WaitUnit::Seconds)?;
+                        Ok(None)
+            }
+                    "ယခု" | "now" => {
+                        Ok(Some(Value::Int(crate::time_library::now())))
+            }
+                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+        }
+            }
+        _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+    }
+}
+
+/// `E087` when `argc` is not the `want` a library function needs.
+pub(crate) fn lib_fn_argc_count(
+    lib: &str,
+    fn_name: &str,
+    argc: usize,
+    want: usize,
+    line: usize,
+) -> Result<(), String> {
+    if argc == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "E087 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် အချက် {} ခု လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+            line, lib, fn_name, want, argc
+        ))
+    }
+}
+
+/// `E089`: the library has not been imported.
+pub(crate) fn lib_not_imported_err(lib: &str, line: usize) -> String {
+    format!(
+        "E089 လိုင်း {} တွင် \"{}\" ကို သုံးရန် \"နည်းပညာများ {} ကို သုံးမည်။\" ဖြင့် နည်းပညာများကို အရင်ထည့်သွင်းရပါမည်။",
+        line, lib, lib
+    )
+}
+
+pub(crate) fn lib_unknown_err(lib: &str, line: usize) -> String {
     format!(
         "E085 လိုင်း {} တွင် \"{}\" ဆိုသော နည်းပညာများကို ရှာမတွေ့ပါ။",
         line, lib
     )
 }
 
-fn lib_fn_unknown_err(lib: &str, fn_name: &str, line: usize) -> String {
+pub(crate) fn lib_fn_unknown_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
         "E086 လိုင်း {} တွင် \"{}\" နည်းပညာများတွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
         line, lib, fn_name
@@ -3171,6 +3291,20 @@ impl Interpreter {
     ) -> Result<Option<Value>, String> {
         let resolved = self.resolve_lib(lib);
         let lib = resolved.as_str();
+        // Libraries whose functions look only at their argument *values*
+        // (`ကျပန်း`, `အချိန်`) run through one value-based function, so the
+        // bytecode VM can call exactly the same code. The argument count is
+        // still checked before the arguments are evaluated, as it was.
+        if lib_is_value_library(lib) {
+            self.require_library_loaded(lib, line)?;
+            let want = lib_value_arity(lib, fn_name, line)?;
+            lib_fn_argc_count(lib, fn_name, args.len(), want, line)?;
+            let mut values: Vec<Value> = Vec::with_capacity(args.len());
+            for a in args {
+                values.push(self.eval(a, line, None)?);
+            }
+            return lib_value_call(lib, fn_name, &values, line);
+        }
         match lib {
             "request" => {
                 self.require_library_loaded(LIB_REQUEST_NAME, line)?;
@@ -3190,73 +3324,6 @@ impl Interpreter {
                             crate::request_library::post(&display(&url_v), &display(&data_v))
                                 .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
                         Ok(Some(http_response_to_value(resp)))
-                    }
-                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
-                }
-            }
-            "ကျပန်း" => {
-                self.require_library_loaded("ကျပန်း", line)?;
-                match fn_name {
-                    "ကိန်း" | "ကိန်ပြည့်" | "random_int" => {
-                        lib_fn_argc(lib, fn_name, args, 2, line)?;
-                        let min_v = self.eval(&args[0], line, None)?;
-                        let max_v = self.eval(&args[1], line, None)?;
-                        let min_i =
-                            as_i64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        let max_i =
-                            as_i64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        Ok(Some(Value::Int(crate::random_library::random_int(
-                            min_i, max_i,
-                        )?)))
-                    }
-                    "ဒဿမ" | "random_float" => {
-                        lib_fn_argc(lib, fn_name, args, 2, line)?;
-                        let min_v = self.eval(&args[0], line, None)?;
-                        let max_v = self.eval(&args[1], line, None)?;
-                        let min_f =
-                            as_f64(&min_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        let max_f =
-                            as_f64(&max_v).ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        Ok(Some(Value::Float(crate::random_library::random_float(
-                            min_f, max_f,
-                        )?)))
-                    }
-                    // တန်ဖိုး(<collection>) -- pick one element at random from a
-                    // list / tuple / set / string.
-                    "တန်ဖိုး" | "value" => {
-                        lib_fn_argc(lib, fn_name, args, 1, line)?;
-                        let v = self.eval(&args[0], line, None)?;
-                        let items: Vec<Value> = match &v {
-                            Value::List(items) => items.clone(),
-                            Value::Tuple(items) => items.clone(),
-                            Value::Set(items) => items.iter().map(|k| k.value().clone()).collect(),
-                            Value::Str(s) => crate::text::clusters(s)
-                                .into_iter()
-                                .map(|c| Value::Str(c.to_string()))
-                                .collect(),
-                            _ => return Err(lib_fn_collection_err(lib, fn_name, line)),
-                        };
-                        let picked = crate::random_library::random_value(&items)
-                            .map_err(|e| format!("{} (လိုင်း {})", e, line))?;
-                        Ok(Some(picked))
-                    }
-                    _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
-                }
-            }
-            "အချိန်" => {
-                self.require_library_loaded("အချိန်", line)?;
-                match fn_name {
-                    "စောင့်" | "wait" => {
-                        lib_fn_argc(lib, fn_name, args, 1, line)?;
-                        let amount_v = self.eval(&args[0], line, None)?;
-                        let secs = as_f64(&amount_v)
-                            .ok_or_else(|| lib_fn_argtype_err(lib, fn_name, line))?;
-                        crate::time_library::wait(secs, crate::time_library::WaitUnit::Seconds)?;
-                        Ok(None)
-                    }
-                    "ယခု" | "now" => {
-                        lib_fn_argc(lib, fn_name, args, 0, line)?;
-                        Ok(Some(Value::Int(crate::time_library::now())))
                     }
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
                 }
@@ -4629,10 +4696,7 @@ impl Interpreter {
     fn find_function(&self, name: &str, line: usize) -> Result<Rc<FnDef>, String> {
         match self.functions.get(name) {
             Some(v) => Ok(Rc::clone(v)),
-            None => Err(format!(
-                "E031 လိုင်း {} တွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
-                line, name
-            )),
+            None => Err(eng_missing_function_err(line, name)),
         }
     }
 
@@ -4649,15 +4713,7 @@ impl Interpreter {
         // arguments -- but never fewer than the parameters without one.
         let required = function.2.iter().filter(|d| d.is_none()).count();
         if argc < required || argc > total {
-            let expected = if required == total {
-                format!("အချက် {} ခု", total)
-            } else {
-                format!("အချက် {} မှ {} ခု", required, total)
-            };
-            return Err(format!(
-                "E033 လိုင်း {} တွင် \"{}\" အလုပ်သည် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
-                line, name, expected, argc
-            ));
+            return Err(eng_arity_err(name, argc, required, total, line));
         }
         Ok(())
     }
@@ -5096,7 +5152,20 @@ impl Interpreter {
         for e in arg_exprs {
             args.push(self.eval(e, line, None)?);
         }
+        Self::builtin_value_result(name, &args, line)
+    }
 
+    /// Run a pure builtin on already-evaluated arguments.
+    ///
+    /// Split out of `call_builtin` so the bytecode VM can run the same code on
+    /// the values it popped: one implementation means `len`, `sqrt` and the
+    /// rest cannot drift between the two backends, including their `E111` and
+    /// wrong-argument messages.
+    pub(crate) fn builtin_value_result(
+        name: &str,
+        args: &[Value],
+        line: usize,
+    ) -> Result<Value, String> {
         let one_arg = || -> Result<(), String> {
             if args.len() == 1 {
                 Ok(())
@@ -5147,7 +5216,7 @@ impl Interpreter {
                         other => vec![other.clone()],
                     }
                 } else {
-                    args.clone()
+                    args.to_vec()
                 };
                 if candidates.is_empty() {
                     return Err(bad_arg("အနည်းဆုံး တန်ဖိုး တစ်ခု လိုအပ်ပါသည်".to_string()));
@@ -5512,7 +5581,6 @@ impl Interpreter {
             },
         }
     }
-
     /// Run one of the builtins that change the list their first argument
     /// names: `push`, `append`, `pop`, `insert`, `remove`, `sort`, `reverse`.
     /// The first argument must be a variable (`push(xs, 4);`), because a
@@ -6402,7 +6470,7 @@ pub(crate) fn value_contains(haystack: &Value, needle: &Value, line: usize) -> R
 
 /// The eng library's built-in helpers. They're core syntax, so they work
 /// without importing anything.
-fn is_eng_builtin(name: &str) -> bool {
+pub(crate) fn is_eng_builtin(name: &str) -> bool {
     matches!(
         name,
         "len"
@@ -6445,7 +6513,7 @@ fn is_eng_builtin(name: &str) -> bool {
 
 /// The builtins that change the list their first argument names, rather than
 /// returning a new one. See `call_mutating_builtin`.
-fn is_mutating_builtin(name: &str) -> bool {
+pub(crate) fn is_mutating_builtin(name: &str) -> bool {
     matches!(
         name,
         "push" | "append" | "pop" | "insert" | "remove" | "sort"
@@ -6513,7 +6581,7 @@ pub(crate) fn check_eng_value(
 
 /// The value an eng declaration seeds before its `loop { ... }` runs, so the
 /// body has something to accumulate into.
-fn eng_type_default(type_name: &str) -> Value {
+pub(crate) fn eng_type_default(type_name: &str) -> Value {
     match type_name {
         "int" => Value::Int(0),
         "float" => Value::Float(0.0),
@@ -6559,7 +6627,7 @@ fn zero_step_err(line: usize) -> String {
 
 /// A `loop { ... }` used as a value ended with a bare `break`, so it has
 /// nothing to assign.
-fn eng_loop_no_value_err(line: usize) -> String {
+pub(crate) fn eng_loop_no_value_err(line: usize) -> String {
     format!(
         "E115 လိုင်း {} တွင် တန်ဖိုးအဖြစ် သုံးသော ကွင်းသည် 'break' ဖြင့်သာ ဆုံးသွားပါသည် — `break <value>;` ကို သုံးပါ။",
         line
@@ -6567,7 +6635,7 @@ fn eng_loop_no_value_err(line: usize) -> String {
 }
 
 /// Error for a builtin called with the wrong number or kind of arguments.
-fn eng_builtin_err(line: usize, name: &str, detail: &str) -> String {
+pub(crate) fn eng_builtin_err(line: usize, name: &str, detail: &str) -> String {
     format!("E110 လိုင်း {} တွင် {}() {}", line, name, detail)
 }
 
@@ -6611,10 +6679,39 @@ pub(crate) fn eng_return_outside_fn_err(line: usize) -> String {
 
 /// A library function used as a value didn't produce one (e.g. the `အချိန်`
 /// library's `စောင့်`/wait, which only carries out an action).
-fn eng_lib_no_value_err(lib: &str, fn_name: &str, line: usize) -> String {
+pub(crate) fn eng_lib_no_value_err(lib: &str, fn_name: &str, line: usize) -> String {
     format!(
         "E117 လိုင်း {} တွင် {}.{}() သည် တန်ဖိုး ပြန်မပေးပါ။",
         line, lib, fn_name
+    )
+}
+
+/// A call naming a function that is not defined at all. Raised at run time,
+/// before the arguments are evaluated, and catchable by a `try`.
+pub(crate) fn eng_missing_function_err(line: usize, name: &str) -> String {
+    format!(
+        "E031 လိုင်း {} တွင် \"{}\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။",
+        line, name
+    )
+}
+
+/// A call that supplies the wrong number of arguments. Also a run-time error
+/// raised before the arguments are evaluated.
+pub(crate) fn eng_arity_err(
+    name: &str,
+    argc: usize,
+    required: usize,
+    total: usize,
+    line: usize,
+) -> String {
+    let expected = if required == total {
+        format!("အချက် {} ခု", total)
+    } else {
+        format!("အချက် {} မှ {} ခု", required, total)
+    };
+    format!(
+        "E033 လိုင်း {} တွင် \"{}\" အလုပ်သည် {} လိုအပ်ပါသည်၊ {} ခု ပေးထားပါသည်။",
+        line, name, expected, argc
     )
 }
 
@@ -6627,7 +6724,7 @@ fn eng_unknown_fn_err(line: usize, name: &str) -> String {
 }
 
 /// A user function used as a value didn't return anything.
-fn eng_no_return_err(name: &str, line: usize) -> String {
+pub(crate) fn eng_no_return_err(name: &str, line: usize) -> String {
     format!(
         "E114 လိုင်း {} တွင် အလုပ် \"{}\" သည် တန်ဖိုး ပြန်မပေးပါ။",
         line, name
