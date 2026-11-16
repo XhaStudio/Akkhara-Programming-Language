@@ -1,5 +1,5 @@
 //! A real bytecode compiler and virtual machine.
-//!/
+//!
 //! The interpreter walks the parsed statements directly. This module is the
 //! other half: [`compile`] turns the same [`Stmt`] tree into a flat list of
 //! [`Instr`] and [`Vm`] executes that list on a stack machine, so a program
@@ -18,16 +18,39 @@
 //! helpers, so printing and the missing-key error (`E053`) are identical in
 //! both backends.
 //!
-//! Anything else -- classes, libraries, `input`, JSON, App -- is refused with
-//! `E170` at compile time rather than silently behaving differently from the
-//! interpreter.
+//! `try`/`catch`/`finally` compile to handler instructions and a stack unwind,
+//! and `loop { ... break <value>; }` compiles to a loop that keeps the break
+//! value in a temporary slot -- both with the unwinding and the ordering the
+//! interpreter uses.
+//!
+//! Builtin calls compile to one `Builtin` instruction each, resolved by name
+//! at compile time and run by the interpreter's own value-based builtin code,
+//! so results and error messages are shared rather than reimplemented.
+//!
+//! Builtin libraries whose functions only read their argument values
+//! (`ကျပန်း`, `အချိန်`) import and call through `UseLib`/`RequireLib`/`LibCall`,
+//! again running the interpreter's own dispatch. Their failures keep the
+//! interpreter's codes and ordering: `E089` before the arguments are
+//! evaluated, `E086`/`E087` before them too, `E117`/`E088` after the call.
+//!
+//! The callback builtins `map`, `filter` and `reduce` compile to `IterItems`
+//! (the value turned into the items they walk, with the interpreter's `E110`)
+//! followed by `HigherOrder`, which calls each item's callback. A lambda in the
+//! callback position is compiled into a function body of its own, exactly as a
+//! named function is, so both go through the same `E033`/`E114` checks.
+//!
+//! Whatever the compiler cannot express yet -- the windows/server/json/file
+//! libraries, script/package libraries, default parameters, the mutating
+//! builtins (`push`, `sort`, ...), a lambda used anywhere but as a callback,
+//! and a few other expression forms -- is refused with `E170` at compile time
+//! rather than silently behaving differently from the interpreter.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::interpreter::{value_contains, value_eq, Key, ObjectValue, Value};
+use crate::interpreter::{value_contains, value_eq, Interpreter, Key, ObjectValue, Value};
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, IfBranch, LogicalOp, Stmt};
 
 /// One instruction. Every jump holds an absolute index into its own chunk
@@ -35,7 +58,7 @@ use crate::parser::{CondAtom, CondChain, Expr, ForSource, IfBranch, LogicalOp, S
 #[derive(Debug, Clone)]
 pub enum Instr {
     Const(Value),
-    Load(String),
+    Load(String, u32),
     Store(String),
     Pop,
     Add,
@@ -139,6 +162,53 @@ pub enum Instr {
     /// Drop `count` handlers: how a `break`/`continue`/`return` leaves the
     /// `try` blocks it sits inside.
     PopHandlers(u8),
+    /// Mark `name` as a constant (`pin`), without writing a value to it: a
+    /// `pin X :<type> = loop { ... }` seeds and declares the name before the
+    /// loop, so only the constant mark is left for the end.
+    MarkConst(String),
+    /// `E105` when `name` already exists, without declaring anything: the
+    /// up-front half of a `pin` loop value, which must refuse a redeclaration
+    /// before the loop body runs.
+    PinDeclareCheck(String, u32),
+    /// Call the builtin `name` with `argc` evaluated arguments from the stack.
+    /// The name is resolved when the call is compiled, and the work is done by
+    /// the interpreter's own value-based builtin code, so messages and results
+    /// cannot drift between the backends. `line` points `E111` and the
+    /// wrong-argument errors at the call.
+    Builtin(String, u8, u32),
+    /// Import the builtin library `name` (every spelling it answers to), the
+    /// way `နည်းပညာများ ... ကို သုံးမည်။` does when it runs.
+    UseLib(String),
+    /// `E089` unless the library `name` has been imported: compiled *before*
+    /// a call's arguments, matching the interpreter's order.
+    RequireLib(String, u32),
+    /// Call the library function `lib.fn` with `argc` evaluated arguments.
+    /// `err` is the message to raise when the call produces no value or when
+    /// the value is required (empty: put `null` on the stack instead).
+    LibCall(String, String, u8, u32, String),
+    /// Return with a value: the function's last expression, its last
+    /// declaration, or an explicit `return <expr>;`.
+    ReturnValue(u32),
+    /// Return without one: the function's body ended on a statement that yields
+    /// nothing, or on a bare `return;`. A caller that demanded a value turns
+    /// this into `E071`.
+    ReturnVoid(u32),
+    /// Call the user function `index`, storing its result. `err` is the `E071`
+    /// message to raise when the body returns nothing.
+    CallValue(usize, u8, u32, String),
+    /// Turn the collection on top of the stack into a list of the items
+    /// `map`/`filter`/`reduce` walk: a list or tuple as it is, a set's and a
+    /// dictionary's values in insertion order, a string's clusters. Anything
+    /// else is the interpreter's `E110`, raised here -- before `reduce`'s
+    /// starting value is evaluated, which is the interpreter's order.
+    /// `kind` selects the builtin named in that message (0 map, 1 filter,
+    /// 2 reduce).
+    IterItems(u8, u32),
+    /// `map`/`filter`/`reduce` with the items list (pushed by `IterItems`) and,
+    /// for `reduce`, its starting value on the stack. `callback` is the
+    /// function slot the lambda or named callback compiled to; `err` is the
+    /// `E114` message to raise when it returns nothing.
+    HigherOrder(u8, usize, u32, String),
     /// End of the top-level chunk.
     Halt,
 }
@@ -168,6 +238,33 @@ pub struct Program {
     pub classes: Vec<ClassDef>,
 }
 
+/// A builtin the VM can run from evaluated values alone.
+///
+/// The mutating list builtins (`push`, `pop`, ...) and `reverse` reach for a
+/// variable rather than a value, so they stay `E170` in bytecode mode.
+/// `map`/`filter`/`reduce` are not value-only either, but they have their own
+/// instructions -- see [`is_higher_order`].
+fn is_pure_builtin(name: &str) -> bool {
+    crate::interpreter::is_eng_builtin(name)
+        && !crate::interpreter::is_mutating_builtin(name)
+        && !matches!(name, "reverse" | "map" | "filter" | "reduce")
+}
+
+/// The callback builtins: `map`, `filter` and `reduce`. They walk a value and
+/// call a function for every item, so they compile to `IterItems` plus
+/// `HigherOrder` with the lambda (or named function) as its own body.
+fn is_higher_order(name: &str) -> bool {
+    crate::interpreter::is_eng_builtin(name) && matches!(name, "map" | "filter" | "reduce")
+}
+
+fn higher_order_name(kind: u8) -> &'static str {
+    match kind {
+        0 => "map",
+        1 => "filter",
+        _ => "reduce",
+    }
+}
+
 fn unsupported(line: usize, what: &str) -> String {
     format!(
         "E170 လိုင်း {} တွင် {} ကို bytecode ဖြင့် မထောက်ပံ့သေးပါ။ `akk` (interpreter) ဖြင့် ဖွင့်ပါ။",
@@ -193,10 +290,10 @@ fn div_zero() -> String {
     "E173 တွင် သုညဖြင့် စား၍မရပါ။".to_string()
 }
 
-fn unknown_var(name: &str) -> String {
+fn unknown_var(name: &str, line: usize) -> String {
     format!(
-        "E030 တွင် \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
-        name
+        "E030 လိုင်း {} တွင် \"{}\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။",
+        line, name
     )
 }
 
@@ -211,6 +308,10 @@ struct LoopCtx {
     start: usize,
     breaks: Vec<usize>,
     continues: Vec<usize>,
+    /// Set while compiling a `loop { }` used as a value: the temporary slot a
+    /// `break <value>` writes its value to, and the loop statement's line
+    /// (which `E115` points at when a `break` carries no value).
+    break_value: Option<(String, usize)>,
     /// How many `try` handlers were live when the loop started, so a
     /// `break`/`continue` out of a `try` inside the loop drops exactly the
     /// handlers it leaves behind.
@@ -224,6 +325,12 @@ struct Compiler {
     /// Slot in `funcs` by name, so a call compiles even before the callee's
     /// body is written.
     slots: HashMap<String, usize>,
+    /// `(total, required)` parameters of each function, so a call with the
+    /// wrong argument count can be refused the way the interpreter refuses it.
+    arities: HashMap<String, (usize, usize)>,
+    /// Library alias -> the library's real name (`r` -> `ကျပန်း`), from
+    /// `... အဖြစ် r` and `<lib> အဖြစ် r။`.
+    lib_aliases: HashMap<String, String>,
     /// Class name -> its slot in `classes`.
     class_slots: HashMap<String, usize>,
     classes: Vec<ClassDef>,
@@ -241,6 +348,8 @@ impl Compiler {
             code: Vec::new(),
             funcs: Vec::new(),
             slots: HashMap::new(),
+            arities: HashMap::new(),
+            lib_aliases: HashMap::new(),
             class_slots: HashMap::new(),
             classes: Vec::new(),
             loops: Vec::new(),
@@ -360,7 +469,7 @@ impl Compiler {
                     }
                 };
                 self.emit(Instr::PinGuard(name.to_string(), *line as u32));
-                self.emit(Instr::Load(name.to_string()));
+                self.emit(Instr::Load(name.to_string(), self.line as u32));
                 self.expr(amount)?;
                 self.emit(instr);
                 self.emit(Instr::Store(name.to_string()));
@@ -373,22 +482,42 @@ impl Compiler {
                 self.emit(Instr::Print);
                 Ok(())
             }
-            // `break;` -- jump past the innermost loop. With no loop to stop
-            // it fails at run time with the interpreter's `E116`.
+            // `break;` / `break <value>;` -- leave the innermost loop. With no
+            // loop to stop it fails at run time with the interpreter's `E116`
+            // (before the value would be evaluated, as there).
             Stmt::EngBreak { value, line } => {
                 self.line = *line;
-                if value.is_some() {
-                    // A `break <value>` is the value of a `loop { }` used as
-                    // an expression, which is not compiled yet.
-                    return Err(unsupported(*line, "အဖိုးအတွက် loop ရပ်ခြင်း"));
-                }
                 if self.loops.is_empty() {
                     self.emit(Instr::Abort(
                         crate::interpreter::eng_break_outside_loop_err(*line),
                     ));
                     return Ok(());
                 }
-                let target = self.loops.last().expect("loop context").handlers;
+                let ctx = self.loops.last().expect("loop context");
+                let target = ctx.handlers;
+                let into = ctx.break_value.clone();
+                match value {
+                    Some(expr) => {
+                        self.expr(expr)?;
+                        match &into {
+                            Some((slot, _)) => self.emit(Instr::Store(slot.clone())),
+                            // A value handed to a loop that is not used as one
+                            // is evaluated and dropped, exactly as there.
+                            None => self.emit(Instr::Pop),
+                        };
+                    }
+                    None => {
+                        if let Some((_, loop_line)) = into {
+                            // `loop { ... }` as a value can only end through a
+                            // `break <value>;` -- `E115`, at the loop's line.
+                            self.leave_tries(target)?;
+                            self.emit(Instr::Abort(crate::interpreter::eng_loop_no_value_err(
+                                loop_line,
+                            )));
+                            return Ok(());
+                        }
+                    }
+                }
                 self.leave_tries(target)?;
                 let at = self.emit(Instr::Jump(usize::MAX));
                 self.loops.last_mut().expect("loop context").breaks.push(at);
@@ -433,14 +562,153 @@ impl Compiler {
                 }
                 Ok(())
             }
+            // `နည်းပညာများ <lib> [အဖြစ် <alias>] ကို သုံးမည်။` -- import a
+            // builtin library. A script/package library has no bytecode
+            // equivalent, so importing one is refused rather than run.
+            Stmt::UseLibrary { libs, line } => {
+                for (name, alias) in libs {
+                    if !crate::library::is_builtin_library(name) {
+                        return Err(unsupported(
+                            *line,
+                            &format!("\"{}\" နည်းပညာများ တင်သွင်းခြင်း", name),
+                        ));
+                    }
+                    self.emit(Instr::UseLib(name.clone()));
+                    if let Some(alias) = alias {
+                        self.lib_aliases.insert(alias.clone(), name.clone());
+                    }
+                }
+                Ok(())
+            }
+            // `<lib> အဖြစ် <alias>။` -- an alias for a library (which also
+            // imports it), or for an existing function. A name that is
+            // neither is `E031` when it runs, as there.
+            Stmt::FuncAlias {
+                original,
+                aliases,
+                line,
+            } => {
+                if let Some(&slot) = self.slots.get(original) {
+                    let arity = self.arities.get(original).copied();
+                    for alias in aliases {
+                        self.slots.insert(alias.clone(), slot);
+                        if let Some(arity) = arity {
+                            self.arities.insert(alias.clone(), arity);
+                        }
+                    }
+                    return Ok(());
+                }
+                if crate::library::is_builtin_library(original) {
+                    for alias in aliases {
+                        self.lib_aliases.insert(alias.clone(), original.clone());
+                    }
+                    self.emit(Instr::UseLib(original.clone()));
+                    return Ok(());
+                }
+                self.emit(Instr::Abort(
+                    crate::interpreter::eng_missing_function_err(*line, original),
+                ));
+                Ok(())
+            }
+            // `<lib> ၏ <fn>(...) ကို လုပ်ပါ။` -- result discarded.
+            Stmt::LibCall {
+                lib,
+                fn_name,
+                args,
+                line,
+            } => {
+                self.line = *line;
+                self.lib_call_site(lib, fn_name, args, *line, None)?;
+                self.emit(Instr::Pop);
+                Ok(())
+            }
+            // `<var> အတွက် <lib> ၏ <fn>(...) ကို လုပ်ပါ။` -- result stored.
+            Stmt::LibCallAssign {
+                name,
+                lib,
+                fn_name,
+                args,
+                line,
+            } => {
+                self.line = *line;
+                let err = format!(
+                    "E088 လိုင်း {} တွင် \"{}\" ၏ \"{}\" အလုပ်သည် တန်ဖိုး ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။",
+                    line, lib, fn_name, name
+                );
+                self.lib_call_site(lib, fn_name, args, *line, Some(err))?;
+                self.emit(Instr::Store(name.to_string()));
+                Ok(())
+            }
+            // `<name> [:<type>] = loop { ... };` -- a loop used as a value.
+            //
+            // The interpreter seeds a typed name with its type's default
+            // before the loop runs (so the body can accumulate into it), keeps
+            // the value passed to `break <value>`, then checks that value
+            // against the type and stores it. The same steps are compiled in
+            // the same order here, so a `pin` redeclaration is refused before
+            // the body runs and a bad break value is refused after it.
+            Stmt::EngLoopAssign {
+                name,
+                type_name,
+                is_const,
+                body,
+                line,
+            } => {
+                self.line = *line;
+                // A `pin` target is refused before the loop runs, exactly as
+                // the declaration and assignment statements refuse it.
+                self.emit(Instr::PinGuard(name.to_string(), *line as u32));
+                if *is_const {
+                    self.emit(Instr::PinDeclareCheck(name.to_string(), *line as u32));
+                }
+                if let Some(t) = type_name {
+                    self.emit(Instr::Const(crate::interpreter::eng_type_default(t)));
+                    self.emit(Instr::Declare(
+                        name.to_string(),
+                        t.clone(),
+                        *is_const,
+                        *line as u32,
+                    ));
+                }
+                let slot = self.temp("loopvalue");
+                let start = self.here();
+                self.loops.push(LoopCtx {
+                    start,
+                    handlers: self.handlers,
+                    break_value: Some((slot.clone(), *line)),
+                    ..Default::default()
+                });
+                self.block(body)?;
+                let ctx = self.loops.pop().expect("loop context");
+                self.emit(Instr::Jump(start));
+                let end = self.here();
+                for site in ctx.breaks {
+                    self.patch_jump(site, end);
+                }
+                for site in ctx.continues {
+                    self.patch_jump(site, start);
+                }
+                self.emit(Instr::Load(slot, self.line as u32));
+                match type_name {
+                    Some(t) => self.emit(Instr::Declare(
+                        name.to_string(),
+                        t.clone(),
+                        false,
+                        *line as u32,
+                    )),
+                    None => self.emit(Instr::Store(name.to_string())),
+                };
+                if *is_const && type_name.is_none() {
+                    // `pin X = loop { ... }`: the pre-check above only looked,
+                    // so the name becomes a constant once it holds a value.
+                    self.emit(Instr::MarkConst(name.to_string()));
+                }
+                Ok(())
+            }
             // `name(args);` -- a call whose result is discarded.
             Stmt::EngExprCall { name, args, line } => {
                 self.line = *line;
-                let idx = self.callee(name)?;
-                for arg in args {
-                    self.expr(arg)?;
-                }
-                self.emit(Instr::Call(idx, args.len() as u8));
+                self.call_site(name, args, *line)?;
                 self.emit(Instr::Pop);
                 Ok(())
             }
@@ -463,7 +731,7 @@ impl Compiler {
                 let Expr::Ident(name) = target else {
                     return Err(unsupported(self.line, "ဤ နေရာသို့ ပေါင်းထည့်ခြင်း"));
                 };
-                self.emit(Instr::Load(name.to_string()));
+                self.emit(Instr::Load(name.to_string(), self.line as u32));
                 self.expr(amount)?;
                 self.emit(match op {
                     '+' => Instr::Add,
@@ -542,12 +810,9 @@ impl Compiler {
                 self.emit(Instr::SelfSet(field.clone(), *line as u32));
                 Ok(())
             }
-            Stmt::FuncCall { name, args, .. } => {
-                let idx = self.callee(name)?;
-                for arg in args {
-                    self.expr(arg)?;
-                }
-                self.emit(Instr::Call(idx, args.len() as u8));
+            Stmt::FuncCall { name, args, line } => {
+                self.line = *line;
+                self.call_site(name, args, *line)?;
                 self.emit(Instr::Pop);
                 Ok(())
             }
@@ -562,7 +827,7 @@ impl Compiler {
                 let Expr::Ident(name) = &**base else {
                     return Err(unsupported(*line, "ဤ နေရာသို့ အညွှန်း သတ်မှတ်ခြင်း"));
                 };
-                self.emit(Instr::Load(name.to_string()));
+                self.emit(Instr::Load(name.to_string(), self.line as u32));
                 for key in indices {
                     self.expr(key)?;
                 }
@@ -575,16 +840,40 @@ impl Compiler {
                 Ok(())
             }
             Stmt::EngReturn { value, line } => {
-                match value {
-                    Some(v) => self.expr(v)?,
-                    None => {
-                        self.emit(Instr::Const(Value::Null));
+                let produced = match value {
+                    Some(v) => {
+                        self.expr(v)?;
+                        true
                     }
-                }
+                    None => {
+                        // `return;` carries no value, so a caller that wanted
+                        // one gets the interpreter's `E071`.
+                        self.emit(Instr::Const(Value::Null));
+                        false
+                    }
+                };
                 // A `return` inside a `try` runs its `finally` first and drops
                 // the handlers of this function.
                 self.leave_tries(0)?;
-                self.emit(Instr::Return(*line as u32));
+                if produced {
+                    self.emit(Instr::ReturnValue(*line as u32));
+                } else {
+                    self.emit(Instr::ReturnVoid(*line as u32));
+                }
+                Ok(())
+            }
+            // `<var> အတွက် <fn>(args) ကို လုပ်ပါ။` -- call and keep the result.
+            // A body that returns nothing is `E071`, so the value is asked for
+            // by the call itself rather than assumed from a pushed `null`.
+            Stmt::FuncCallAssign {
+                name,
+                fn_name,
+                args,
+                line,
+            } => {
+                self.line = *line;
+                self.assign_call_site(name, fn_name, args, *line)?;
+                self.emit(Instr::Store(name.to_string()));
                 Ok(())
             }
             // `try { } catch (E) { } finally { }`, laid out as the interpreter
@@ -671,6 +960,243 @@ impl Compiler {
         }
     }
 
+    /// Rewrite a `<lib>` written through an alias (`r` -> `ကျပန်း`).
+    fn resolve_lib(&self, lib: &str) -> String {
+        self.lib_aliases
+            .get(lib)
+            .cloned()
+            .unwrap_or_else(|| lib.to_string())
+    }
+
+    /// Compile one library call.
+    ///
+    /// The interpreter checks, in this order: the library is imported
+    /// (`E089`), the function exists (`E086`), the argument count fits
+    /// (`E087`), and only then evaluates the arguments. The same order is
+    /// compiled here, so a call that fails raises before its arguments run.
+    /// `err` is the message for a call that must produce a value but does not
+    /// (empty string: a missing value is fine, `null` is pushed instead).
+    fn lib_call_site(
+        &mut self,
+        lib: &str,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+        err: Option<String>,
+    ) -> Result<(), String> {
+        let lib = self.resolve_lib(lib);
+        if !crate::library::is_builtin_library(&lib) {
+            // Not a library this backend knows: `E085` when it runs, and the
+            // arguments are not evaluated, exactly as there.
+            self.emit(Instr::Abort(crate::interpreter::lib_unknown_err(
+                &lib, line,
+            )));
+            self.emit(Instr::Const(Value::Null));
+            return Ok(());
+        }
+        if !crate::interpreter::lib_is_value_library(&lib) {
+            return Err(unsupported(
+                line,
+                &format!("\"{}\" နည်းပညာ ခေါ်ခြင်း", lib),
+            ));
+        }
+        self.emit(Instr::RequireLib(lib.clone(), line as u32));
+        match crate::interpreter::lib_value_arity(&lib, fn_name, line) {
+            Err(message) => {
+                // Unknown function in a known library: `E086`, before the
+                // arguments would run.
+                self.emit(Instr::Abort(message));
+                self.emit(Instr::Const(Value::Null));
+                return Ok(());
+            }
+            Ok(want) => {
+                if args.len() != want {
+                    let message = crate::interpreter::lib_fn_argc_count(
+                        &lib,
+                        fn_name,
+                        args.len(),
+                        want,
+                        line,
+                    )
+                    .unwrap_err();
+                    self.emit(Instr::Abort(message));
+                    self.emit(Instr::Const(Value::Null));
+                    return Ok(());
+                }
+            }
+        }
+        for arg in args {
+            self.expr(arg)?;
+        }
+        self.emit(Instr::LibCall(
+            lib,
+            fn_name.to_string(),
+            args.len() as u8,
+            line as u32,
+            err.unwrap_or_default(),
+        ));
+        Ok(())
+    }
+
+    /// Compile the call half of `<var> အတွက် <fn>(args) ကို လုပ်ပါ။`, leaving
+    /// exactly one value on the stack. The interpreter resolves a class first,
+    /// then a user function, then a builtin, then a callable value, and only
+    /// then reports `E031` -- the same order is used here.
+    fn assign_call_site(
+        &mut self,
+        target: &str,
+        fn_name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<(), String> {
+        if let Some(&index) = self.class_slots.get(fn_name) {
+            for arg in args {
+                self.expr(arg)?;
+            }
+            self.emit(Instr::NewObj(index, args.len() as u8, line as u32));
+            return Ok(());
+        }
+        if self.slots.contains_key(fn_name) {
+            if let Some(&(total, required)) = self.arities.get(fn_name) {
+                let argc = args.len();
+                if argc < required || argc > total {
+                    self.emit(Instr::Abort(crate::interpreter::eng_arity_err(
+                        fn_name, argc, required, total, line,
+                    )));
+                    self.emit(Instr::Const(Value::Null));
+                    return Ok(());
+                }
+            }
+            let index = self.slots[fn_name];
+            for arg in args {
+                self.expr(arg)?;
+            }
+            let err = format!(
+                "E071 လိုင်း {} တွင် \"{}\" အလုပ်သည် တန်ဖိုး ပြန်မပေးသဖြင့် \"{}\" ကို သိမ်းဆည်း၍မရပါ။ အလုပ်၏ နောက်ဆုံး ညွှန်ကြားချက်သည် တန်ဖိုး တစ်ခု ဖြစ်ရပါမည်။",
+                line, fn_name, target
+            );
+            self.emit(Instr::CallValue(index, args.len() as u8, line as u32, err));
+            return Ok(());
+        }
+        if is_higher_order(fn_name) {
+            // The caller stores the value, as it does for any call.
+            self.higher_order_site(fn_name, args, line)?;
+            return Ok(());
+        }
+        if is_pure_builtin(fn_name) {
+            for arg in args {
+                self.expr(arg)?;
+            }
+            self.emit(Instr::Builtin(fn_name.to_string(), args.len() as u8, line as u32));
+            return Ok(());
+        }
+        if crate::interpreter::is_eng_builtin(fn_name) {
+            return Err(unsupported(line, "builtin အလုပ်"));
+        }
+        // Neither a function nor a builtin: `E031` when it runs, before the
+        // arguments would be evaluated.
+        self.emit(Instr::Abort(crate::interpreter::eng_missing_function_err(
+            line, fn_name,
+        )));
+        self.emit(Instr::Const(Value::Null));
+        Ok(())
+    }
+
+    /// `map`/`filter`/`reduce`: the collection is turned into its items (with
+    /// the interpreter's `E110` for a value that cannot be walked), the
+    /// lambda or named callback is compiled into its own function body, and
+    /// `reduce`'s starting value is evaluated after the callback -- the order
+    /// the interpreter evaluates them in. A callback the VM cannot represent
+    /// (a value, a library function reference) stays `E170`.
+    fn higher_order_site(&mut self, name: &str, args: &[Expr], line: usize) -> Result<(), String> {
+        let kind = match name {
+            "map" => 0u8,
+            "filter" => 1,
+            _ => 2,
+        };
+        let want = if kind == 2 { 3 } else { 2 };
+        if args.len() != want {
+            self.emit(Instr::Abort(crate::interpreter::eng_builtin_err(
+                line,
+                name,
+                &format!(
+                    "အချက် {want} ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
+                    args.len()
+                ),
+            )));
+            self.emit(Instr::Const(Value::Null));
+            return Ok(());
+        }
+        self.expr(&args[0])?;
+        self.emit(Instr::IterItems(kind, line as u32));
+        let callback = match &args[1] {
+            Expr::Ident(fn_name) if self.slots.contains_key(&fn_name.to_string()) => {
+                self.slots[&fn_name.to_string()]
+            }
+            Expr::Lambda {
+                params,
+                defaults,
+                body,
+                line: lambda_line,
+            } => {
+                if defaults.iter().any(|d| d.is_some()) {
+                    return Err(unsupported(
+                        *lambda_line,
+                        "မူလတန်ဖိုး ပါသော အလုပ် (default parameter)",
+                    ));
+                }
+                self.compile_lambda(params, body, *lambda_line)?
+            }
+            other => {
+                return Err(unsupported(
+                    self.line,
+                    &format!(
+                        "ပြန်ခေါ် အလုပ် ({})",
+                        expr_name(other)
+                    ),
+                ))
+            }
+        };
+        if kind == 2 {
+            self.expr(&args[2])?;
+        }
+        let label = self.funcs[callback].name.clone();
+        let err = crate::interpreter::eng_no_return_err(&label, line);
+        self.emit(Instr::HigherOrder(kind, callback, line as u32, err));
+        Ok(())
+    }
+
+    /// Compile an anonymous function into a function slot of its own, the way
+    /// a named definition is compiled: its own chunk, no handlers inherited,
+    /// and the last expression as its value. Nested lambdas append more slots
+    /// while this one is compiled, so the index is kept from before.
+    fn compile_lambda(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+        _line: usize,
+    ) -> Result<usize, String> {
+        let index = self.funcs.len();
+        self.funcs.push(FuncDef {
+            name: format!("fn({})", params.join(", ")),
+            params: params.to_vec(),
+            code: Vec::new(),
+        });
+        let saved_code = std::mem::take(&mut self.code);
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_handlers = self.handlers;
+        let saved_line = self.line;
+        self.handlers = 0;
+        let result = compile_body(self, body);
+        let code = std::mem::replace(&mut self.code, saved_code);
+        self.loops = saved_loops;
+        self.handlers = saved_handlers;
+        self.line = saved_line;
+        result?;
+        self.funcs[index].code = code;
+        Ok(index)
+    }
+
     fn callee(&self, name: &str) -> Result<usize, String> {
         self.slots.get(name).copied().ok_or_else(|| {
             format!(
@@ -678,6 +1204,56 @@ impl Compiler {
                 self.line, name
             )
         })
+    }
+
+    /// Compile a call to the user function `name`.
+    ///
+    /// The interpreter resolves a callee when it runs a call: an undefined name
+    /// is `E031` and a wrong argument count is `E033`, both raised *before* the
+    /// arguments are evaluated and both catchable by an enclosing `try`. So an
+    /// undefined name and a wrong count compile to an `Abort` carrying the very
+    /// same message instead of failing the build -- `runtime_uncaught.akk` must
+    /// print its line before the error under `--vm` too. A name that is a
+    /// builtin stays `E170`: the VM does not implement builtins, and pretending
+    /// the name is unknown would be a lie.
+    fn call_site(&mut self, name: &str, args: &[Expr], line: usize) -> Result<(), String> {
+        let Some(idx) = self.slots.get(name).copied() else {
+            if is_higher_order(name) {
+                // The caller discards the value, as it does for any call.
+                self.higher_order_site(name, args, line)?;
+                return Ok(());
+            }
+            if is_pure_builtin(name) {
+                for arg in args {
+                    self.expr(arg)?;
+                }
+                self.emit(Instr::Builtin(name.to_string(), args.len() as u8, line as u32));
+                return Ok(());
+            }
+            if crate::interpreter::is_eng_builtin(name) {
+                return Err(unsupported(line, "builtin အလုပ်"));
+            }
+            self.emit(Instr::Abort(crate::interpreter::eng_missing_function_err(
+                line, name,
+            )));
+            self.emit(Instr::Const(Value::Null));
+            return Ok(());
+        };
+        if let Some(&(total, required)) = self.arities.get(name) {
+            let argc = args.len();
+            if argc < required || argc > total {
+                self.emit(Instr::Abort(crate::interpreter::eng_arity_err(
+                    name, argc, required, total, line,
+                )));
+                self.emit(Instr::Const(Value::Null));
+                return Ok(());
+            }
+        }
+        for arg in args {
+            self.expr(arg)?;
+        }
+        self.emit(Instr::Call(idx, args.len() as u8));
+        Ok(())
     }
 
     fn if_chain(&mut self, branches: &[IfBranch]) -> Result<(), String> {
@@ -776,18 +1352,18 @@ impl Compiler {
 
         let start_pc = self.here();
         // step > 0 ? i < end : i > end
-        self.emit(Instr::Load(step_var.clone()));
+        self.emit(Instr::Load(step_var.clone(), self.line as u32));
         self.emit(Instr::Const(Value::Int(0)));
         self.emit(Instr::Gt);
         let goes_down = self.emit(Instr::JumpIfFalse(usize::MAX));
-        self.emit(Instr::Load(var_name.to_string()));
-        self.emit(Instr::Load(end_var.clone()));
+        self.emit(Instr::Load(var_name.to_string(), self.line as u32));
+        self.emit(Instr::Load(end_var.clone(), self.line as u32));
         self.emit(Instr::Lt);
         let test_done = self.emit(Instr::Jump(usize::MAX));
         let down_at = self.here();
         self.patch_jump(goes_down, down_at);
-        self.emit(Instr::Load(var_name.to_string()));
-        self.emit(Instr::Load(end_var.clone()));
+        self.emit(Instr::Load(var_name.to_string(), self.line as u32));
+        self.emit(Instr::Load(end_var.clone(), self.line as u32));
         self.emit(Instr::Gt);
         let test_end = self.here();
         self.patch_jump(test_done, test_end);
@@ -804,8 +1380,8 @@ impl Compiler {
         for site in ctx.continues {
             self.patch_jump(site, self.here());
         }
-        self.emit(Instr::Load(var_name.to_string()));
-        self.emit(Instr::Load(step_var));
+        self.emit(Instr::Load(var_name.to_string(), self.line as u32));
+        self.emit(Instr::Load(step_var, self.line as u32));
         self.emit(Instr::Add);
         self.emit(Instr::Store(var_name.to_string()));
         self.emit(Instr::Jump(start_pc));
@@ -835,14 +1411,14 @@ impl Compiler {
         self.emit(Instr::Store(idx_var.clone()));
 
         let start_pc = self.here();
-        self.emit(Instr::Load(idx_var.clone()));
-        self.emit(Instr::Load(seq_var.clone()));
+        self.emit(Instr::Load(idx_var.clone(), self.line as u32));
+        self.emit(Instr::Load(seq_var.clone(), self.line as u32));
         self.emit(Instr::Len);
         self.emit(Instr::Lt);
         let exit = self.emit(Instr::JumpIfFalse(usize::MAX));
 
-        self.emit(Instr::Load(seq_var.clone()));
-        self.emit(Instr::Load(idx_var.clone()));
+        self.emit(Instr::Load(seq_var.clone(), self.line as u32));
+        self.emit(Instr::Load(idx_var.clone(), self.line as u32));
         self.emit(Instr::Index(self.line as u32, 1));
         self.emit(Instr::Store(var_name.to_string()));
 
@@ -857,7 +1433,7 @@ impl Compiler {
             self.patch_jump(site, self.here());
         }
 
-        self.emit(Instr::Load(idx_var.clone()));
+        self.emit(Instr::Load(idx_var.clone(), self.line as u32));
         self.emit(Instr::Const(Value::Int(1)));
         self.emit(Instr::Add);
         self.emit(Instr::Store(idx_var));
@@ -947,7 +1523,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::Ident(name) => {
-                self.emit(Instr::Load(name.to_string()));
+                self.emit(Instr::Load(name.to_string(), self.line as u32));
                 Ok(())
             }
             Expr::Binary(lhs, op, rhs, line) => {
@@ -1010,12 +1586,30 @@ impl Compiler {
                 self.emit(Instr::NewObj(idx, args.len() as u8, self.line as u32));
                 Ok(())
             }
-            Expr::NewObj(name, args, _) if self.slots.contains_key(name) => {
-                let idx = self.slots[name];
+            Expr::NewObj(name, args, line) if self.slots.contains_key(name) => {
+                self.call_site(name, args, *line)?;
+                Ok(())
+            }
+            // `<name>(args)` where the name is a builtin: the call becomes one
+            // instruction, and the value comes from the interpreter's own
+            // builtin code when it runs.
+            // `<lib> ၏ <fn>(args)` used as a value: `E117` when the function
+            // acts without producing one.
+            Expr::LibCall(lib, fn_name, args, line) => {
+                let resolved = self.resolve_lib(lib);
+                let err = crate::interpreter::eng_lib_no_value_err(&resolved, fn_name, *line);
+                self.lib_call_site(lib, fn_name, args, *line, Some(err))?;
+                Ok(())
+            }
+            Expr::NewObj(name, args, line) if is_higher_order(name) => {
+                self.higher_order_site(name, args, *line)?;
+                Ok(())
+            }
+            Expr::NewObj(name, args, line) if is_pure_builtin(name) => {
                 for arg in args {
                     self.expr(arg)?;
                 }
-                self.emit(Instr::Call(idx, args.len() as u8));
+                self.emit(Instr::Builtin(name.clone(), args.len() as u8, *line as u32));
                 Ok(())
             }
             Expr::FieldAccess(target, field, line) => {
@@ -1233,6 +1827,20 @@ fn collect_classes(stmts: &[Stmt]) -> Vec<&Stmt> {
 /// Compile a parsed program into bytecode.
 pub fn compile(stmts: &[Stmt]) -> Result<Program, String> {
     let mut compiler = Compiler::new();
+    // A default parameter is filled in by the interpreter when the call runs,
+    // in the callee's own frame, and this backend binds parameters only from
+    // the arguments the call supplies. Refuse the program instead of running
+    // it with a parameter left unbound.
+    for def in collect_defs(stmts) {
+        if let Stmt::FuncDef {
+            defaults, line, ..
+        } = def
+        {
+            if defaults.iter().any(|d| d.is_some()) {
+                return Err(unsupported(*line, "မူလတန်ဖိုး ပါသော အလုပ် (default parameter)"));
+            }
+        }
+    }
     // Pass one: every function and class name gets a slot, so a call compiled
     // before the callee's body is written still finds it.
     register_functions(stmts, &mut compiler);
@@ -1286,32 +1894,56 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program, String> {
 }
 
 /// A function body's value is its last expression, the same rule the
-/// interpreter uses: `... ပြီး။` returns the final bare expression.
+/// interpreter uses: `... ပြီး။` returns the final bare expression, and a
+/// body that ends in a declaration returns the value it just declared.
+/// Anything else returns *no* value, which `ReturnVoid` records so a caller
+/// that asked for one can raise `E071`.
 fn compile_body(compiler: &mut Compiler, body: &[Stmt]) -> Result<(), String> {
     match body.split_last() {
         Some((Stmt::ExprStmt { value, .. }, rest)) => {
             compiler.block(rest)?;
             compiler.expr(value)?;
+            compiler.emit(Instr::ReturnValue(0));
+        }
+        // `x သည် <expr> ဖြစ်၏။` as the last line: the name is assigned as
+        // usual *and* its value is returned, as the interpreter does.
+        Some((Stmt::VarDecl { name, value, .. }, rest)) => {
+            compiler.block(rest)?;
+            compiler.expr(value)?;
+            compiler.emit(Instr::Store(name.to_string()));
+            compiler.emit(Instr::Load(name.to_string(), compiler.line as u32));
+            compiler.emit(Instr::ReturnValue(0));
         }
         Some((last, rest)) => {
             compiler.block(rest)?;
             compiler.stmt(last)?;
             compiler.emit(Instr::Const(Value::Null));
+            compiler.emit(Instr::ReturnVoid(0));
         }
         None => {
             compiler.emit(Instr::Const(Value::Null));
+            compiler.emit(Instr::ReturnVoid(0));
         }
     }
-    compiler.emit(Instr::Return(0));
     Ok(())
 }
+
 
 fn register_functions(stmts: &[Stmt], compiler: &mut Compiler) {
     for stmt in stmts {
         match stmt {
-            Stmt::FuncDef { name, params, .. } => {
+            Stmt::FuncDef {
+                name,
+                params,
+                defaults,
+                ..
+            } => {
                 if !compiler.slots.contains_key(name) {
                     compiler.slots.insert(name.clone(), compiler.funcs.len());
+                    let required = defaults.iter().filter(|d| d.is_none()).count();
+                    compiler
+                        .arities
+                        .insert(name.clone(), (params.len(), required));
                     compiler.funcs.push(FuncDef {
                         name: name.clone(),
                         params: params.clone(),
@@ -1375,6 +2007,16 @@ struct Frame {
     /// produces the object.
     class: Option<usize>,
     self_fields: Vec<(String, Value)>,
+    /// Set by `CallValue`: the `E071` message to raise if this body returns
+    /// without a value.
+    value_err: Option<String>,
+}
+
+/// What a callback call did: returned a value, or left the call some other
+/// way (an error was handed to a handler below it, or the program halted).
+enum CallbackOutcome {
+    Value(Value),
+    Left,
 }
 
 /// One line of program output, rendered by the interpreter's own `display`,
@@ -1434,6 +2076,8 @@ pub struct Vm<'p> {
     decls: HashMap<String, ()>,
     /// The live `try` regions, innermost last.
     handlers: Vec<Handler>,
+    /// The libraries imported so far, by every name they answer to.
+    libs: std::collections::HashSet<String>,
     /// The message of the error a handler is currently running for.
     pending_error: Option<String>,
     /// Set when the program has stopped (its `Halt`, or a `Return` out of the
@@ -1443,6 +2087,9 @@ pub struct Vm<'p> {
     pub log: String,
     /// A scripted stdin (tests); `None` reads the process's own stdin.
     input: Option<Box<dyn std::io::BufRead>>,
+    /// Set while a nested run is going: it stops as soon as the frame stack
+    /// drops back to this depth, so the callback returns to its caller.
+    stop_depth: Option<usize>,
 }
 
 impl<'p> Vm<'p> {
@@ -1457,10 +2104,12 @@ impl<'p> Vm<'p> {
             stream: false,
             decls: HashMap::new(),
             handlers: Vec::new(),
+            libs: std::collections::HashSet::new(),
             pending_error: None,
             halted: false,
             log: String::new(),
             input: None,
+            stop_depth: None,
         }
     }
 
@@ -1509,7 +2158,7 @@ impl<'p> Vm<'p> {
         self.stack.pop().expect("stack underflow")
     }
 
-    fn load(&self, name: &str) -> Result<Value, String> {
+    fn load(&self, name: &str, line: usize) -> Result<Value, String> {
         if let Some(frame) = self.frames.last() {
             if let Some(v) = frame.locals.get(name) {
                 return Ok(v.clone());
@@ -1518,7 +2167,115 @@ impl<'p> Vm<'p> {
         self.globals
             .get(name)
             .cloned()
-            .ok_or_else(|| unknown_var(name))
+            .ok_or_else(|| unknown_var(name, line))
+    }
+
+    /// Pop the frame a `return` is leaving and hand `value` back to the
+    /// caller. `produced` says whether the body actually yielded a value; when
+    /// the call demanded one (`CallValue`) and it did not, that is `E071`,
+    /// raised exactly where the interpreter raises it.
+    fn leave_frame(&mut self, value: Value, line: u32, produced: bool) -> Result<(), String> {
+        if self.frames.is_empty() {
+            // `return` outside any function is `E108`, exactly as the
+            // interpreter reports it.
+            return Err(crate::interpreter::eng_return_outside_fn_err(
+                line as usize,
+            ));
+        }
+        let frame = self.frames.pop().expect("a frame was just checked");
+        if !produced {
+            if let Some(err) = frame.value_err {
+                return Err(err);
+            }
+        }
+        // A constructor's result is the object it filled in, not whatever its
+        // last expression evaluated to.
+        let value = match frame.class {
+            Some(index) => Value::Object(Rc::new(ObjectValue {
+                class: self.prog.classes[index].name.clone(),
+                fields: frame.self_fields,
+            })),
+            None => value,
+        };
+        // Back in the caller, right after its call.
+        self.stack.push(value);
+        Ok(())
+    }
+
+    /// The items `map`/`filter`/`reduce` walk, with the interpreter's own
+    /// `E110` for a value that cannot be walked.
+    fn iter_items(kind: u8, collection: &Value, line: usize) -> Result<Vec<Value>, String> {
+        match collection {
+            Value::List(items) | Value::Tuple(items) => Ok(items.clone()),
+            Value::Set(items) => Ok(items.iter().map(|k| k.value().clone()).collect()),
+            Value::Dict(pairs) => Ok(pairs.keys().map(|k| k.value().clone()).collect()),
+            Value::Str(text) => Ok(crate::text::clusters(text)
+                .into_iter()
+                .map(|c| Value::Str(c.to_string()))
+                .collect()),
+            other => Err(crate::interpreter::eng_builtin_err(
+                line,
+                higher_order_name(kind),
+                &format!(
+                    "စုစည်းမှု သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
+                    crate::interpreter::type_name_mm(other)
+                ),
+            )),
+        }
+    }
+
+    /// Run the callback function `index` with `args`, the way the interpreter's
+    /// `call_callback` does: a fresh frame, the interpreter's `E033` for the
+    /// wrong argument count, and `err` (its `E114`) when the body returns
+    /// nothing. `Left` says control did not come back from the call -- an
+    /// error was handed to a `try` handler below it, or the program halted --
+    /// so the caller must not touch the stack.
+    fn call_callback(
+        &mut self,
+        index: usize,
+        args: Vec<Value>,
+        line: u32,
+        err: String,
+    ) -> Result<CallbackOutcome, String> {
+        let func = &self.prog.funcs[index];
+        let name = func.name.clone();
+        let params = func.params.clone();
+        if args.len() != params.len() {
+            return Err(crate::interpreter::eng_arity_err(
+                &name,
+                args.len(),
+                params.len(),
+                params.len(),
+                line as usize,
+            ));
+        }
+        let mut locals = HashMap::new();
+        for (param, value) in params.iter().zip(args) {
+            locals.insert(param.clone(), value);
+        }
+        let base = self.frames.len();
+        // The stack before the frame: a normal return leaves exactly the one
+        // value it produced on top of it, which is how a callback's own
+        // return is told from control leaving the call another way (an error
+        // handed to a `try` handler below it, or a halt).
+        let stack_base = self.stack.len();
+        self.frames.push(Frame {
+            func: index,
+            pc: 0,
+            locals,
+            class: None,
+            self_fields: Vec::new(),
+            value_err: Some(err),
+        });
+        let saved_stop = self.stop_depth;
+        self.stop_depth = Some(base);
+        let result = self.run();
+        self.stop_depth = saved_stop;
+        result?;
+        if self.frames.len() != base || self.stack.len() != stack_base + 1 {
+            return Ok(CallbackOutcome::Left);
+        }
+        Ok(CallbackOutcome::Value(self.pop()))
     }
 
     fn store(&mut self, name: &str, value: Value) {
@@ -1624,6 +2381,11 @@ impl<'p> Vm<'p> {
     /// Run to `Halt` (or off the end of the main chunk).
     pub fn run(&mut self) -> Result<(), String> {
         loop {
+            if let Some(depth) = self.stop_depth {
+                if self.frames.len() <= depth {
+                    return Ok(());
+                }
+            }
             let pc = self.current_pc();
             let instr = {
                 let code = match self.frames.last() {
@@ -1648,8 +2410,8 @@ impl<'p> Vm<'p> {
                     self.stack.push(v);
                     self.set_pc(pc + 1);
                 }
-                Instr::Load(name) => {
-                    let v = self.load(&name)?;
+                Instr::Load(name, line) => {
+                    let v = self.load(&name, line as usize)?;
                     self.stack.push(v);
                     self.set_pc(pc + 1);
                 }
@@ -1802,6 +2564,76 @@ impl<'p> Vm<'p> {
                     self.store(&name, value);
                     self.set_pc(pc + 1);
                 }
+                Instr::Builtin(name, argc, line) => {
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop());
+                    }
+                    args.reverse();
+                    let value = Interpreter::builtin_value_result(&name, &args, line as usize)?;
+                    self.stack.push(value);
+                    self.set_pc(pc + 1);
+                }
+                Instr::UseLib(name) => {
+                    match crate::library::builtin_names(&name) {
+                        Some(names) => {
+                            for spelling in names {
+                                self.libs.insert((*spelling).to_string());
+                            }
+                        }
+                        None => {
+                            self.libs.insert(name);
+                        }
+                    }
+                    self.set_pc(pc + 1);
+                }
+                Instr::RequireLib(name, line) => {
+                    if !self.libs.contains(&name) {
+                        return Err(crate::interpreter::lib_not_imported_err(
+                            &name,
+                            line as usize,
+                        ));
+                    }
+                    self.set_pc(pc + 1);
+                }
+                Instr::LibCall(lib, fn_name, argc, line, err) => {
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop());
+                    }
+                    args.reverse();
+                    match crate::interpreter::lib_value_call(
+                        &lib,
+                        &fn_name,
+                        &args,
+                        line as usize,
+                    )? {
+                        Some(value) => self.stack.push(value),
+                        None if err.is_empty() => self.stack.push(Value::Null),
+                        None => return Err(err.clone()),
+                    }
+                    self.set_pc(pc + 1);
+                }
+                Instr::MarkConst(name) => {
+                    self.decls.insert(name, ());
+                    self.set_pc(pc + 1);
+                }
+                Instr::PinDeclareCheck(name, line) => {
+                    let exists = self.decls.contains_key(&name)
+                        || self.globals.contains_key(&name)
+                        || self
+                            .frames
+                            .last()
+                            .map(|frame| frame.locals.contains_key(&name))
+                            .unwrap_or(false);
+                    if exists {
+                        return Err(crate::interpreter::eng_pin_redeclare_err(
+                            &name,
+                            line as usize,
+                        ));
+                    }
+                    self.set_pc(pc + 1);
+                }
                 Instr::PinGuard(name, line) => {
                     if self.decls.contains_key(&name) {
                         return Err(crate::interpreter::eng_const_reassign_err(
@@ -1856,7 +2688,7 @@ impl<'p> Vm<'p> {
                         &text,
                         line as usize,
                         |name| {
-                            vm.load(name).map_err(|_| {
+                            vm.load(name, line as usize).map_err(|_| {
                                 crate::interpreter::interpolate_missing_var_err(
                                     name,
                                     line as usize,
@@ -1976,6 +2808,7 @@ impl<'p> Vm<'p> {
                         locals,
                         class: Some(index),
                         self_fields: Vec::new(),
+                        value_err: None,
                     });
                 }
                 Instr::SelfSet(field, line) => {
@@ -2058,33 +2891,89 @@ impl<'p> Vm<'p> {
                         locals,
                         class: None,
                         self_fields: Vec::new(),
+                        value_err: None,
                     });
                 }
-                Instr::Return(line) => {
-                    let value = self.stack.pop().unwrap_or(Value::Null);
-                    if self.frames.is_empty() {
-                        // `return` outside any function is `E108`, exactly as
-                        // the interpreter reports it.
-                        return Err(crate::interpreter::eng_return_outside_fn_err(
-                            line as usize,
-                        ));
+                Instr::CallValue(index, argc, _line, err) => {
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop());
                     }
-                    match self.frames.pop() {
-                        Some(frame) => {
-                            // A constructor's result is the object it filled in,
-                            // not whatever its last expression evaluated to.
-                            let value = match frame.class {
-                                Some(index) => Value::Object(Rc::new(ObjectValue {
-                                    class: self.prog.classes[index].name.clone(),
-                                    fields: frame.self_fields,
-                                })),
-                                None => value,
-                            };
-                            // Back in the caller, right after its `Call`.
-                            self.stack.push(value);
+                    args.reverse();
+                    let params = self.prog.funcs[index].params.clone();
+                    let mut locals = HashMap::new();
+                    for (name, value) in params.iter().zip(args) {
+                        locals.insert(name.clone(), value);
+                    }
+                    self.set_pc(pc + 1);
+                    self.frames.push(Frame {
+                        func: index,
+                        pc: 0,
+                        locals,
+                        class: None,
+                        self_fields: Vec::new(),
+                        // The caller wants a value: a body that ends without
+                        // one is the interpreter's `E071`.
+                        value_err: Some(err),
+                    });
+                }
+                Instr::IterItems(kind, line) => {
+                    let collection = self.pop();
+                    let items = Vm::iter_items(kind, &collection, line as usize)?;
+                    self.stack.push(Value::List(items));
+                    self.set_pc(pc + 1);
+                }
+                Instr::HigherOrder(kind, callback, line, err) => {
+                    let initial = if kind == 2 { Some(self.pop()) } else { None };
+                    let items = match self.pop() {
+                        Value::List(items) => items,
+                        other => vec![other],
+                    };
+                    // The caller resumes at the next instruction; a callback
+                    // that leaves through a handler must find it that way.
+                    self.set_pc(pc + 1);
+                    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+                    let mut acc = initial;
+                    for item in items {
+                        let args = match kind {
+                            2 => vec![acc.take().expect("reduce keeps an accumulator"), item.clone()],
+                            _ => vec![item.clone()],
+                        };
+                        let value = match self.call_callback(callback, args, line, err.clone())? {
+                            CallbackOutcome::Value(value) => value,
+                            CallbackOutcome::Left => return Ok(()),
+                        };
+                        match kind {
+                            0 => out.push(value),
+                            1 => match value {
+                                Value::Bool(true) => out.push(item),
+                                Value::Bool(false) => {}
+                                other => {
+                                    return Err(crate::interpreter::eng_builtin_err(
+                                        line as usize,
+                                        higher_order_name(kind),
+                                        &format!(
+                                            "True သို့မဟုတ် False ပြန်ပေးသော ပြန်ခေါ် အလုပ် လိုအပ်ပါသည်၊ {} ရပါသည်",
+                                            crate::interpreter::type_name_mm(&other)
+                                        ),
+                                    ))
+                                }
+                            },
+                            _ => acc = Some(value),
                         }
-                        None => self.halted = true,
                     }
+                    match kind {
+                        2 => self.stack.push(acc.expect("reduce has its result")),
+                        _ => self.stack.push(Value::List(out)),
+                    }
+                }
+                Instr::Return(line) | Instr::ReturnValue(line) => {
+                    let value = self.stack.pop().unwrap_or(Value::Null);
+                    self.leave_frame(value, line, true)?;
+                }
+                Instr::ReturnVoid(line) => {
+                    let value = self.stack.pop().unwrap_or(Value::Null);
+                    self.leave_frame(value, line, false)?;
                 }
                 Instr::Halt => self.halted = true,
                 }
@@ -2143,7 +3032,10 @@ pub fn run_source_with_input(src: &str, input: &str) -> Result<Vec<String>, Stri
 /// Revision 5 added the eng declaration forms: `Declare` and `PinGuard`.
 /// Revision 6 added `try`/`catch`/`finally`: `Try`, `TryEnd`, `ErrorCode`,
 /// `ReThrow` and `PopHandlers`.
-pub const FORMAT_VERSION: u16 = 6;
+/// Revision 11 carried the line of a missing-variable `E030` on `Load`, and
+/// revision 12 the callback builtins: `IterItems` and `HigherOrder`, which run
+/// `map`/`filter`/`reduce` with a lambda or named callback.
+pub const FORMAT_VERSION: u16 = 12;
 /// Container magic: `AKKBC` + the digits of the original container layout.
 /// The revision that decides compatibility is [`FORMAT_VERSION`], below the
 /// magic; older magic digits are kept so a built file stays recognisable.
@@ -2330,9 +3222,10 @@ fn encode_code(code: &[Instr], out: &mut Vec<u8>) -> Result<(), String> {
                 out.push(0);
                 encode_value(v, out)?;
             }
-            Instr::Load(name) => {
+            Instr::Load(name, line) => {
                 out.push(1);
                 put_str(out, name)?;
+                put_u32(out, *line);
             }
             Instr::Store(name) => {
                 out.push(2);
@@ -2462,6 +3355,65 @@ fn encode_code(code: &[Instr], out: &mut Vec<u8>) -> Result<(), String> {
                 out.push(48);
                 out.push(*count);
             }
+            Instr::MarkConst(name) => {
+                out.push(49);
+                put_str(out, name)?;
+            }
+            Instr::PinDeclareCheck(name, line) => {
+                out.push(50);
+                put_str(out, name)?;
+                put_u32(out, *line);
+            }
+            Instr::Builtin(name, argc, line) => {
+                out.push(51);
+                put_str(out, name)?;
+                out.push(*argc);
+                put_u32(out, *line);
+            }
+            Instr::UseLib(name) => {
+                out.push(52);
+                put_str(out, name)?;
+            }
+            Instr::RequireLib(name, line) => {
+                out.push(53);
+                put_str(out, name)?;
+                put_u32(out, *line);
+            }
+            Instr::LibCall(lib, fn_name, argc, line, err) => {
+                out.push(54);
+                put_str(out, lib)?;
+                put_str(out, fn_name)?;
+                out.push(*argc);
+                put_u32(out, *line);
+                put_str(out, err)?;
+            }
+            Instr::ReturnValue(line) => {
+                out.push(55);
+                put_u32(out, *line);
+            }
+            Instr::ReturnVoid(line) => {
+                out.push(56);
+                put_u32(out, *line);
+            }
+            Instr::CallValue(index, argc, line, err) => {
+                out.push(57);
+                put_u32(out, *index as u32);
+                out.push(*argc);
+                put_u32(out, *line);
+                put_str(out, err)?;
+            }
+            Instr::IterItems(kind, line) => {
+                out.push(58);
+                out.push(*kind);
+                put_u32(out, *line);
+            }
+            Instr::HigherOrder(kind, index, line, err) => {
+                out.push(59);
+                out.push(*kind);
+                put_u32(out, *index as u32);
+                put_u32(out, *line);
+                put_str(out, err)?;
+            }
         }
     }
     Ok(())
@@ -2473,7 +3425,11 @@ fn decode_code(reader: &mut Reader<'_>) -> Result<Vec<Instr>, String> {
     for _ in 0..count {
         let instr = match reader.u8()? {
             0 => Instr::Const(decode_value(reader)?),
-            1 => Instr::Load(reader.text()?),
+            1 => {
+                let name = reader.text()?;
+                let line = reader.u32()?;
+                Instr::Load(name, line)
+            }
             2 => Instr::Store(reader.text()?),
             3 => Instr::Pop,
             4 => Instr::Add,
@@ -2566,6 +3522,53 @@ fn decode_code(reader: &mut Reader<'_>) -> Result<Vec<Instr>, String> {
             46 => Instr::ErrorCode,
             47 => Instr::ReThrow,
             48 => Instr::PopHandlers(reader.u8()?),
+            49 => Instr::MarkConst(reader.text()?),
+            50 => {
+                let name = reader.text()?;
+                let line = reader.u32()?;
+                Instr::PinDeclareCheck(name, line)
+            }
+            51 => {
+                let name = reader.text()?;
+                let argc = reader.u8()?;
+                let line = reader.u32()?;
+                Instr::Builtin(name, argc, line)
+            }
+            52 => Instr::UseLib(reader.text()?),
+            53 => {
+                let name = reader.text()?;
+                let line = reader.u32()?;
+                Instr::RequireLib(name, line)
+            }
+            54 => {
+                let lib = reader.text()?;
+                let fn_name = reader.text()?;
+                let argc = reader.u8()?;
+                let line = reader.u32()?;
+                let err = reader.text()?;
+                Instr::LibCall(lib, fn_name, argc, line, err)
+            }
+            55 => Instr::ReturnValue(reader.u32()?),
+            56 => Instr::ReturnVoid(reader.u32()?),
+            57 => {
+                let index = reader.u32()? as usize;
+                let argc = reader.u8()?;
+                let line = reader.u32()?;
+                let err = reader.text()?;
+                Instr::CallValue(index, argc, line, err)
+            }
+            58 => {
+                let kind = reader.u8()?;
+                let line = reader.u32()?;
+                Instr::IterItems(kind, line)
+            }
+            59 => {
+                let kind = reader.u8()?;
+                let index = reader.u32()? as usize;
+                let line = reader.u32()?;
+                let err = reader.text()?;
+                Instr::HigherOrder(kind, index, line, err)
+            }
             op => return Err(malformed(&format!("မသိသော instruction {}", op))),
         };
         code.push(instr);
@@ -2754,9 +3757,12 @@ s ကို ဖော်ပြပါ။
 
     #[test]
     fn unsupported_statements_are_refused_with_e170() {
-        // A library call is still outside the compiler; sets, dictionaries and
-        // classes are not.
-        let err = run_source("ကျပန်း ၏ တန်ဖိုး([]) ကို လုပ်ပါ။\n").unwrap_err();
+        // A library the VM cannot lower (`App` paints windows) is refused at
+        // compile time; the value-only libraries compile.
+        let err = run_source("use App;\nw = App.screen(400, 300);\n").unwrap_err();
+        assert!(err.contains("E170"), "{err}");
+        // A script/package library has no bytecode equivalent either.
+        let err = run_source("နည်းပညာများ Tools ကို သုံးမည်။\n").unwrap_err();
         assert!(err.contains("E170"), "{err}");
     }
 
@@ -2982,6 +3988,351 @@ msg ကို ဖော်ပြပါ။
         // error after the call must not be caught by the dead try.
         let src = "fn f(n :int) {\n    စမ်းရန်\n        if (n > 0) {\n            return \"early\";\n        }\n        return \"late\";\n    နောက်ဆုံးတွင်\n        print(\"fin\");\n    ပြီး။\n}\nprint(f(1));\nprint(f(0));\n";
         assert_eq!(out(src), vec!["early", "late"]);
+    }
+
+    /// An undefined callee is a *run-time* `E031` in the interpreter (after
+    /// the lines before it have printed), so it must be one here too -- not a
+    /// compile-time refusal.
+    #[test]
+    fn an_undefined_function_is_e031_at_run_time() {
+        let src = "print(\"start\");\nnosuchfunction ကို လုပ်ပါ။\n";
+        let err = run_source(src).unwrap_err();
+        assert_eq!(
+            err,
+            "E031 လိုင်း 2 တွင် \"nosuchfunction\" ဆိုသော အလုပ်ကို ရှာမတွေ့ပါ။"
+        );
+    }
+
+    #[test]
+    fn an_undefined_function_inside_a_try_is_catchable() {
+        let src = "စမ်းရန်\n    nosuchthing ကို လုပ်ပါ။\nE031 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\nprint(\"after\");\n";
+        assert_eq!(out(src), vec!["caught", "after"]);
+    }
+
+    /// A wrong argument count is `E033` at run time, before the arguments run.
+    #[test]
+    fn a_wrong_argument_count_is_e033() {
+        let src = "fn f(a :int) {\n    print(a);\n}\nprint(\"start\");\nf();\n";
+        let err = run_source(src).unwrap_err();
+        assert_eq!(
+            err,
+            "E033 လိုင်း 5 တွင် \"f\" အလုပ်သည် အချက် 1 ခု လိုအပ်ပါသည်၊ 0 ခု ပေးထားပါသည်။"
+        );
+        let src = "fn f(a :int) {\n    print(a);\n}\nf(1, 2);\n";
+        let err = run_source(src).unwrap_err();
+        assert_eq!(
+            err,
+            "E033 လိုင်း 4 တွင် \"f\" အလုပ်သည် အချက် 1 ခု လိုအပ်ပါသည်၊ 2 ခု ပေးထားပါသည်။"
+        );
+    }
+
+    #[test]
+    fn a_default_parameter_is_refused_instead_of_left_unbound() {
+        let src = "fn greet(name, punct = \"!\") {\n    print(name + punct);\n}\ngreet(\"A\");\n";
+        let err = compile_source(src).unwrap_err();
+        assert!(err.contains("E170"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // builtins
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn builtin_calls_compile_and_run() {
+        let src = "print(len(\"abc\"));\nprint(abs(-5));\nprint(max(3, 7));\nprint(sqrt(6.25));\nprint(floor(2.9));\nprint(ceil(8.1));\nprint(round(1.4));\nprint(find(\"abcd\", \"d\"));\nprint(sqrt(16));\nprint(min(2.5, 3.5));\nprint(len([1, 2, 3, 4]));\nprint(sum([1, 1, 2]));\nprint(upper(\"eng\"));\nprint(trim(\"  Akkhara  \"));\nprint(contains(\"abc\", \"b\"));\nprint(starts_with(\"abc\", \"ab\"));\nprint(len(split(\"a,b,c,d\", \",\")));\n";
+        assert_eq!(
+            out(src),
+            vec![
+                "3", "5", "7", "2.5", "2", "9", "1", "3", "4.0", "2.5", "4", "4", "ENG",
+                "Akkhara", "True", "True", "4"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_builtin_error_matches_the_interpreter() {
+        // `sqrt(-1)` is `E111`, raised when the call runs -- and catchable.
+        let src = "စမ်းရန်\n    sqrt(-1);\nE111 ကို ဖမ်းပါ။\n    print(\"sqrt ok\");\nပြီး။\nprint(\"done\");\n";
+        assert_eq!(out(src), vec!["sqrt ok", "done"]);
+        let err = run_source("print(\"before\");\nsqrt(-1);\n").unwrap_err();
+        assert!(err.contains("E111"), "{err}");
+    }
+
+    #[test]
+    fn a_builtin_is_checked_for_the_right_argument_type() {
+        // The interpreter's own `E110` for `abs("x")`, not a VM-specific one.
+        let err = run_source("print(abs(\"x\"));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+    }
+
+    #[test]
+    fn a_mutating_builtin_stays_e170() {
+        // `push(xs, 4)` writes through a variable and `reverse` is handled
+        // with its argument still unresolved, so neither can be a value-only
+        // instruction yet.
+        for src in ["push(1, 2);\n", "reverse(1);\n"] {
+            let err = compile_source(src).unwrap_err();
+            assert!(err.contains("E170"), "{err}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // map / filter / reduce
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_callback_builtins_run_lambdas_and_named_functions() {
+        let src = r#"xs မှာ [1, 2, 3] ဖြစ်၏။
+print(map(xs, x => x * 2));
+print(filter(xs, x => x > 1));
+print(reduce(xs, (a, b) => a + b, 0));
+fn double(n :int) {
+    return n * 2;
+}
+print(map(xs, double));
+print(reduce(xs, (a, b) => a * b, 1));
+print(map("ab", c => c + "!"));
+print(map([], x => x));
+print(reduce([], (a, b) => a - b, 9));
+print(map({3, 1, 2}, x => x + 1));
+print(filter({3, 1, 2}, x => x > 1));
+"#;
+        assert_eq!(
+            out(src),
+            vec![
+                "[2, 4, 6]",
+                "[2, 3]",
+                "6",
+                "[2, 4, 6]",
+                "6",
+                "[\"a!\", \"b!\"]",
+                "[]",
+                "9",
+                "[4, 2, 3]",
+                "[3, 2]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lambda_sees_globals_and_may_call_another_callback_builtin() {
+        let src = "xs မှာ [1, 2] ဖြစ်၏။\nk = 3;\nprint(map(xs, x => x * k));\nprint(map(xs, x => len(map(xs, y => y))));\n";
+        assert_eq!(out(src), vec!["[3, 6]", "[2, 2]"]);
+    }
+
+    #[test]
+    fn a_callback_builtin_keeps_the_interpreters_errors() {
+        // A callback that returns something other than a bool: `E110`.
+        let err = run_source("print(filter([1], x => x + 1));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+        // A callback of the wrong arity: `E033`.
+        let err = run_source("print(map([1], (a, b) => a));\n").unwrap_err();
+        assert!(err.contains("E033"), "{err}");
+        // A callback that returns nothing: `E114`.
+        let src = "xs မှာ [1] ဖြစ်၏။\nfn shout(s :int) {\n    print(s);\n    return;\n}\nprint(map(xs, shout));\n";
+        let err = run_source(src).unwrap_err();
+        assert!(err.contains("E114"), "{err}");
+        // A value that cannot be walked: `E110`.
+        let err = run_source("print(map(5, x => x));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+        // ...and `reduce`'s starting value is not evaluated before that check.
+        let src = "fn noise() {\n    print(\"noise\");\n    return 0;\n}\nစမ်းရန်\n    print(reduce(5, (a, b) => a + b, noise()));\nE110 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\nprint(\"done\");\n";
+        assert_eq!(out(src), vec!["caught", "done"]);
+    }
+
+    #[test]
+    fn an_error_inside_a_callback_is_caught_like_any_other() {
+        // A handler outside the call takes over, and the loop does not resume.
+        let src = "xs မှာ [1, 2] ဖြစ်၏။\nစမ်းရန်\n    print(map(xs, x => nosuchvar));\nE030 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\nprint(\"after\");\n";
+        assert_eq!(out(src), vec!["caught", "after"]);
+        // A handler inside the lambda body keeps the walk going.
+        let src = "xs မှာ [1, 2] ဖြစ်၏။\nprint(map(xs, fn(x) {\n    စမ်းရန်\n        return nosuchvar;\n    E030 ကို ဖမ်းပါ။\n        return -1;\n    ပြီး။\n}));\n";
+        assert_eq!(out(src), vec!["[-1, -1]"]);
+    }
+
+    #[test]
+    fn a_callback_builtin_compiles_as_a_statement_and_in_an_assignment() {
+        let src = "xs မှာ [1, 2] ဖြစ်၏။\nmap(xs, x => x);\ny အတွက် map(xs, x => x + 1) ကို လုပ်ပါ။\nprint(y);\n";
+        assert_eq!(out(src), vec!["[2, 3]"]);
+    }
+
+    #[test]
+    fn a_callback_the_vm_cannot_represent_is_e170() {
+        // A value in the callback position is refused rather than run.
+        let err = compile_source("print(map([1], 3));\n").unwrap_err();
+        assert!(err.contains("E170"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // a function's result, stored in a variable
+    // -----------------------------------------------------------------
+
+    /// Regression: `<var> အတွက် <fn>(...) ကို လုပ်ပါ။` compiles and the value is
+    /// usable afterwards, exactly as under the interpreter.
+    #[test]
+    fn a_functions_result_is_stored_and_then_used() {
+        let src = "လုပ်ငန်း twice အတွက် x ဖြင့်\n    x * 2\nပြီး။\ny အတွက် twice ကို လုပ်ရန် 21 ဖြင့်။\ny ကို ဖော်ပြပါ။\nprint(y + 1);\n";
+        assert_eq!(out(src), vec!["42", "43"]);
+    }
+
+    #[test]
+    fn a_body_that_ends_in_a_declaration_returns_that_value() {
+        let src = "လုပ်ငန်း f အတွက် n ဖြင့်\n    r သည် n + 1 ဖြစ်၏။\nပြီးပါပြီ။\nx အတွက် f ကို လုပ်ရန် 41 ဖြင့်။\nx ကို ဖော်ပြပါ။\n".replace("ပြီးပါပြီ။", "ပြီး။");
+        assert_eq!(out(&src), vec!["42"]);
+    }
+
+    #[test]
+    fn a_call_that_returns_nothing_is_e071_when_stored() {
+        // A body whose last statement is a print has no value.
+        let src = "လုပ်ငန်း shout အတွက် s ဖြင့်\n    \"noise\" ကို ဖော်ပြပါ။\nပြီး။\nx အတွက် shout ကို လုပ်ရန် \"a\" ဖြင့်။\n";
+        let err = run_source(src).unwrap_err();
+        assert!(err.contains("E071"), "{err}");
+        // A bare `return;` is the same.
+        let err = run_source("fn v() {\n    print(\"side\");\n    return;\n}\ny အတွက် v ကို လုပ်ပါ။\n").unwrap_err();
+        assert!(err.contains("E071"), "{err}");
+        // And it is catchable, as any run-time error is.
+        let src = "fn v() {\n    print(\"side\");\n}\nစမ်းရန်\n    y အတွက် v ကို လုပ်ပါ။\nE071 ကို ဖမ်းပါ။\n    print(\"E071 ok\");\nပြီး။\n";
+        assert_eq!(out(src), vec!["side", "E071 ok"]);
+    }
+
+    #[test]
+    fn assigning_a_constructor_or_builtin_result_works() {
+        let src = "ပုံသေ Point(x, y) သည်\n    လုပ်ငန်း Point()သည်\n        အတု px သည် x ဖြစ်၏။\n    ပြီး။\nပြီး။\np အတွက် Point(3, 4) ကို လုပ်ပါ။\np ၏ px ကို ဖော်ပြပါ။\nn အတွက် len(\"abcd\") ကို လုပ်ပါ။\nprint(n + 1);\n";
+        assert_eq!(out(src), vec!["3", "5"]);
+    }
+
+    #[test]
+    fn a_bad_callee_in_an_assigning_call_is_checked_first() {
+        // Unknown function: E031, before the arguments would run.
+        let err = run_source("z အတွက် nosuchfn(1) ကို လုပ်ပါ။\n").unwrap_err();
+        assert!(err.contains("E031"), "{err}");
+        // Wrong argument count: E033, before the arguments would run.
+        let err = run_source("fn f(a :int) {\n    return a;\n}\nz အတွက် f() ကို လုပ်ပါ။\n")
+            .unwrap_err();
+        assert!(err.contains("E033"), "{err}");
+    }
+
+    /// A missing variable reports `E030` with its line, as the interpreter
+    /// does -- the value a stored call result leaves behind is no exception.
+    #[test]
+    fn a_missing_variable_reports_its_line() {
+        let err = run_source("print(\"a\");\nprint(nosuchvar);\n").unwrap_err();
+        assert_eq!(
+            err,
+            "E030 လိုင်း 2 တွင် \"nosuchvar\" ဆိုသော ကိန်းရှင်ကို ရှာမတွေ့ပါ။"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // libraries
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn library_calls_compile_and_run() {
+        let src = "use ကျပန်း;\nprint(ကျပန်း.ကိန်း(5, 6));\nprint(ကျပန်း.တန်ဖိုး([\"A\"]));\nprint(ကျပန်း.random_int(1, 2));\n";
+        assert_eq!(out(src), vec!["5", "A", "1"]);
+    }
+
+    #[test]
+    fn a_library_must_be_imported_before_it_is_called() {
+        let err = run_source("print(ကျပန်း.ကိန်း(1, 2));\n").unwrap_err();
+        assert!(err.contains("E089"), "{err}");
+        assert_eq!(out("use ကျပန်း;\nprint(ကျပန်း.ကိန်း(1, 2));\n"), vec!["1"]);
+    }
+
+    #[test]
+    fn library_errors_match_the_interpreter() {
+        for (src, code) in [
+            // unknown library
+            ("nosuchlib.get(\"x\");\n", "E085"),
+            // unknown function in a known library
+            ("use ကျပန်း;\nprint(ကျပန်း.nosuchfn(1));\n", "E086"),
+            // wrong argument count
+            ("use ကျပန်း;\nprint(ကျပန်း.ကိန်း(1));\n", "E087"),
+            // a call that acts without a value, used as one
+            ("use အချိန်;\nprint(အချိန်.စောင့်(0));\n", "E117"),
+            // a call that acts without a value, stored into a name
+            ("use အချိန်;\nx အတွက် အချိန် ၏ စောင့်(0) ကို လုပ်ပါ။\n", "E088"),
+        ] {
+            let err = run_source(src).unwrap_err();
+            assert!(err.contains(code), "{src} => {err}");
+        }
+    }
+
+    #[test]
+    fn a_library_alias_spelling_resolves_to_the_library() {
+        let src = "နည်းပညာများ ကျပန်း အဖြစ် r ကို အသုံးပြုပါ။\nprint(r.ကိန်း(5, 6));\n";
+        assert_eq!(out(src), vec!["5"]);
+    }
+
+    #[test]
+    fn a_library_error_is_catchable_by_code() {
+        let src = "စမ်းရန်\n    ကျပန်း.ကိန်း(1, 2);\nE089 ကို ဖမ်းပါ။\n    print(\"E089 ok\");\nပြီး။\nprint(\"done\");\n";
+        assert_eq!(out(src), vec!["E089 ok", "done"]);
+    }
+
+    // -----------------------------------------------------------------
+    // loop-as-value
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_loop_value_is_the_value_passed_to_break() {
+        let src = "x :int = loop {\n    x += 1;\n    if (x == 3) {\n        break x * 10;\n    }\n};\nprint(x);\ny :str = loop {\n    break \"text\";\n};\nprint(y);\n";
+        assert_eq!(out(src), vec!["30", "text"]);
+    }
+
+    #[test]
+    fn a_break_without_a_value_in_a_value_loop_is_e115() {
+        let src = "print(\"start\");\nv :int = loop {\n    break;\n};\nprint(v);\n";
+        let err = run_source(src).unwrap_err();
+        assert!(err.contains("E115"), "{err}");
+        assert!(err.contains("လိုင်း 2"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_loop_value_targets_the_innermost_loop() {
+        let src = "total :int = 0;\ni :int = 0;\nwhile (i < 3) {\n    i += 1;\n    inner :int = loop {\n        if (i == 2) {\n            break 100;\n        }\n        break i;\n    };\n    total += inner;\n}\nprint(total);\n";
+        assert_eq!(out(src), vec!["104"]);
+    }
+
+    #[test]
+    fn a_plain_loop_ignores_a_break_value() {
+        let src = "i :int = 0;\nloop {\n    i += 1;\n    if (i == 3) {\n        break 99;\n    }\n}\nprint(i);\nloop {\n    if (i == 5) {\n        break;\n    }\n    i += 1;\n}\nprint(i);\n";
+        assert_eq!(out(src), vec!["3", "5"]);
+    }
+
+    #[test]
+    fn a_break_value_leaves_a_try_without_running_finally() {
+        // A `break` is a signal in the interpreter, so the `finally` of a `try`
+        // it is leaving does not run -- the loop value must skip it too.
+        let src = "n :int = loop {\n    စမ်းရန်\n        print(\"body\");\n        break 7;\n    နောက်ဆုံးတွင်\n        print(\"fin\");\n    ပြီး။\n};\nprint(n);\n";
+        assert_eq!(out(src), vec!["body", "7"]);
+    }
+
+    #[test]
+    fn a_break_value_from_a_catch_body_is_the_loop_value() {
+        let src = "r :int = loop {\n    စမ်းရန်\n        n :int = \"no\";\n    E ကို ဖမ်းပါ။\n        print(\"caught\");\n        break 2;\n    နောက်ဆုံးတွင်\n        print(\"fin\");\n    ပြီး။\n};\nprint(r);\n";
+        assert_eq!(out(src), vec!["caught", "2"]);
+    }
+
+    #[test]
+    fn a_value_loop_can_continue_and_then_break() {
+        let src = "k :int = 0;\nv :int = loop {\n    k += 1;\n    if (k < 3) {\n        continue;\n    }\n    break k;\n};\nprint(v);\nprint(k);\n";
+        assert_eq!(out(src), vec!["3", "3"]);
+    }
+
+    #[test]
+    fn a_pin_loop_value_is_a_constant_afterwards() {
+        let src = "pin P :int = loop {\n    break 5;\n};\nprint(P);\nP = 6;\n";
+        let err = run_source(src).unwrap_err();
+        assert!(err.contains("E104"), "{err}");
+    }
+
+    #[test]
+    fn a_loop_value_is_checked_against_the_declared_type() {
+        let src = "n :str = loop {\n    break 1;\n};\nprint(n);\n";
+        let err = run_source(src).unwrap_err();
+        assert!(err.contains("E103"), "{err}");
     }
 
     #[test]
