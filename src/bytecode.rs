@@ -28,10 +28,17 @@
 //! so results and error messages are shared rather than reimplemented.
 //!
 //! Builtin libraries whose functions only read their argument values
-//! (`ကျပန်း`, `အချိန်`) import and call through `UseLib`/`RequireLib`/`LibCall`,
-//! again running the interpreter's own dispatch. Their failures keep the
-//! interpreter's codes and ordering: `E089` before the arguments are
-//! evaluated, `E086`/`E087` before them too, `E117`/`E088` after the call.
+//! (`ကျပန်း`, `အချိန်`, `json`, `file`) import and call through
+//! `UseLib`/`RequireLib`/`LibCall`, again running the interpreter's own
+//! dispatch. Their failures keep the interpreter's codes and ordering: `E089`
+//! before the arguments are evaluated, `E086`/`E087` before them too,
+//! `E117`/`E088` after the call.
+//!
+//! The mutating list builtins (`push`, `pop`, `sort`, `insert`, `remove`,
+//! `append`) compile to `PinGuard`/`Load`/`ListArg`/`Mutate`: the list variable
+//! is read, checked and written back, and the call's result is the value the
+//! interpreter returns. Default parameters are a `ParamMissing` prologue in
+//! the callee's own body, so each default sees the parameters before it.
 //!
 //! The callback builtins `map`, `filter` and `reduce` compile to `IterItems`
 //! (the value turned into the items they walk, with the interpreter's `E110`)
@@ -39,18 +46,24 @@
 //! callback position is compiled into a function body of its own, exactly as a
 //! named function is, so both go through the same `E033`/`E114` checks.
 //!
-//! Whatever the compiler cannot express yet -- the windows/server/json/file
-//! libraries, script/package libraries, default parameters, the mutating
-//! builtins (`push`, `sort`, ...), a lambda used anywhere but as a callback,
-//! and a few other expression forms -- is refused with `E170` at compile time
-//! rather than silently behaving differently from the interpreter.
+//! Lambdas are first-class values: `fn(x) { ... }` compiles to a [`FuncDef`]
+//! and `MakeFunc` pushes it, so a lambda can be stored, passed, returned and
+//! called through a variable (`CallableGuard` then `CallDyn`). Scopes are
+//! dynamic, as the interpreter's are: `load` walks the frame stack, so a
+//! callee reads its caller's locals, and a parameter with no previous binding
+//! stays visible after the call -- the interpreter's own rule.
+//!
+//! Whatever the compiler cannot express yet -- the windows/server library,
+//! script/package libraries, a library function used as a value -- is refused
+//! with `E170` at compile time rather than silently behaving differently from
+//! the interpreter.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::interpreter::{value_contains, value_eq, Interpreter, Key, ObjectValue, Value};
+use crate::interpreter::{value_contains, value_eq, Callable, Interpreter, Key, ObjectValue, Value};
 use crate::parser::{CondAtom, CondChain, Expr, ForSource, IfBranch, LogicalOp, Stmt};
 
 /// One instruction. Every jump holds an absolute index into its own chunk
@@ -64,10 +77,17 @@ pub enum Instr {
     Add,
     Sub,
     Mul,
-    Div,
-    Mod,
+    /// Divide: integers produce a float, as the interpreter's `/` does. The
+    /// line is carried so division by zero reports the interpreter's `E036`
+    /// (integers) or `E037` (floats) at the line written.
+    Div(u32),
+    /// Remainder, Euclidean as the interpreter computes it. The line is
+    /// carried for `E038`/`E039`.
+    Mod(u32),
     Neg,
-    Not,
+    /// Logical not. The line is carried so a non-bool operand reports the
+    /// interpreter's `E043` at the line the operator was written on.
+    Not(u32),
     And,
     Or,
     Eq,
@@ -204,11 +224,58 @@ pub enum Instr {
     /// `kind` selects the builtin named in that message (0 map, 1 filter,
     /// 2 reduce).
     IterItems(u8, u32),
-    /// `map`/`filter`/`reduce` with the items list (pushed by `IterItems`) and,
-    /// for `reduce`, its starting value on the stack. `callback` is the
-    /// function slot the lambda or named callback compiled to; `err` is the
-    /// `E114` message to raise when it returns nothing.
-    HigherOrder(u8, usize, u32, String),
+    /// `map`/`filter`/`reduce`: the items list (pushed by `IterItems`), the
+    /// callback value, and for `reduce` its starting value are on the stack.
+    /// The callback is an ordinary callable value, so a lambda written there,
+    /// a named function and a variable all work -- the interpreter resolves
+    /// the same three.
+    HigherOrder(u8, u32),
+    /// Check that the value on top of the stack is a list, before a mutating
+    /// builtin's other arguments run. `E110` names the builtin.
+    ListArg(String, u32),
+    /// `push`/`append`/`pop`/`insert`/`remove`/`sort` on the variable `var`:
+    /// the builtin's name, the variable, the argument count and the line. The
+    /// list and the extra arguments are on the stack; the updated list is
+    /// written back through the variable and the result is pushed.
+    Mutate(String, String, u8, u32),
+    /// Fill the parameter `name` from its default when the call left it off:
+    /// jump to the given index when the frame already has it.
+    ParamMissing(String, usize),
+    /// Pop `count` values and build a list, keeping their order.
+    List(usize),
+    /// Pop `count` values and build a tuple.
+    Tuple(usize),
+    /// Push the compiled function `index` as a first-class value, so it can
+    /// be stored, passed and returned like any other value. Calling it later
+    /// creates the same fresh frame `Call` does.
+    MakeFunc(usize),
+    /// `Load`, except that a name which is not a variable but is a user
+    /// function yields the function itself -- the interpreter's `Expr::Ident`
+    /// rule, which lets `f = double;` bind a function value.
+    LoadFn(String, usize, u32),
+    /// Before a call's arguments run, check that `name` holds a callable
+    /// value. `mode` picks the missing-name error the interpreter's path
+    /// uses: 0 is `E032` (an expression), 1 is `E031` (the `... ကို လုပ်ပါ။`
+    /// form) and 2 is `E113` (the eng `name(args);` statement).
+    CallableGuard(String, u32, u8),
+    /// Call the callable in variable `name` with `argc` arguments from the
+    /// stack. `mode` is the guard's, for a name that vanished between the two
+    /// instructions. A callable call always wants a value, so a body that
+    /// yields none is the interpreter's `E114` with the callable's label.
+    CallDyn(String, u8, u32, u8),
+    /// `reverse`: reverse the value on top of the stack. With a variable, a
+    /// list is reversed in place and written back (`E104` for a `pin` list);
+    /// every other value is reversed without a write.
+    Reverse(Option<String>, u32),
+    /// Keep the top value only when it is a bool, with the interpreter's
+    /// `E043` for anything else.
+    ToBool(u32),
+    /// Short-circuit `and`: when the left operand is false, push `false` and
+    /// jump past the right operand; otherwise evaluate it.
+    AndJump(usize, u32),
+    /// Short-circuit `or`: when the left operand is true, push `true` and
+    /// jump past the right operand; otherwise evaluate it.
+    OrJump(usize, u32),
     /// End of the top-level chunk.
     Halt,
 }
@@ -227,6 +294,9 @@ pub struct ClassDef {
 pub struct FuncDef {
     pub name: String,
     pub params: Vec<String>,
+    /// How many arguments a call must supply: the parameters without a
+    /// default. The rest are filled in by the body's own prologue.
+    pub required: usize,
     pub code: Vec<Instr>,
 }
 
@@ -253,6 +323,12 @@ fn is_pure_builtin(name: &str) -> bool {
 /// The callback builtins: `map`, `filter` and `reduce`. They walk a value and
 /// call a function for every item, so they compile to `IterItems` plus
 /// `HigherOrder` with the lambda (or named function) as its own body.
+fn is_mutating_builtin(name: &str) -> bool {
+    // `reverse` is handled as a value too (a string reverses into a string),
+    // so it keeps its own `E170` until that is compiled.
+    name != "reverse" && crate::interpreter::is_mutating_builtin(name)
+}
+
 fn is_higher_order(name: &str) -> bool {
     crate::interpreter::is_eng_builtin(name) && matches!(name, "map" | "filter" | "reduce")
 }
@@ -284,10 +360,6 @@ fn math_type_err(op: char) -> String {
         "E172 တွင် '{}' ကို ဤ တန်ဖိုး အမျိုးအစားများဖြင့် မတွက်နိုင်ပါ။",
         op
     )
-}
-
-fn div_zero() -> String {
-    "E173 တွင် သုညဖြင့် စား၍မရပါ။".to_string()
 }
 
 fn unknown_var(name: &str, line: usize) -> String {
@@ -459,8 +531,8 @@ impl Compiler {
                     '+' => Instr::Add,
                     '-' => Instr::Sub,
                     '*' => Instr::Mul,
-                    '/' => Instr::Div,
-                    '%' => Instr::Mod,
+                    '/' => Instr::Div(*line as u32),
+                    '%' => Instr::Mod(*line as u32),
                     other => {
                         return Err(unsupported(
                             *line,
@@ -705,10 +777,12 @@ impl Compiler {
                 }
                 Ok(())
             }
-            // `name(args);` -- a call whose result is discarded.
+            // `name(args);` -- a call whose result is discarded, but whose
+            // callable resolution is the eng statement's (`E113`, and a
+            // callable that yields nothing is still `E114`).
             Stmt::EngExprCall { name, args, line } => {
                 self.line = *line;
-                self.call_site(name, args, *line)?;
+                self.call_site(name, args, *line, 2)?;
                 self.emit(Instr::Pop);
                 Ok(())
             }
@@ -737,8 +811,8 @@ impl Compiler {
                     '+' => Instr::Add,
                     '-' => Instr::Sub,
                     '*' => Instr::Mul,
-                    '/' => Instr::Div,
-                    '%' => Instr::Mod,
+                    '/' => Instr::Div(self.line as u32),
+                    '%' => Instr::Mod(self.line as u32),
                     other => {
                         return Err(unsupported(
                             self.line,
@@ -812,7 +886,7 @@ impl Compiler {
             }
             Stmt::FuncCall { name, args, line } => {
                 self.line = *line;
-                self.call_site(name, args, *line)?;
+                self.call_site(name, args, *line, 1)?;
                 self.emit(Instr::Pop);
                 Ok(())
             }
@@ -1083,6 +1157,11 @@ impl Compiler {
             self.higher_order_site(fn_name, args, line)?;
             return Ok(());
         }
+        if is_mutating_builtin(fn_name) {
+            // The caller stores the value, as it does for any call.
+            self.mutate_site(fn_name, args, line)?;
+            return Ok(());
+        }
         if is_pure_builtin(fn_name) {
             for arg in args {
                 self.expr(arg)?;
@@ -1094,20 +1173,18 @@ impl Compiler {
             return Err(unsupported(line, "builtin အလုပ်"));
         }
         // Neither a function nor a builtin: `E031` when it runs, before the
-        // arguments would be evaluated.
-        self.emit(Instr::Abort(crate::interpreter::eng_missing_function_err(
-            line, fn_name,
-        )));
-        self.emit(Instr::Const(Value::Null));
+        // arguments would be evaluated -- or a variable holding a callable,
+        // which the interpreter calls instead of reporting `E031`.
+        self.callable_call_site(fn_name, args, line, 1)?;
         Ok(())
     }
 
     /// `map`/`filter`/`reduce`: the collection is turned into its items (with
-    /// the interpreter's `E110` for a value that cannot be walked), the
-    /// lambda or named callback is compiled into its own function body, and
-    /// `reduce`'s starting value is evaluated after the callback -- the order
-    /// the interpreter evaluates them in. A callback the VM cannot represent
-    /// (a value, a library function reference) stays `E170`.
+    /// the interpreter's `E110` for a value that cannot be walked), then the
+    /// callback is evaluated as an ordinary value -- a lambda, a named
+    /// function or a variable all work, because the interpreter resolves the
+    /// same three -- and then `reduce`'s starting value. A library function
+    /// reference stays `E170`: the VM cannot represent one.
     fn higher_order_site(&mut self, name: &str, args: &[Expr], line: usize) -> Result<(), String> {
         let kind = match name {
             "map" => 0u8,
@@ -1129,40 +1206,105 @@ impl Compiler {
         }
         self.expr(&args[0])?;
         self.emit(Instr::IterItems(kind, line as u32));
-        let callback = match &args[1] {
-            Expr::Ident(fn_name) if self.slots.contains_key(&fn_name.to_string()) => {
-                self.slots[&fn_name.to_string()]
-            }
-            Expr::Lambda {
-                params,
-                defaults,
-                body,
-                line: lambda_line,
-            } => {
-                if defaults.iter().any(|d| d.is_some()) {
-                    return Err(unsupported(
-                        *lambda_line,
-                        "မူလတန်ဖိုး ပါသော အလုပ် (default parameter)",
-                    ));
-                }
-                self.compile_lambda(params, body, *lambda_line)?
-            }
-            other => {
-                return Err(unsupported(
-                    self.line,
-                    &format!(
-                        "ပြန်ခေါ် အလုပ် ({})",
-                        expr_name(other)
-                    ),
-                ))
-            }
-        };
+        if matches!(&args[1], Expr::LibFnRef(..)) {
+            return Err(unsupported(
+                self.line,
+                "နည်းပညာ အလုပ် ကို ပြန်ခေါ် အလုပ်အဖြစ်",
+            ));
+        }
+        self.expr(&args[1])?;
         if kind == 2 {
             self.expr(&args[2])?;
         }
-        let label = self.funcs[callback].name.clone();
-        let err = crate::interpreter::eng_no_return_err(&label, line);
-        self.emit(Instr::HigherOrder(kind, callback, line as u32, err));
+        self.emit(Instr::HigherOrder(kind, line as u32));
+        Ok(())
+    }
+
+    /// Compile a call resolved at run time from a variable holding a callable
+    /// value: `f(1)`, `apply(fn(x) { x * 2 }, 2)`.
+    ///
+    /// The interpreter checks that the name is a callable *before* it
+    /// evaluates the arguments, and so does [`Instr::CallableGuard`]; the
+    /// arguments then run, and [`Instr::CallDyn`] enters the callable's frame.
+    fn callable_call_site(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+        missing: u8,
+    ) -> Result<(), String> {
+        self.emit(Instr::CallableGuard(name.to_string(), line as u32, missing));
+        for arg in args {
+            self.expr(arg)?;
+        }
+        self.emit(Instr::CallDyn(
+            name.to_string(),
+            args.len() as u8,
+            line as u32,
+            missing,
+        ));
+        Ok(())
+    }
+
+    /// `reverse(xs)`: an identifier argument reverses a list variable in place
+    /// (the interpreter's rule, `pin` included); any other value is reversed
+    /// without a write.
+    fn reverse_site(&mut self, args: &[Expr], line: usize) -> Result<(), String> {
+        if args.len() != 1 {
+            self.emit(Instr::Abort(crate::interpreter::eng_builtin_err(
+                line,
+                "reverse",
+                &format!(
+                    "စာရင်း သို့မဟုတ် စာသား တစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
+                    args.len()
+                ),
+            )));
+            self.emit(Instr::Const(Value::Null));
+            return Ok(());
+        }
+        match &args[0] {
+            Expr::Ident(name) => {
+                self.emit(Instr::Load(name.to_string(), self.line as u32));
+                self.emit(Instr::Reverse(Some(name.to_string()), line as u32));
+            }
+            other => {
+                self.expr(other)?;
+                self.emit(Instr::Reverse(None, line as u32));
+            }
+        }
+        Ok(())
+    }
+
+    /// `push(xs, 4)`, `sort(xs)`, ...: the first argument must name a list
+    /// variable. The interpreter checks, in order, that the name is not a
+    /// `pin` constant, that it exists (`E030`), that it holds a list (`E110`),
+    /// and only then evaluates the other arguments -- compiled here in the same
+    /// order. A first argument that is not a variable is the interpreter's own
+    /// `E110`, raised before anything runs.
+    fn mutate_site(&mut self, name: &str, args: &[Expr], line: usize) -> Result<(), String> {
+        let Some(Expr::Ident(var)) = args.first() else {
+            let message = crate::interpreter::eng_builtin_err(
+                line,
+                name,
+                "ပထမ အချက်သည် စာရင်း ကိန်းရှင် ဖြစ်ရပါမည်၊ ဥပမာ — push(xs, 4)",
+            );
+            self.emit(Instr::Abort(message));
+            self.emit(Instr::Const(Value::Null));
+            return Ok(());
+        };
+        let var = var.to_string();
+        self.emit(Instr::PinGuard(var.clone(), line as u32));
+        self.emit(Instr::Load(var.clone(), line as u32));
+        self.emit(Instr::ListArg(name.to_string(), line as u32));
+        for arg in &args[1..] {
+            self.expr(arg)?;
+        }
+        self.emit(Instr::Mutate(
+            name.to_string(),
+            var,
+            args.len() as u8,
+            line as u32,
+        ));
         Ok(())
     }
 
@@ -1173,6 +1315,7 @@ impl Compiler {
     fn compile_lambda(
         &mut self,
         params: &[String],
+        defaults: &[Option<Expr>],
         body: &[Stmt],
         _line: usize,
     ) -> Result<usize, String> {
@@ -1180,6 +1323,7 @@ impl Compiler {
         self.funcs.push(FuncDef {
             name: format!("fn({})", params.join(", ")),
             params: params.to_vec(),
+            required: defaults.iter().filter(|d| d.is_none()).count(),
             code: Vec::new(),
         });
         let saved_code = std::mem::take(&mut self.code);
@@ -1187,7 +1331,9 @@ impl Compiler {
         let saved_handlers = self.handlers;
         let saved_line = self.line;
         self.handlers = 0;
-        let result = compile_body(self, body);
+        let result = self
+            .fill_defaults(params, defaults)
+            .and_then(|()| compile_body(self, body));
         let code = std::mem::replace(&mut self.code, saved_code);
         self.loops = saved_loops;
         self.handlers = saved_handlers;
@@ -1195,6 +1341,28 @@ impl Compiler {
         result?;
         self.funcs[index].code = code;
         Ok(index)
+    }
+
+    /// A parameter the call left off is filled from its default, in the
+    /// callee's own frame, so a later default sees the ones before it.
+    fn fill_defaults(
+        &mut self,
+        params: &[String],
+        defaults: &[Option<Expr>],
+    ) -> Result<(), String> {
+        for (index, default) in defaults.iter().enumerate() {
+            let Some(expr) = default else { continue };
+            let Some(param) = params.get(index) else { continue };
+            let check = self.code.len();
+            self.emit(Instr::ParamMissing(param.clone(), 0));
+            self.expr(expr)?;
+            self.emit(Instr::Store(param.clone()));
+            let target = self.code.len();
+            if let Instr::ParamMissing(_, jump) = &mut self.code[check] {
+                *jump = target;
+            }
+        }
+        Ok(())
     }
 
     fn callee(&self, name: &str) -> Result<usize, String> {
@@ -1216,8 +1384,19 @@ impl Compiler {
     /// print its line before the error under `--vm` too. A name that is a
     /// builtin stays `E170`: the VM does not implement builtins, and pretending
     /// the name is unknown would be a lie.
-    fn call_site(&mut self, name: &str, args: &[Expr], line: usize) -> Result<(), String> {
+    fn call_site(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+        missing: u8,
+    ) -> Result<(), String> {
         let Some(idx) = self.slots.get(name).copied() else {
+            if is_mutating_builtin(name) {
+                // The caller discards the value, as it does for any call.
+                self.mutate_site(name, args, line)?;
+                return Ok(());
+            }
             if is_higher_order(name) {
                 // The caller discards the value, as it does for any call.
                 self.higher_order_site(name, args, line)?;
@@ -1233,10 +1412,12 @@ impl Compiler {
             if crate::interpreter::is_eng_builtin(name) {
                 return Err(unsupported(line, "builtin အလုပ်"));
             }
-            self.emit(Instr::Abort(crate::interpreter::eng_missing_function_err(
-                line, name,
-            )));
-            self.emit(Instr::Const(Value::Null));
+            // No callee by that name: a variable may hold a callable value
+            // (a lambda), which the interpreter looks up before reporting a
+            // missing function. The guard runs before the arguments, and the
+            // call happens after them, exactly as the interpreter orders the
+            // two -- and like its `invoke_callable`, the call wants a value.
+            self.callable_call_site(name, args, line, missing)?;
             return Ok(());
         };
         if let Some(&(total, required)) = self.arities.get(name) {
@@ -1458,7 +1639,7 @@ impl Compiler {
             });
         }
         if negate {
-            self.emit(Instr::Not);
+            self.emit(Instr::Not(self.line as u32));
         }
         Ok(())
     }
@@ -1489,7 +1670,7 @@ impl Compiler {
             _ => return Err(bool_expected(self.line)),
         }
         if atom.negate {
-            self.emit(Instr::Not);
+            self.emit(Instr::Not(self.line as u32));
         }
         Ok(())
     }
@@ -1523,7 +1704,17 @@ impl Compiler {
                 Ok(())
             }
             Expr::Ident(name) => {
-                self.emit(Instr::Load(name.to_string(), self.line as u32));
+                // A name that is not a variable but is a function is the
+                // function itself (`f = double;`), as the interpreter's own
+                // `Expr::Ident` rule says.
+                match self.slots.get(&**name).copied() {
+                    Some(index) => {
+                        self.emit(Instr::LoadFn(name.to_string(), index, self.line as u32));
+                    }
+                    None => {
+                        self.emit(Instr::Load(name.to_string(), self.line as u32));
+                    }
+                }
                 Ok(())
             }
             Expr::Binary(lhs, op, rhs, line) => {
@@ -1533,8 +1724,8 @@ impl Compiler {
                     '+' => Instr::Add,
                     '-' => Instr::Sub,
                     '*' => Instr::Mul,
-                    '/' => Instr::Div,
-                    '%' => Instr::Mod,
+                    '/' => Instr::Div(*line as u32),
+                    '%' => Instr::Mod(*line as u32),
                     other => return Err(unsupported(*line, &format!("'{}'", other))),
                 });
                 Ok(())
@@ -1553,9 +1744,40 @@ impl Compiler {
                 });
                 Ok(())
             }
-            Expr::Not(inner, _) => {
+            Expr::Not(inner, line) => {
                 self.expr(inner)?;
-                self.emit(Instr::Not);
+                self.emit(Instr::Not(*line as u32));
+                Ok(())
+            }
+            // `a and b` / `a or b` as a value: short-circuit, then a bool.
+            Expr::Logical(lhs, op, rhs, line) => {
+                self.expr(lhs)?;
+                let at = self.emit(match op {
+                    LogicalOp::And => Instr::AndJump(usize::MAX, *line as u32),
+                    LogicalOp::Or => Instr::OrJump(usize::MAX, *line as u32),
+                });
+                self.expr(rhs)?;
+                self.emit(Instr::ToBool(*line as u32));
+                let end = self.here();
+                match &mut self.code[at] {
+                    Instr::AndJump(target, _) | Instr::OrJump(target, _) => *target = end,
+                    other => panic!("patch on a non-branch: {:?}", other),
+                }
+                Ok(())
+            }
+            // `<cond> ? <then> : <else>`: only the chosen branch runs, so the
+            // other one may be a call with side effects or a division by zero.
+            Expr::Ternary(cond, then_expr, else_expr, line) => {
+                self.expr(cond)?;
+                self.emit(Instr::ToBool(*line as u32));
+                let to_else = self.emit(Instr::JumpIfFalse(usize::MAX));
+                self.expr(then_expr)?;
+                let to_end = self.emit(Instr::Jump(usize::MAX));
+                let else_at = self.here();
+                self.patch_jump(to_else, else_at);
+                self.expr(else_expr)?;
+                let end = self.here();
+                self.patch_jump(to_end, end);
                 Ok(())
             }
             Expr::Neg(inner, _) => {
@@ -1564,15 +1786,53 @@ impl Compiler {
                 Ok(())
             }
             Expr::ListLit(items) | Expr::TupleLit(items) => {
+                // Every element a literal: fold into one constant. Otherwise
+                // evaluate the elements and build the collection at run time,
+                // so `[a, b + 1]` works as it does in the interpreter.
                 let mut values = Vec::with_capacity(items.len());
+                let mut folded = true;
                 for item in items {
-                    values.push(literal(item, self.line)?);
+                    match literal(item, self.line) {
+                        Ok(value) => values.push(value),
+                        Err(_) => {
+                            folded = false;
+                            break;
+                        }
+                    }
                 }
-                let value = match expr {
-                    Expr::TupleLit(_) => Value::Tuple(values),
-                    _ => Value::List(values),
-                };
-                self.emit(Instr::Const(value));
+                if folded {
+                    let value = match expr {
+                        Expr::TupleLit(_) => Value::Tuple(values),
+                        _ => Value::List(values),
+                    };
+                    self.emit(Instr::Const(value));
+                    return Ok(());
+                }
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.emit(match expr {
+                    Expr::TupleLit(_) => Instr::Tuple(items.len()),
+                    _ => Instr::List(items.len()),
+                });
+                Ok(())
+            }
+            // `reverse(xs)` reverses a list variable in place, and a string,
+            // list or tuple value without a write -- the interpreter's rule.
+            Expr::NewObj(name, args, line) if name == "reverse" => {
+                self.reverse_site(args, *line)?;
+                Ok(())
+            }
+            // An anonymous function used as a value: compile its body once and
+            // push it as a callable. 
+            Expr::Lambda {
+                params,
+                defaults,
+                body,
+                line,
+            } => {
+                let index = self.compile_lambda(params, defaults, body, *line)?;
+                self.emit(Instr::MakeFunc(index));
                 Ok(())
             }
             // `<name>(args)` reaches the compiler as an instantiation. The
@@ -1587,7 +1847,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::NewObj(name, args, line) if self.slots.contains_key(name) => {
-                self.call_site(name, args, *line)?;
+                self.call_site(name, args, *line, 1)?;
                 Ok(())
             }
             // `<name>(args)` where the name is a builtin: the call becomes one
@@ -1605,11 +1865,24 @@ impl Compiler {
                 self.higher_order_site(name, args, *line)?;
                 Ok(())
             }
+            // `push(xs, 4)` and the rest: the list variable is read, checked,
+            // updated and written back, exactly as the interpreter stores it.
+            Expr::NewObj(name, args, line) if is_mutating_builtin(name) => {
+                self.mutate_site(name, args, *line)?;
+                Ok(())
+            }
             Expr::NewObj(name, args, line) if is_pure_builtin(name) => {
                 for arg in args {
                     self.expr(arg)?;
                 }
                 self.emit(Instr::Builtin(name.clone(), args.len() as u8, *line as u32));
+                Ok(())
+            }
+            // Any other `<name>(args)` used as a value: the name may be a
+            // variable holding a lambda, so the call is resolved at run time.
+            // A name that resolves to nothing is the interpreter's `E032`.
+            Expr::NewObj(name, args, line) => {
+                self.callable_call_site(name, args, *line, 0)?;
                 Ok(())
             }
             Expr::FieldAccess(target, field, line) => {
@@ -1831,16 +2104,6 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program, String> {
     // in the callee's own frame, and this backend binds parameters only from
     // the arguments the call supplies. Refuse the program instead of running
     // it with a parameter left unbound.
-    for def in collect_defs(stmts) {
-        if let Stmt::FuncDef {
-            defaults, line, ..
-        } = def
-        {
-            if defaults.iter().any(|d| d.is_some()) {
-                return Err(unsupported(*line, "မူလတန်ဖိုး ပါသော အလုပ် (default parameter)"));
-            }
-        }
-    }
     // Pass one: every function and class name gets a slot, so a call compiled
     // before the callee's body is written still finds it.
     register_functions(stmts, &mut compiler);
@@ -1848,13 +2111,20 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program, String> {
 
     // Pass two: compile each body into its slot, then the top-level chunk.
     for (index, def) in collect_defs(stmts).into_iter().enumerate() {
-        let Stmt::FuncDef { body, .. } = def else {
+        let Stmt::FuncDef {
+            params,
+            defaults,
+            body,
+            ..
+        } = def
+        else {
             unreachable!("collect_defs yields only function definitions")
         };
         let saved_code = std::mem::take(&mut compiler.code);
         let saved_loops = std::mem::take(&mut compiler.loops);
         let saved_handlers = compiler.handlers;
         compiler.handlers = 0;
+        compiler.fill_defaults(params, defaults)?;
         compile_body(&mut compiler, body)?;
         let code = std::mem::replace(&mut compiler.code, saved_code);
         compiler.loops = saved_loops;
@@ -1947,6 +2217,7 @@ fn register_functions(stmts: &[Stmt], compiler: &mut Compiler) {
                     compiler.funcs.push(FuncDef {
                         name: name.clone(),
                         params: params.clone(),
+                        required,
                         code: Vec::new(),
                     });
                 }
@@ -2012,6 +2283,95 @@ struct Frame {
     value_err: Option<String>,
 }
 
+/// One mutating builtin on an already-read list: the interpreter's own rules,
+/// including its `E110`/`E049` messages and the value each call returns.
+fn mutate_list(
+    name: &str,
+    items: &mut Vec<Value>,
+    mut extra: Vec<Value>,
+    line: usize,
+) -> Result<Value, String> {
+    use crate::interpreter::{eng_builtin_err, index_as_int, seq_slot, sort_items};
+    match name {
+        "push" | "append" => {
+            if extra.len() != 1 {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!(
+                        "စာရင်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ တန်ဖိုး {} ခု ရပါသည်",
+                        extra.len()
+                    ),
+                ));
+            }
+            items.push(extra.pop().expect("one value"));
+            Ok(Value::Int(items.len() as i64))
+        }
+        "pop" => {
+            if !extra.is_empty() {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    "စာရင်း တစ်ခုသာ လိုအပ်ပြီး အခြားအချက် မလိုပါ",
+                ));
+            }
+            match items.pop() {
+                Some(v) => Ok(v),
+                None => Err(eng_builtin_err(line, name, "စာရင်းအလွတ်မှ ဖယ်၍မရပါ")),
+            }
+        }
+        "insert" => {
+            if extra.len() != 2 {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!(
+                        "စာရင်း၊ အညွှန်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ စာရင်းနောက်တွင် အချက် {} ခု ရပါသည်",
+                        extra.len()
+                    ),
+                ));
+            }
+            let value = extra.pop().expect("the value");
+            let at = index_as_int(&extra[0], line)?;
+            if at < 0 || at as usize > items.len() {
+                return Err(format!(
+                    "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
+                    line, at
+                ));
+            }
+            items.insert(at as usize, value);
+            Ok(Value::Int(items.len() as i64))
+        }
+        "remove" => {
+            if extra.len() != 1 {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    &format!(
+                        "စာရင်း နှင့် အညွှန်း တစ်ခု လိုအပ်ပါသည်၊ အညွှန်း {} ခု ရပါသည်",
+                        extra.len()
+                    ),
+                ));
+            }
+            let at = index_as_int(&extra[0], line)?;
+            let slot = seq_slot(items.len(), at, line)?;
+            Ok(items.remove(slot))
+        }
+        "sort" => {
+            if !extra.is_empty() {
+                return Err(eng_builtin_err(
+                    line,
+                    name,
+                    "စာရင်း တစ်ခုသာ လိုအပ်ပြီး အခြားအချက် မလိုပါ",
+                ));
+            }
+            sort_items(items, line, name)?;
+            Ok(Value::List(items.clone()))
+        }
+        other => Err(crate::interpreter::lib_fn_unknown_err(other, other, line)),
+    }
+}
+
 /// What a callback call did: returned a value, or left the call some other
 /// way (an error was handed to a handler below it, or the program halted).
 enum CallbackOutcome {
@@ -2029,6 +2389,72 @@ fn truthy(value: &Value) -> Result<bool, String> {
     match value {
         Value::Bool(b) => Ok(*b),
         _ => Err(bool_expected(0)),
+    }
+}
+
+/// `bool_operand` from the interpreter, with the same `E043` text: a value
+/// used where a condition is required must be a bool.
+fn bool_operand_vm(value: &Value, line: usize) -> Result<bool, String> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        other => Err(format!(
+            "E043 လိုင်း {} တွင် {} တန်ဖိုးကို အခြေအနေအဖြစ် (မှန်/မှား စစ်ရန်) သုံး၍မရပါ။",
+            line,
+            crate::interpreter::type_name_mm(other)
+        )),
+    }
+}
+
+/// The error for a call whose name resolves to nothing. Each of the
+/// interpreter's call paths has its own code, so the mode picks it.
+fn missing_callee(name: &str, line: usize, mode: u8) -> String {
+    match mode {
+        // `... ကို လုပ်ပါ။` falls through to the missing-function error.
+        1 => crate::interpreter::eng_missing_function_err(line, name),
+        // The eng `name(args);` statement has its own error code.
+        2 => format!(
+            "E113 လိုင်း {} တွင် \"{}\" သည် အလုပ် သို့မဟုတ် builtin မဟုတ်ပါ။",
+            line, name
+        ),
+        // An expression ends up in the class-not-found path.
+        _ => format!(
+            "E032 လိုင်း {} တွင် \"{}\" ဆိုသော ပုံသေကို ရှာမတွေ့ပါ။",
+            line, name
+        ),
+    }
+}
+
+/// Reverse a value the way the interpreter's `reverse` does: a string by
+/// clusters, a list or tuple by element. Anything else is `E111`.
+fn reverse_value(value: Value, line: usize) -> Result<Value, String> {
+    match value {
+        Value::Str(s) => Ok(Value::Str(crate::text::reverse(&s))),
+        Value::List(mut items) => {
+            items.reverse();
+            Ok(Value::List(items))
+        }
+        Value::Tuple(mut items) => {
+            items.reverse();
+            Ok(Value::Tuple(items))
+        }
+        other => Err(crate::interpreter::eng_builtin_err(
+            line,
+            "reverse",
+            &format!(
+                "စာရင်း သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်",
+                crate::interpreter::type_name_mm(&other)
+            ),
+        )),
+    }
+}
+
+/// The result of `+ - *`: an integer when both operands were integers, a float
+/// otherwise -- the type the interpreter keeps for those operations.
+fn number(value: f64, both_int: bool) -> Value {
+    if both_int {
+        Value::Int(value as i64)
+    } else {
+        Value::Float(value)
     }
 }
 
@@ -2159,7 +2585,10 @@ impl<'p> Vm<'p> {
     }
 
     fn load(&self, name: &str, line: usize) -> Result<Value, String> {
-        if let Some(frame) = self.frames.last() {
+        // The interpreter's scope chain is dynamic: a callee sees the frames
+        // of its callers, so a function may read a caller's local. Walk the
+        // frames from innermost outward, then the globals.
+        for frame in self.frames.iter().rev() {
             if let Some(v) = frame.locals.get(name) {
                 return Ok(v.clone());
             }
@@ -2230,28 +2659,136 @@ impl<'p> Vm<'p> {
     /// nothing. `Left` says control did not come back from the call -- an
     /// error was handed to a `try` handler below it, or the program halted --
     /// so the caller must not touch the stack.
-    fn call_callback(
+    /// Start a call: check the argument count, push a fresh frame and bind the
+    /// parameters. `next_pc` is where the caller resumes once the callee
+    /// returns; `value_err` (when present) turns a body that yields nothing
+    /// into the interpreter's `E114`.
+    fn enter_call(
         &mut self,
         index: usize,
         args: Vec<Value>,
+        value_err: Option<String>,
         line: u32,
-        err: String,
-    ) -> Result<CallbackOutcome, String> {
+        next_pc: usize,
+    ) -> Result<(), String> {
         let func = &self.prog.funcs[index];
         let name = func.name.clone();
         let params = func.params.clone();
-        if args.len() != params.len() {
+        let required = func.required;
+        if args.len() < required || args.len() > params.len() {
             return Err(crate::interpreter::eng_arity_err(
                 &name,
                 args.len(),
-                params.len(),
+                required,
                 params.len(),
                 line as usize,
             ));
         }
-        let mut locals = HashMap::new();
-        for (param, value) in params.iter().zip(args) {
-            locals.insert(param.clone(), value);
+        self.set_pc(next_pc);
+        self.frames.push(Frame {
+            func: index,
+            pc: 0,
+            locals: HashMap::new(),
+            class: None,
+            self_fields: Vec::new(),
+            value_err,
+        });
+        self.bind_params(&params, args);
+        Ok(())
+    }
+
+    /// Bind a call's parameters with the interpreter's `bind_param` rule: a
+    /// name that has no binding yet is written into the shared environment
+    /// without a frame log entry, so it outlives the call (the interpreter's
+    /// own quirk, which makes a returned lambda that reads a parameter work);
+    /// a name that already has a binding is restored when the frame pops.
+    fn bind_params(&mut self, params: &[String], args: Vec<Value>) {
+        for (name, value) in params.iter().zip(args) {
+            let existed = self
+                .frames
+                .iter()
+                .rev()
+                .any(|frame| frame.locals.contains_key(name))
+                || self.globals.contains_key(name);
+            if !existed {
+                self.globals.insert(name.clone(), value.clone());
+            }
+            self.frames
+                .last_mut()
+                .expect("the frame was just pushed")
+                .locals
+                .insert(name.clone(), value);
+        }
+    }
+
+    /// Call the callable `name` holds, after [`Instr::CallableGuard`] checked
+    /// that it is one. The arguments are already evaluated, as the
+    /// interpreter's `invoke_callable` has them by this point.
+    fn call_dynamic(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        line: u32,
+        mode: u8,
+    ) -> Result<(), String> {
+        let value = match self.load(name, line as usize) {
+            Ok(value) => value,
+            Err(_) => return Err(missing_callee(name, line as usize, mode)),
+        };
+        let callable = match value {
+            Value::Callable(kind) => kind,
+            _ => return Err(missing_callee(name, line as usize, mode)),
+        };
+        let (index, label) = match &*callable {
+            Callable::Compiled { index, label } => (*index, label.clone()),
+            other => {
+                return Err(format!(
+                    "E170 လိုင်း {} တွင် \"{}\" ကို bytecode စက် ဖြင့် ခေါ်၍မရပါ။",
+                    line,
+                    other.label()
+                ))
+            }
+        };
+        // Every callable call wants a value: the interpreter's
+        // `invoke_callable` raises `E114` when the body yields none, even
+        // for a statement whose result is discarded.
+        let value_err = Some(crate::interpreter::eng_no_return_err(
+            &label,
+            line as usize,
+        ));
+        // The arm already moved past the call instruction, so the caller
+        // resumes exactly where the pc points now.
+        let next_pc = self.current_pc();
+        self.enter_call(index, args, value_err, line, next_pc)
+    }
+
+    fn call_callback(
+        &mut self,
+        kind: &Callable,
+        args: Vec<Value>,
+        line: u32,
+    ) -> Result<CallbackOutcome, String> {
+        let (index, label) = match kind {
+            Callable::Compiled { index, label } => (*index, label.clone()),
+            other => {
+                return Err(format!(
+                    "E170 လိုင်း {} တွင် \"{}\" ကို bytecode စက် ဖြင့် ခေါ်၍မရပါ။",
+                    line,
+                    other.label()
+                ))
+            }
+        };
+        let func = &self.prog.funcs[index];
+        let params = func.params.clone();
+        let required = func.required;
+        if args.len() < required || args.len() > params.len() {
+            return Err(crate::interpreter::eng_arity_err(
+                &label,
+                args.len(),
+                required,
+                params.len(),
+                line as usize,
+            ));
         }
         let base = self.frames.len();
         // The stack before the frame: a normal return leaves exactly the one
@@ -2262,11 +2799,15 @@ impl<'p> Vm<'p> {
         self.frames.push(Frame {
             func: index,
             pc: 0,
-            locals,
+            locals: HashMap::new(),
             class: None,
             self_fields: Vec::new(),
-            value_err: Some(err),
+            value_err: Some(crate::interpreter::eng_no_return_err(
+                &label,
+                line as usize,
+            )),
         });
+        self.bind_params(&params, args);
         let saved_stop = self.stop_depth;
         self.stop_depth = Some(base);
         let result = self.run();
@@ -2323,7 +2864,7 @@ impl<'p> Vm<'p> {
         }
     }
 
-    fn arith(&mut self, op: char) -> Result<(), String> {
+    fn arith(&mut self, op: char, line: u32) -> Result<(), String> {
         let rhs = self.pop();
         let lhs = self.pop();
         if op == '+' {
@@ -2336,29 +2877,48 @@ impl<'p> Vm<'p> {
             return Err(math_type_err(op));
         };
         let both_int = matches!(lhs, Value::Int(_)) && matches!(rhs, Value::Int(_));
+        let line = line as usize;
+        // The interpreter's own rules: integer `+ - *` stay integers, `/`
+        // always yields a float, and `%` is the Euclidean remainder. A zero
+        // divisor is `E036`/`E038` for integers and `E037`/`E039` for floats,
+        // each with the line the operation was written on.
         let value = match op {
-            '+' => a + b,
-            '-' => a - b,
-            '*' => a * b,
+            '+' => number(a + b, both_int),
+            '-' => number(a - b, both_int),
+            '*' => number(a * b, both_int),
             '/' => {
                 if b == 0.0 {
-                    return Err(div_zero());
+                    return Err(if both_int {
+                        format!("E036 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line)
+                    } else {
+                        format!("E037 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line)
+                    });
                 }
-                a / b
+                Value::Float(a / b)
             }
             '%' => {
                 if b == 0.0 {
-                    return Err(div_zero());
+                    return Err(if both_int {
+                        format!(
+                            "E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
+                            line
+                        )
+                    } else {
+                        format!(
+                            "E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။",
+                            line
+                        )
+                    });
                 }
-                a % b
+                if both_int {
+                    Value::Int((a as i64).rem_euclid(b as i64))
+                } else {
+                    Value::Float(a.rem_euclid(b))
+                }
             }
             other => return Err(math_type_err(other)),
         };
-        if both_int {
-            self.stack.push(Value::Int(value as i64));
-        } else {
-            self.stack.push(Value::Float(value));
-        }
+        self.stack.push(value);
         Ok(())
     }
 
@@ -2425,23 +2985,23 @@ impl<'p> Vm<'p> {
                     self.set_pc(pc + 1);
                 }
                 Instr::Add => {
-                    self.arith('+')?;
+                    self.arith('+', 0)?;
                     self.set_pc(pc + 1);
                 }
                 Instr::Sub => {
-                    self.arith('-')?;
+                    self.arith('-', 0)?;
                     self.set_pc(pc + 1);
                 }
                 Instr::Mul => {
-                    self.arith('*')?;
+                    self.arith('*', 0)?;
                     self.set_pc(pc + 1);
                 }
-                Instr::Div => {
-                    self.arith('/')?;
+                Instr::Div(line) => {
+                    self.arith('/', line)?;
                     self.set_pc(pc + 1);
                 }
-                Instr::Mod => {
-                    self.arith('%')?;
+                Instr::Mod(line) => {
+                    self.arith('%', line)?;
                     self.set_pc(pc + 1);
                 }
                 Instr::Neg => {
@@ -2454,9 +3014,92 @@ impl<'p> Vm<'p> {
                     self.stack.push(value);
                     self.set_pc(pc + 1);
                 }
-                Instr::Not => {
+                Instr::Not(line) => {
                     let v = self.pop();
-                    self.stack.push(Value::Bool(!truthy(&v)?));
+                    let b = bool_operand_vm(&v, line as usize)?;
+                    self.stack.push(Value::Bool(!b));
+                    self.set_pc(pc + 1);
+                }
+                Instr::ToBool(line) => {
+                    let v = self.pop();
+                    let b = bool_operand_vm(&v, line as usize)?;
+                    self.stack.push(Value::Bool(b));
+                    self.set_pc(pc + 1);
+                }
+                Instr::AndJump(target, line) => {
+                    let v = self.pop();
+                    if bool_operand_vm(&v, line as usize)? {
+                        self.set_pc(pc + 1);
+                    } else {
+                        self.stack.push(Value::Bool(false));
+                        self.set_pc(target);
+                    }
+                }
+                Instr::OrJump(target, line) => {
+                    let v = self.pop();
+                    if bool_operand_vm(&v, line as usize)? {
+                        self.stack.push(Value::Bool(true));
+                        self.set_pc(target);
+                    } else {
+                        self.set_pc(pc + 1);
+                    }
+                }
+                Instr::MakeFunc(index) => {
+                    let label = self.prog.funcs[index].name.clone();
+                    self.stack.push(Value::Callable(Rc::new(Callable::Compiled {
+                        index,
+                        label,
+                    })));
+                    self.set_pc(pc + 1);
+                }
+                Instr::LoadFn(name, index, line) => {
+                    // A live variable wins over the function of the same name,
+                    // exactly as the interpreter's `Expr::Ident` says.
+                    let value = match self.load(&name, line as usize) {
+                        Ok(value) => value,
+                        Err(_) => Value::Callable(Rc::new(Callable::Compiled {
+                            index,
+                            label: name,
+                        })),
+                    };
+                    self.stack.push(value);
+                    self.set_pc(pc + 1);
+                }
+                Instr::CallableGuard(name, line, mode) => {
+                    let value = match self.load(&name, line as usize) {
+                        Ok(value) => value,
+                        Err(_) => return Err(missing_callee(&name, line as usize, mode)),
+                    };
+                    if !matches!(value, Value::Callable(_)) {
+                        return Err(missing_callee(&name, line as usize, mode));
+                    }
+                    self.set_pc(pc + 1);
+                }
+                Instr::CallDyn(name, argc, line, mode) => {
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for _ in 0..argc {
+                        args.push(self.pop());
+                    }
+                    args.reverse();
+                    self.set_pc(pc + 1);
+                    self.call_dynamic(&name, args, line, mode)?;
+                }
+                Instr::Reverse(var, line) => {
+                    let value = self.pop();
+                    let in_place = matches!(value, Value::List(_));
+                    let reversed = reverse_value(value, line as usize)?;
+                    if in_place {
+                        if let Some(name) = var {
+                            if self.decls.contains_key(&name) {
+                                return Err(crate::interpreter::eng_const_reassign_err(
+                                    &name,
+                                    line as usize,
+                                ));
+                            }
+                            self.store(&name, reversed.clone());
+                        }
+                    }
+                    self.stack.push(reversed);
                     self.set_pc(pc + 1);
                 }
                 Instr::And => {
@@ -2877,45 +3520,19 @@ impl<'p> Vm<'p> {
                         args.push(self.pop());
                     }
                     args.reverse();
-                    let params = self.prog.funcs[index].params.clone();
-                    let mut locals = HashMap::new();
-                    for (name, value) in params.iter().zip(args) {
-                        locals.insert(name.clone(), value);
-                    }
                     // The caller resumes at the instruction after the call;
                     // `Return` finds it there when the frame pops.
-                    self.set_pc(pc + 1);
-                    self.frames.push(Frame {
-                        func: index,
-                        pc: 0,
-                        locals,
-                        class: None,
-                        self_fields: Vec::new(),
-                        value_err: None,
-                    });
+                    self.enter_call(index, args, None, 0, pc + 1)?;
                 }
-                Instr::CallValue(index, argc, _line, err) => {
+                Instr::CallValue(index, argc, line, err) => {
                     let mut args = Vec::with_capacity(argc as usize);
                     for _ in 0..argc {
                         args.push(self.pop());
                     }
                     args.reverse();
-                    let params = self.prog.funcs[index].params.clone();
-                    let mut locals = HashMap::new();
-                    for (name, value) in params.iter().zip(args) {
-                        locals.insert(name.clone(), value);
-                    }
-                    self.set_pc(pc + 1);
-                    self.frames.push(Frame {
-                        func: index,
-                        pc: 0,
-                        locals,
-                        class: None,
-                        self_fields: Vec::new(),
-                        // The caller wants a value: a body that ends without
-                        // one is the interpreter's `E071`.
-                        value_err: Some(err),
-                    });
+                    // The caller wants a value: a body that ends without one
+                    // is the interpreter's `E071`.
+                    self.enter_call(index, args, Some(err), line, pc + 1)?;
                 }
                 Instr::IterItems(kind, line) => {
                     let collection = self.pop();
@@ -2923,11 +3540,28 @@ impl<'p> Vm<'p> {
                     self.stack.push(Value::List(items));
                     self.set_pc(pc + 1);
                 }
-                Instr::HigherOrder(kind, callback, line, err) => {
+                Instr::HigherOrder(kind, line) => {
+                    // Stack: items, the callback value, and for `reduce` its
+                    // starting value -- the order the interpreter evaluates
+                    // them in.
                     let initial = if kind == 2 { Some(self.pop()) } else { None };
+                    let callback = self.pop();
                     let items = match self.pop() {
                         Value::List(items) => items,
                         other => vec![other],
+                    };
+                    let callable = match callback {
+                        Value::Callable(kind) => kind,
+                        other => {
+                            return Err(crate::interpreter::eng_builtin_err(
+                                line as usize,
+                                higher_order_name(kind),
+                                &format!(
+                                    "ပြန်ခေါ် အလုပ်အဖြစ် အလုပ် တစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်",
+                                    crate::interpreter::type_name_mm(&other)
+                                ),
+                            ))
+                        }
                     };
                     // The caller resumes at the next instruction; a callback
                     // that leaves through a handler must find it that way.
@@ -2939,7 +3573,7 @@ impl<'p> Vm<'p> {
                             2 => vec![acc.take().expect("reduce keeps an accumulator"), item.clone()],
                             _ => vec![item.clone()],
                         };
-                        let value = match self.call_callback(callback, args, line, err.clone())? {
+                        let value = match self.call_callback(&callable, args, line)? {
                             CallbackOutcome::Value(value) => value,
                             CallbackOutcome::Left => return Ok(()),
                         };
@@ -2966,6 +3600,70 @@ impl<'p> Vm<'p> {
                         2 => self.stack.push(acc.expect("reduce has its result")),
                         _ => self.stack.push(Value::List(out)),
                     }
+                }
+                Instr::ListArg(name, line) => {
+                    if let Some(other) = self.stack.last() {
+                        if !matches!(other, Value::List(_)) {
+                            let got = crate::interpreter::type_name_mm(other);
+                            return Err(crate::interpreter::eng_builtin_err(
+                                line as usize,
+                                &name,
+                                &format!("စာရင်း လိုအပ်ပါသည်၊ {} ရပါသည်", got),
+                            ));
+                        }
+                    }
+                    self.set_pc(pc + 1);
+                }
+                Instr::Mutate(name, var, argc, line) => {
+                    let mut extra = Vec::with_capacity(argc.saturating_sub(1) as usize);
+                    for _ in 0..argc.saturating_sub(1) {
+                        extra.push(self.pop());
+                    }
+                    extra.reverse();
+                    let current = self.pop();
+                    let mut items = match current {
+                        Value::List(items) => items,
+                        other => {
+                            return Err(crate::interpreter::eng_builtin_err(
+                                line as usize,
+                                &name,
+                                &format!(
+                                    "စာရင်း လိုအပ်ပါသည်၊ {} ရပါသည်",
+                                    crate::interpreter::type_name_mm(&other)
+                                ),
+                            ))
+                        }
+                    };
+                    let result = mutate_list(&name, &mut items, extra, line as usize)?;
+                    self.store(&var, Value::List(items));
+                    self.stack.push(result);
+                    self.set_pc(pc + 1);
+                }
+                Instr::List(count) => {
+                    let mut items = Vec::with_capacity(count.min(1024));
+                    for _ in 0..count {
+                        items.push(self.pop());
+                    }
+                    items.reverse();
+                    self.stack.push(Value::List(items));
+                    self.set_pc(pc + 1);
+                }
+                Instr::Tuple(count) => {
+                    let mut items = Vec::with_capacity(count.min(1024));
+                    for _ in 0..count {
+                        items.push(self.pop());
+                    }
+                    items.reverse();
+                    self.stack.push(Value::Tuple(items));
+                    self.set_pc(pc + 1);
+                }
+                Instr::ParamMissing(name, target) => {
+                    let bound = self
+                        .frames
+                        .last()
+                        .map(|f| f.locals.contains_key(&name))
+                        .unwrap_or(false);
+                    self.set_pc(if bound { target } else { pc + 1 });
                 }
                 Instr::Return(line) | Instr::ReturnValue(line) => {
                     let value = self.stack.pop().unwrap_or(Value::Null);
@@ -3034,8 +3732,13 @@ pub fn run_source_with_input(src: &str, input: &str) -> Result<Vec<String>, Stri
 /// `ReThrow` and `PopHandlers`.
 /// Revision 11 carried the line of a missing-variable `E030` on `Load`, and
 /// revision 12 the callback builtins: `IterItems` and `HigherOrder`, which run
-/// `map`/`filter`/`reduce` with a lambda or named callback.
-pub const FORMAT_VERSION: u16 = 12;
+/// `map`/`filter`/`reduce` with a lambda or named callback. Revision 13 gave
+/// `Div`/`Mod` their line, so division by zero reports `E036`/`E037` and a zero
+/// remainder `E038`/`E039` exactly where the interpreter does.
+/// Revision 15 made lambdas first-class values: `MakeFunc`, `LoadFn`,
+/// `CallableGuard`, `CallDyn`, `Reverse`, `ToBool`, `AndJump`, `OrJump`, a
+/// line on `Not`, and a value callback on `HigherOrder`.
+pub const FORMAT_VERSION: u16 = 15;
 /// Container magic: `AKKBC` + the digits of the original container layout.
 /// The revision that decides compatibility is [`FORMAT_VERSION`], below the
 /// magic; older magic digits are kept so a built file stays recognisable.
@@ -3235,10 +3938,19 @@ fn encode_code(code: &[Instr], out: &mut Vec<u8>) -> Result<(), String> {
             Instr::Add => out.push(4),
             Instr::Sub => out.push(5),
             Instr::Mul => out.push(6),
-            Instr::Div => out.push(7),
-            Instr::Mod => out.push(8),
+            Instr::Div(line) => {
+                out.push(7);
+                put_u32(out, *line);
+            }
+            Instr::Mod(line) => {
+                out.push(8);
+                put_u32(out, *line);
+            }
             Instr::Neg => out.push(9),
-            Instr::Not => out.push(10),
+            Instr::Not(line) => {
+                out.push(10);
+                put_u32(out, *line);
+            }
             Instr::And => out.push(11),
             Instr::Or => out.push(12),
             Instr::Eq => out.push(13),
@@ -3407,12 +4119,83 @@ fn encode_code(code: &[Instr], out: &mut Vec<u8>) -> Result<(), String> {
                 out.push(*kind);
                 put_u32(out, *line);
             }
-            Instr::HigherOrder(kind, index, line, err) => {
+            Instr::HigherOrder(kind, line) => {
                 out.push(59);
                 out.push(*kind);
+                put_u32(out, *line);
+            }
+            Instr::ListArg(name, line) => {
+                out.push(60);
+                put_str(out, name)?;
+                put_u32(out, *line);
+            }
+            Instr::Mutate(name, var, argc, line) => {
+                out.push(61);
+                put_str(out, name)?;
+                put_str(out, var)?;
+                out.push(*argc);
+                put_u32(out, *line);
+            }
+            Instr::ParamMissing(name, target) => {
+                out.push(62);
+                put_str(out, name)?;
+                put_u32(out, *target as u32);
+            }
+            Instr::List(count) => {
+                out.push(63);
+                put_u32(out, *count as u32);
+            }
+            Instr::Tuple(count) => {
+                out.push(64);
+                put_u32(out, *count as u32);
+            }
+            Instr::MakeFunc(index) => {
+                out.push(65);
+                put_u32(out, *index as u32);
+            }
+            Instr::LoadFn(name, index, line) => {
+                out.push(66);
+                put_str(out, name)?;
                 put_u32(out, *index as u32);
                 put_u32(out, *line);
-                put_str(out, err)?;
+            }
+            Instr::CallableGuard(name, line, flags) => {
+                out.push(67);
+                put_str(out, name)?;
+                put_u32(out, *line);
+                out.push(*flags);
+            }
+            Instr::CallDyn(name, argc, line, flags) => {
+                out.push(68);
+                put_str(out, name)?;
+                out.push(*argc);
+                put_u32(out, *line);
+                out.push(*flags);
+            }
+            Instr::Reverse(var, line) => {
+                out.push(69);
+                match var {
+                    Some(name) => {
+                        out.push(1);
+                        put_str(out, name)?;
+                    }
+                    None => out.push(0),
+                }
+                put_u32(out, *line);
+            }
+            Instr::ToBool(line) => {
+                out.push(70);
+                put_u32(out, *line);
+            }
+            Instr::AndJump(target, line) => {
+                out.push(71);
+                put_u32(out, *target as u32);
+                put_u32(out, *line);
+            }
+            Instr::OrJump(target, line) => {
+                out.push(72);
+                put_u32(out, *target as u32);
+                put_u32(out, *line);
             }
         }
     }
@@ -3435,10 +4218,10 @@ fn decode_code(reader: &mut Reader<'_>) -> Result<Vec<Instr>, String> {
             4 => Instr::Add,
             5 => Instr::Sub,
             6 => Instr::Mul,
-            7 => Instr::Div,
-            8 => Instr::Mod,
+            7 => Instr::Div(reader.u32()?),
+            8 => Instr::Mod(reader.u32()?),
             9 => Instr::Neg,
-            10 => Instr::Not,
+            10 => Instr::Not(reader.u32()?),
             11 => Instr::And,
             12 => Instr::Or,
             13 => Instr::Eq,
@@ -3564,10 +4347,67 @@ fn decode_code(reader: &mut Reader<'_>) -> Result<Vec<Instr>, String> {
             }
             59 => {
                 let kind = reader.u8()?;
+                let line = reader.u32()?;
+                Instr::HigherOrder(kind, line)
+            }
+            60 => {
+                let name = reader.text()?;
+                let line = reader.u32()?;
+                Instr::ListArg(name, line)
+            }
+            61 => {
+                let name = reader.text()?;
+                let var = reader.text()?;
+                let argc = reader.u8()?;
+                let line = reader.u32()?;
+                Instr::Mutate(name, var, argc, line)
+            }
+            62 => {
+                let name = reader.text()?;
+                let target = reader.u32()? as usize;
+                Instr::ParamMissing(name, target)
+            }
+            63 => Instr::List(reader.u32()? as usize),
+            64 => Instr::Tuple(reader.u32()? as usize),
+            65 => Instr::MakeFunc(reader.u32()? as usize),
+            66 => {
+                let name = reader.text()?;
                 let index = reader.u32()? as usize;
                 let line = reader.u32()?;
-                let err = reader.text()?;
-                Instr::HigherOrder(kind, index, line, err)
+                Instr::LoadFn(name, index, line)
+            }
+            67 => {
+                let name = reader.text()?;
+                let line = reader.u32()?;
+                let flags = reader.u8()?;
+                Instr::CallableGuard(name, line, flags)
+            }
+            68 => {
+                let name = reader.text()?;
+                let argc = reader.u8()?;
+                let line = reader.u32()?;
+                let flags = reader.u8()?;
+                Instr::CallDyn(name, argc, line, flags)
+            }
+            69 => {
+                let var = if reader.u8()? != 0 {
+                    Some(reader.text()?)
+                } else {
+                    None
+                };
+                let line = reader.u32()?;
+                Instr::Reverse(var, line)
+            }
+            70 => Instr::ToBool(reader.u32()?),
+            71 => {
+                let target = reader.u32()? as usize;
+                let line = reader.u32()?;
+                Instr::AndJump(target, line)
+            }
+            72 => {
+                let target = reader.u32()? as usize;
+                let line = reader.u32()?;
+                Instr::OrJump(target, line)
             }
             op => return Err(malformed(&format!("မသိသော instruction {}", op))),
         };
@@ -3590,6 +4430,7 @@ impl Program {
             for param in &func.params {
                 put_str(&mut out, param)?;
             }
+            put_u32(&mut out, func.required as u32);
             encode_code(&func.code, &mut out)?;
         }
         put_u32(&mut out, self.classes.len() as u32);
@@ -3629,10 +4470,12 @@ impl Program {
             for _ in 0..param_count {
                 params.push(reader.text()?);
             }
+            let required = reader.u32()? as usize;
             let code = decode_code(&mut reader)?;
             funcs.push(FuncDef {
                 name,
                 params,
+                required,
                 code,
             });
         }
@@ -4026,13 +4869,6 @@ msg ကို ဖော်ပြပါ။
         );
     }
 
-    #[test]
-    fn a_default_parameter_is_refused_instead_of_left_unbound() {
-        let src = "fn greet(name, punct = \"!\") {\n    print(name + punct);\n}\ngreet(\"A\");\n";
-        let err = compile_source(src).unwrap_err();
-        assert!(err.contains("E170"), "{err}");
-    }
-
     // -----------------------------------------------------------------
     // builtins
     // -----------------------------------------------------------------
@@ -4066,14 +4902,207 @@ msg ကို ဖော်ပြပါ။
     }
 
     #[test]
-    fn a_mutating_builtin_stays_e170() {
-        // `push(xs, 4)` writes through a variable and `reverse` is handled
-        // with its argument still unresolved, so neither can be a value-only
-        // instruction yet.
-        for src in ["push(1, 2);\n", "reverse(1);\n"] {
-            let err = compile_source(src).unwrap_err();
-            assert!(err.contains("E170"), "{err}");
-        }
+    fn reverse_stays_e170_but_push_compiles() {
+        // `reverse` also takes a string as a value, so it keeps its own
+        // refusal; the list-mutating builtins compile.
+        let err = compile_source("reverse(1);\n").unwrap_err();
+        assert!(err.contains("E170"), "{err}");
+        assert!(compile_source("xs မှာ [1] ဖြစ်၏။\nprint(push(xs, 2));\n").is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // mutating builtins
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_mutating_builtins_change_their_list_and_return_the_useful_value() {
+        let src = r#"xs မှာ [3, 1, 2] ဖြစ်၏။
+print(push(xs, 4));
+print(xs);
+print(pop(xs));
+print(sort(xs));
+print(insert(xs, 0, 9));
+print(remove(xs, 0));
+print(append(xs, 7));
+print(xs);
+"#;
+        assert_eq!(
+            out(src),
+            vec![
+                "4",
+                "[3, 1, 2, 4]",
+                "4",
+                "[1, 2, 3]",
+                "4",
+                "9",
+                "4",
+                "[1, 2, 3, 7]",
+            ]
+        );
+        // As a statement and through the assigning call form.
+        let src = "xs မှာ [2, 1] ဖြစ်၏။\nsort(xs);\nprint(xs);\ny အတွက် push(xs, 3) ကို လုပ်ပါ။\nprint(y);\n";
+        assert_eq!(out(src), vec!["[1, 2]", "3"]);
+    }
+
+    #[test]
+    fn a_mutating_builtin_keeps_the_interpreters_errors() {
+        // A first argument that is not a variable: `E110`, catchable.
+        let src = "စမ်းရန်\n    print(push(5, 1));\nE110 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\n";
+        assert_eq!(out(src), vec!["caught"]);
+        // A missing variable: `E030`.
+        let err = run_source("print(push(nosuch, 1));\n").unwrap_err();
+        assert!(err.contains("E030"), "{err}");
+        // Wrong argument count and an index out of range: `E110`/`E049`.
+        let err = run_source("xs မှာ [1] ဖြစ်၏။\nprint(pop(xs, 2));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+        let err = run_source("xs မှာ [1] ဖြစ်၏။\nprint(insert(xs, 9, 5));\n").unwrap_err();
+        assert!(err.contains("E049"), "{err}");
+        // Popping an empty list.
+        let err = run_source("xs မှာ [] ဖြစ်၏။\nprint(pop(xs));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // default parameters and the interpreter's dynamic scope
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_default_parameter_fills_in_before_the_body_runs() {
+        let src = r#"fn greet(name, punct = "!") {
+    return name + punct;
+}
+print(greet("A"));
+print(greet("B", "?"));
+fn f(a, b = a + 1, c = b * 2) {
+    return [a, b, c];
+}
+print(f(1));
+print(f(1, 5));
+print(f(1, 5, 9));
+"#;
+        assert_eq!(
+            out(src),
+            vec!["A!", "B?", "[1, 2, 4]", "[1, 5, 10]", "[1, 5, 9]"]
+        );
+        // Too few arguments is still the interpreter's `E033`.
+        let err = run_source("fn f(a, b = a + 1) {\n    return a;\n}\nf();\n").unwrap_err();
+        assert!(err.contains("E033"), "{err}");
+        // A lambda in a callback position may have one too.
+        // An arrow lambda takes no defaults; the `fn` spelling does.
+        let src = "print(map([1, 2], fn(x, k = 10) { x * k }));\n";
+        assert_eq!(out(src), vec!["[10, 20]"]);
+    }
+
+    /// The interpreter's scope chain is dynamic: a callee sees its caller's
+    /// frames, so `f()` may read a local of the function that called it.
+    #[test]
+    fn a_callee_reads_a_callers_local() {
+        let src = "fn f() {\n    print(x);\n}\nfn g() {\n    x = 5;\n    f();\n}\ng();\nprint(\"after\");\n";
+        assert_eq!(out(src), vec!["5", "after"]);
+    }
+
+    #[test]
+    fn a_list_literal_may_hold_expressions() {
+        let src = "a = 2;\nprint([a, a + 1, \"x\"]);\nprint((a, a));\n";
+        assert_eq!(out(src), vec!["[2, 3, \"x\"]", "(2, 2)"]);
+    }
+
+    // -----------------------------------------------------------------
+    // json and file libraries
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_json_library_runs_on_values() {
+        let src = r#"use json;
+text :str = json.stringify([1, 2, 3]);
+print(text);
+print(json.parse(text));
+print(json.parse("1"));
+print(json.get(json.parse("\{\"a\": 1\}"), "a", "none"));
+print(json.get(json.parse("[1]"), "missing", "fallback"));
+"#;
+        assert_eq!(
+            out(src),
+            vec![
+                "[1,2,3]",
+                "[1, 2, 3]",
+                "1",
+                "1",
+                "fallback"
+            ]
+        );
+        // A parse failure is the interpreter's `E132`, catchable by code.
+        let src = "use json;\nစမ်းရန်\n    print(json.parse(\"\\{bad\"));\nE132 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\n";
+        assert_eq!(out(src), vec!["caught"]);
+        // An unimported library still fails with `E089`.
+        let err = run_source("print(json.parse(\"1\"));\n").unwrap_err();
+        assert!(err.contains("E089"), "{err}");
+    }
+
+    #[test]
+    fn the_file_library_runs_on_values() {
+        let path = "akk_bytecode_file_test.txt";
+        let src = format!(
+            "use file;\nfile.write(\"{path}\", \"one\\ntwo\\n\");\nprint(file.exists(\"{path}\"));\nprint(file.lines(\"{path}\"));\nfile.append(\"{path}\", \"three\");\nprint(file.read(\"{path}\"));\nfile.delete(\"{path}\");\nprint(file.exists(\"{path}\"));\n"
+        );
+        assert_eq!(
+            out(&src),
+            vec![
+                "True",
+                "[\"one\", \"two\"]",
+                "one\ntwo\nthree",
+                "False"
+            ]
+        );
+        // A missing file is a catchable error, not empty text.
+        let src = format!(
+            "use file;\nစမ်းရန်\n    print(file.read(\"{path}\"));\nE140 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\n"
+        );
+        let out_lines = out(&src);
+        assert_eq!(out_lines.last().map(String::as_str), Some("caught"));
+    }
+
+    // -----------------------------------------------------------------
+    // division and remainder
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn division_and_remainder_match_the_interpreter() {
+        // Integer `/` yields a float and `%` is the Euclidean remainder, the
+        // rules the interpreter's `numeric` follows.
+        let src = "print(7 / 2);\nprint(-7 % 3);\nprint(7 % -3);\nprint(7 / 2.0);\nprint(-7.5 % 2.0);\n";
+        assert_eq!(out(src), vec!["3.5", "2", "1", "3.5", "0.5"]);
+    }
+
+    /// Regression: a zero divisor reports the interpreter's code, text and
+    /// line -- `E036`/`E038` for integers, `E037`/`E039` for floats -- from
+    /// the line the operation was written on, wherever it runs.
+    #[test]
+    fn a_zero_divisor_reports_the_interpreters_code_and_line() {
+        assert_eq!(
+            run_source("print(1);\nprint(4 / 0);\n").unwrap_err(),
+            "E036 လိုင်း 2 တွင် သုညဖြင့် စား၍မရပါ။"
+        );
+        assert_eq!(
+            run_source("print(4 / 0.0);\n").unwrap_err(),
+            "E037 လိုင်း 1 တွင် သုညဖြင့် စား၍မရပါ။"
+        );
+        assert_eq!(
+            run_source("print(4 % 0);\n").unwrap_err(),
+            "E038 လိုင်း 1 တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။"
+        );
+        assert_eq!(
+            run_source("print(4 % 0.0);\n").unwrap_err(),
+            "E039 လိုင်း 1 တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။"
+        );
+        // Inside a function the line is the one written there...
+        assert_eq!(
+            run_source("fn f(n :int) {\n    return n / 0;\n}\nf(1);\n").unwrap_err(),
+            "E036 လိုင်း 2 တွင် သုညဖြင့် စား၍မရပါ။"
+        );
+        // ...and the error is a normal run-time one: catchable by its code.
+        let src = "စမ်းရန်\n    print(1 % 0);\nE038 ကို ဖမ်းပါ။\n    print(\"caught\");\nပြီး။\n";
+        assert_eq!(out(src), vec!["caught"]);
     }
 
     // -----------------------------------------------------------------
@@ -4157,9 +5186,17 @@ print(filter({3, 1, 2}, x => x > 1));
     }
 
     #[test]
-    fn a_callback_the_vm_cannot_represent_is_e170() {
-        // A value in the callback position is refused rather than run.
-        let err = compile_source("print(map([1], 3));\n").unwrap_err();
+    fn a_callback_that_is_not_callable_is_e111() {
+        // A plain value in the callback position now reaches the run, where
+        // the interpreter's own E111 refuses it.
+        let err = run_source("print(map([1], 3));\n").unwrap_err();
+        assert!(err.contains("E110"), "{err}");
+        assert!(err.contains("ပြန်ခေါ် အလုပ်"), "{err}");
+    }
+
+    #[test]
+    fn a_library_callback_the_vm_cannot_represent_is_e170() {
+        let err = compile_source("print(map([1], Tools.add));\n").unwrap_err();
         assert!(err.contains("E170"), "{err}");
     }
 
@@ -4535,6 +5572,27 @@ print(filter({3, 1, 2}, x => x > 1));
         vm.out
     }
 
+    /// A program with a lambda value survives encode -> decode unchanged and
+    /// runs the same, so the new call instructions are part of the container.
+    #[test]
+    fn a_lambda_program_round_trips_through_bytes() {
+        let src = r#"fn adder(n) { return fn(x) { return x + n; }; }
+add5 = adder(5);
+print(add5(1));
+print(map([1, 2], add5));
+"#;
+        let program = compiled(src);
+        let bytes = program.encode().expect("encodes");
+        let decoded = Program::decode(&bytes).expect("decodes");
+        assert_eq!(run(&decoded), vec!["6", "[6, 7]"]);
+        assert_eq!(run(&decoded), run(&program));
+        assert_eq!(
+            decoded.encode().expect("re-encodes"),
+            bytes,
+            "the lambda instructions encode byte for byte"
+        );
+    }
+
     /// A program with a function, a loop and a string constant survives
     /// encode -> decode unchanged, runs the same, and re-encodes byte for byte.
     #[test]
@@ -4577,6 +5635,28 @@ x ကို ဖော်ပြပါ။
     }
 
     /// Half a container is a read error, never a partial program.
+    /// A container written by another revision is refused with `E175`, naming
+    /// both versions, so a stale artifact never runs with the wrong layout.
+    #[test]
+    fn a_container_from_another_version_is_refused() {
+        let program = compile_source("print(1);\n").expect("compiles");
+        let mut bytes = program.encode().expect("encodes");
+        bytes[8] = 13;
+        bytes[9] = 0;
+        let err = Program::decode(&bytes).unwrap_err();
+        assert!(err.contains("E175"), "{err}");
+        assert!(err.contains("13"), "{err}");
+        assert!(err.contains(&FORMAT_VERSION.to_string()), "{err}");
+        // Revision 14 (the format before lambdas became values) is stale too.
+        let mut bytes = program.encode().expect("encodes");
+        bytes[8] = 14;
+        bytes[9] = 0;
+        let err = Program::decode(&bytes).unwrap_err();
+        assert!(err.contains("E175"), "{err}");
+        assert!(err.contains("14"), "{err}");
+        assert!(err.contains(&FORMAT_VERSION.to_string()), "{err}");
+    }
+
     #[test]
     fn a_truncated_container_is_refused() {
         let bytes = compiled("\"hi\" ကို ပြပါ။\n").encode().expect("encodes");
