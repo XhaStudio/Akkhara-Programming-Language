@@ -116,14 +116,21 @@ pub enum Callable {
     /// named definition does -- parameters and body -- plus the line it was
     /// written on, which its error messages point at.
     Lambda { def: FnDef, line: usize },
+    /// A lambda (or a named function used as a value) compiled into a
+    /// bytecode program's function table. Only the bytecode VM builds one;
+    /// the interpreter has the real body in [`Callable::Lambda`] instead.
+    /// `label` is the name its error messages use -- the function's name, or
+    /// `fn(x, y)` for a lambda.
+    Compiled { index: usize, label: String },
 }
 
 impl Callable {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Callable::Library { lib, fn_name } => format!("{}.{}", lib, fn_name),
             Callable::User(name) => name.clone(),
             Callable::Lambda { def, .. } => format!("fn({})", def.0.join(", ")),
+            Callable::Compiled { label, .. } => label.clone(),
         }
     }
 }
@@ -1085,7 +1092,10 @@ fn app_parse_number(text: &str) -> Option<Value> {
 /// Is `lib` one of the libraries whose functions only read their argument
 /// values? Those are dispatched by [`lib_value_call`], from both backends.
 pub(crate) fn lib_is_value_library(lib: &str) -> bool {
-    matches!(lib, "ကျပန်း" | "အချိန်")
+    matches!(
+        lib,
+        "ကျပန်း" | "အချိန်" | "json" | "ဂျေဆန်" | "file" | "ဖိုင်"
+    )
 }
 
 /// How many arguments the value-only library function `fn_name` takes, or
@@ -1098,6 +1108,18 @@ pub(crate) fn lib_value_arity(lib: &str, fn_name: &str, line: usize) -> Result<u
         ("ကျပန်း", "တန်ဖိုး" | "value") => 1,
         ("အချိန်", "စောင့်" | "wait") => 1,
         ("အချိန်", "ယခု" | "now") => 0,
+        ("json" | "ဂျေဆန်", "parse" | "ဖတ်") => 1,
+        ("json" | "ဂျေဆန်", "stringify" | "ရေးပါ") => 1,
+        ("json" | "ဂျေဆန်", "pretty" | "လှပစွာ") => 1,
+        ("json" | "ဂျေဆန်", "get" | "ရယူ") => 3,
+        ("file" | "ဖိုင်", "read" | "ဖတ်") => 1,
+        ("file" | "ဖိုင်", "lines" | "လိုင်းများ") => 1,
+        ("file" | "ဖိုင်", "write" | "ရေး") => 2,
+        ("file" | "ဖိုင်", "append" | "ထပ်") => 2,
+        ("file" | "ဖိုင်", "exists" | "ရှိ") => 1,
+        ("file" | "ဖိုင်", "list" | "စာရင်း") => 1,
+        ("file" | "ဖိုင်", "size" | "အရွယ်") => 1,
+        ("file" | "ဖိုင်", "delete" | "ဖျက်") => 1,
         _ => return Err(lib_fn_unknown_err(lib, fn_name, line)),
     };
     Ok(want)
@@ -1172,7 +1194,117 @@ pub(crate) fn lib_value_call(
                     _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
         }
             }
+            // ----- json: the same work `eval_json_call` does, on values -----
+            "json" | "ဂျေဆန်" => match fn_name {
+                "parse" | "ဖတ်" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let text = server_text_arg(&args[0], fn_name, "JSON စာသား", line)?;
+                    let tree =
+                        crate::json_library::parse(&text).map_err(|e| json_parse_err(e, line))?;
+                    Ok(Some(json_tree_to_value(tree)))
+                }
+                "stringify" | "ရေးပါ" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let tree = value_to_json_tree(&args[0]).map_err(|_| json_form_err(&args[0], line))?;
+                    Ok(Some(Value::Str(crate::json_library::write(&tree))))
+                }
+                "pretty" | "လှပစွာ" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let tree = value_to_json_tree(&args[0]).map_err(|_| json_form_err(&args[0], line))?;
+                    Ok(Some(Value::Str(crate::json_library::write_pretty(&tree, 2))))
+                }
+                "get" | "ရယူ" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 3, line)?;
+                    let found = match &args[0] {
+                        Value::Dict(pairs) => {
+                            pairs.get(&Key::new(args[1].clone())).cloned()
+                        }
+                        Value::Object(o) => {
+                            let name = display(&args[1]);
+                            o.fields
+                                .iter()
+                                .find(|(k, _)| *k == name)
+                                .map(|(_, v)| v.clone())
+                        }
+                        _ => None,
+                    };
+                    Ok(Some(found.unwrap_or_else(|| args[2].clone())))
+                }
+                _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+            },
+            // ----- file: the same calls `eval_file_call` makes, on values -----
+            "file" | "ဖိုင်" => match fn_name {
+                "read" | "ဖတ်" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let text = crate::file_library::read(&path)
+                        .map_err(|e| file_read_err(&path, &e, line))?;
+                    Ok(Some(Value::Str(text)))
+                }
+                "lines" | "လိုင်းများ" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let lines = crate::file_library::lines(&path)
+                        .map_err(|e| file_read_err(&path, &e, line))?;
+                    Ok(Some(Value::List(
+                        lines.into_iter().map(Value::Str).collect(),
+                    )))
+                }
+                "write" | "ရေး" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 2, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let text = display(&args[1]);
+                    crate::file_library::write(&path, &text)
+                        .map_err(|e| file_write_err(&path, &e, line))?;
+                    Ok(None)
+                }
+                "append" | "ထပ်" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 2, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let text = display(&args[1]);
+                    crate::file_library::append(&path, &text)
+                        .map_err(|e| file_write_err(&path, &e, line))?;
+                    Ok(None)
+                }
+                "exists" | "ရှိ" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    Ok(Some(Value::Bool(crate::file_library::exists(&path))))
+                }
+                "list" | "စာရင်း" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let names = crate::file_library::list(&path)
+                        .map_err(|e| file_list_err(&path, &e, line))?;
+                    Ok(Some(Value::List(
+                        names.into_iter().map(Value::Str).collect(),
+                    )))
+                }
+                "size" | "အရွယ်" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    let size = crate::file_library::size(&path)
+                        .map_err(|e| file_size_err(&path, &e, line))?;
+                    Ok(Some(Value::Int(size.min(i64::MAX as u64) as i64)))
+                }
+                "delete" | "ဖျက်" => {
+                    lib_fn_argc_count(lib, fn_name, args.len(), 1, line)?;
+                    let path = path_value(&args[0], fn_name, line)?;
+                    crate::file_library::delete(&path)
+                        .map_err(|e| file_delete_err(&path, &e, line))?;
+                    Ok(None)
+                }
+                _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+            },
         _ => Err(lib_fn_unknown_err(lib, fn_name, line)),
+    }
+}
+
+/// A file call's path argument, checked without evaluating an expression.
+fn path_value(v: &Value, fn_name: &str, line: usize) -> Result<String, String> {
+    match v {
+        Value::Str(path) => Ok(path.clone()),
+        other => Err(file_path_arg_err(fn_name, &display(other), line)),
     }
 }
 
@@ -5118,6 +5250,13 @@ impl Interpreter {
                 self.invoke_function(def, values, line)?
                     .ok_or_else(|| eng_no_return_err(&label, line))
             }
+            // A compiled lambda belongs to the bytecode VM's own function
+            // table, which the interpreter does not have: reaching one here
+            // would mean a VM value leaked into an interpreting run.
+            Callable::Compiled { .. } => Err(format!(
+                "E170 လိုင်း {} တွင် bytecode lambda ကို interpreter ဖြင့် ခေါ်၍မရပါ။",
+                line
+            )),
         }
     }
 
@@ -5887,6 +6026,10 @@ impl Interpreter {
                 self.invoke_function(def, args, line)?
                     .ok_or_else(|| eng_no_return_err(&label, line))
             }
+            Callable::Compiled { .. } => Err(format!(
+                "E170 လိုင်း {} တွင် bytecode lambda ကို interpreter ဖြင့် ခေါ်၍မရပါ။",
+                line
+            )),
             Callable::Library { lib, fn_name } => {
                 // Names the lexer can never produce, so they cannot collide
                 // with a program variable; the frame drops them again even if
@@ -5914,7 +6057,7 @@ pub(crate) fn extract_error_code(msg: &str) -> String {
     code.to_string()
 }
 
-fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
+pub(crate) fn index_as_int(v: &Value, line: usize) -> Result<i64, String> {
     match v {
         Value::Int(i) => Ok(*i),
         Value::Float(f) if f.fract() == 0.0 => Ok(*f as i64),
@@ -5962,7 +6105,7 @@ fn index_seq(items: &[Value], keys: &[Value], line: usize) -> Result<Value, Stri
 /// A valid write position. Unlike reading a missing index (which is an
 /// error already), writing must not create a gap, so `idx` has to be in
 /// `0..len` -- `push` is the way to grow a list.
-fn seq_slot(len: usize, idx: i64, line: usize) -> Result<usize, String> {
+pub(crate) fn seq_slot(len: usize, idx: i64, line: usize) -> Result<usize, String> {
     if idx < 0 || idx as usize >= len {
         return Err(format!(
             "E049 လိုင်း {} တွင် အညွှန်း {} သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။",
@@ -6026,7 +6169,7 @@ pub(crate) fn set_index(base: &mut Value, keys: &[Value], value: Value, line: us
 /// Sorts a list in place, in ascending order. `sort_by` cannot return an
 /// error, so the first comparison failure is parked and reported after the
 /// pass instead of aborting in the middle of it.
-fn sort_items(items: &mut [Value], line: usize, name: &str) -> Result<(), String> {
+pub(crate) fn sort_items(items: &mut [Value], line: usize, name: &str) -> Result<(), String> {
     let mut failure: Option<String> = None;
     items.sort_by(|a, b| {
         if failure.is_some() {
