@@ -197,7 +197,8 @@ fn main() {
         }
         _ if bytecode_mode => {
             // `akk --vm <file>` -- compile to bytecode and run it.
-            process::exit(run_bytecode(&args[1]));
+            let no_warn = args.iter().any(|a| a == "--no-warn");
+            process::exit(run_bytecode(&args[1], no_warn));
         }
         "report" => {
             let folder = args.get(2).map(String::as_str).unwrap_or("output");
@@ -635,7 +636,7 @@ fn run_bundle_bytecode(bytes: &[u8], options: &RunOptions, anchor: &str) -> i32 
 /// `akk --vm <file>` -- compile the program to bytecode and run it on the
 /// stack machine in `bytecode`. Output goes to stdout exactly as a normal run
 /// prints it; a compile or runtime error is printed once and exits 1.
-fn run_bytecode(file: &str) -> i32 {
+fn run_bytecode(file: &str, no_warn: bool) -> i32 {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(e) => {
@@ -643,7 +644,27 @@ fn run_bytecode(file: &str) -> i32 {
             return 1;
         }
     };
-    match bytecode::compile_source(&src) {
+    // The static warnings a normal run shows first, from the same parse tree,
+    // so both backends put identical text on stderr ahead of the run.
+    let stmts = match lexer::lex(&src).and_then(|tokens| parser::parse(&tokens)) {
+        Ok(stmts) => stmts,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    if !no_warn {
+        let mut search_dirs = Vec::new();
+        if let Some(parent) = std::path::Path::new(file).parent() {
+            if !parent.as_os_str().is_empty() {
+                search_dirs.push(parent.to_path_buf());
+            }
+        }
+        for warning in library_warnings(&stmts, &search_dirs, &[]) {
+            eprintln!("{}", warning);
+        }
+    }
+    match bytecode::compile(&stmts) {
         Ok(program) => {
             // Streamed, exactly like a normal run: a prompt has to be on
             // screen before the read that follows it blocks.
