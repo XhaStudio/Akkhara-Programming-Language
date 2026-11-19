@@ -103,16 +103,24 @@ fn libraries_dir() -> PathBuf {
 
 /// Saves everything the run showed on the terminal next to the program as
 /// `<file name>.akop`: the output collected while the program ran, followed
-/// by the run's closing line -- the error message when it fails, or the
-/// `Interpreted in ...` line when it succeeds. It is written on every run, so
-/// a failing program leaves its `.akop` behind as well.
+/// by the error message when it fails (nothing extra when it succeeds). It is
+/// written on every run, so a failing program leaves its `.akop` behind as
+/// well.
 fn save_terminal_log(filename: &str, output: Option<String>, closing_line: &str) {
     // Appended as-is, without forcing a line break: a program that ends in a
     // prompt (printed without a trailing newline) shows its closing line on
     // the same terminal line, and the log keeps that text.
     let mut log = output.unwrap_or_default();
-    log.push_str(closing_line);
-    log.push('\n');
+    if closing_line.is_empty() {
+        // No closing line: the transcript is the program's own output, ending
+        // with the newline it already has.
+        if !log.is_empty() && !log.ends_with('\n') {
+            log.push('\n');
+        }
+    } else {
+        log.push_str(closing_line);
+        log.push('\n');
+    }
     let out_path = PathBuf::from(filename).with_extension("akop");
     let first = match fs::write(&out_path, &log) {
         Ok(()) => return,
@@ -255,8 +263,6 @@ fn main() {
 struct RunOptions {
     /// Write the `<file>.akop` transcript (including after a failure).
     transcript: bool,
-    /// Print the closing `Interpreted in ...` line on success.
-    timing: bool,
     /// Show the static and runtime warnings.
     warnings: bool,
 }
@@ -267,7 +273,6 @@ impl RunOptions {
     fn defaults(no_warn: bool) -> Self {
         RunOptions {
             transcript: true,
-            timing: true,
             warnings: !no_warn,
         }
     }
@@ -276,7 +281,6 @@ impl RunOptions {
     fn from_manifest(run: &manifest::RunSettings, no_warn: bool) -> Self {
         RunOptions {
             transcript: run.transcript,
-            timing: run.timing,
             warnings: run.warnings && !no_warn,
         }
     }
@@ -286,7 +290,6 @@ impl RunOptions {
     fn from_flags(flags: u32) -> Self {
         RunOptions {
             transcript: flags & 0b0010 != 0,
-            timing: flags & 0b1000 != 0,
             warnings: flags & 0b0100 != 0,
         }
     }
@@ -430,16 +433,10 @@ fn run_source(
         return 1;
     }
 
-    let closing_line = if options.timing {
-        let line = format!("Interpreted in {:.3}s", outcome.elapsed);
-        println!("{}", line);
-        line
-    } else {
-        // `[run] timing = false` keeps the closing line out of the terminal.
-        // The transcript still ends with its own newline (see
-        // `save_terminal_log`).
-        String::new()
-    };
+    // No runtime timer is printed: the only timing line is the `Compiled in`
+    // one a build (or a run that had to compile) shows. The transcript still
+    // ends with its own newline (see `save_terminal_log`).
+    let closing_line = String::new();
 
     // Save everything the terminal showed next to the program as
     // `<file_name>.akop`: the warnings, the program's output and that closing
@@ -479,6 +476,16 @@ fn cmd_run(no_warn: bool, file: Option<&str>) -> i32 {
         },
         None => None,
     };
+
+    // `akk run` runs the compiled executable when it is current and compiles
+    // first when it is not: a project uses `build/<name>`, an explicit file
+    // uses `<file_name>.exe` beside it.
+    if let Some(file) = file {
+        return run_compiled_file(file, no_warn, found.as_ref());
+    }
+    if let Some(manifest) = found.as_ref() {
+        return run_compiled_project(manifest, no_warn);
+    }
 
     let (filename, options, warnings, dependencies, project) = match (found, file) {
         (Some(manifest), None) => {
@@ -606,18 +613,13 @@ fn run_bundle_bytecode(bytes: &[u8], options: &RunOptions, anchor: &str) -> i32 
             return 1;
         }
     };
-    let started = std::time::Instant::now();
     let mut vm = bytecode::Vm::streaming(&program);
     let result = vm.run();
     match result {
         Ok(()) => {
-            let closing_line = if options.timing {
-                let line = format!("Interpreted in {:.3}s", started.elapsed().as_secs_f64());
-                println!("{}", line);
-                line
-            } else {
-                String::new()
-            };
+            // A built file never prints a timer; its compile time was shown
+            // by the `akk build`/`akk run` that produced it.
+            let closing_line = String::new();
             if options.transcript {
                 save_terminal_log(anchor, Some(vm.log.clone()), &closing_line);
             }
@@ -684,6 +686,282 @@ fn run_bytecode(file: &str, no_warn: bool) -> i32 {
     }
 }
 
+/// The path `akk build` writes for a project: `[build] out_dir` plus
+/// `[build] output` (or `[target.windows] output` on Windows) and the
+/// platform's executable suffix.
+fn manifest_output_path(manifest: &manifest::Manifest) -> Result<PathBuf, String> {
+    let mut name = manifest.build.output.clone();
+    if cfg!(windows) {
+        if let Some(windows) = &manifest.windows_output {
+            if !windows.is_empty() {
+                name = windows.clone();
+            }
+        }
+    }
+    check_output_name(&name)?;
+    let suffix = std::env::consts::EXE_SUFFIX;
+    if !suffix.is_empty() && !name.ends_with(suffix) {
+        name.push_str(suffix);
+    }
+    Ok(manifest.root.join(&manifest.build.out_dir).join(name))
+}
+
+/// The scripts a project's `[dependencies]` point at, for cache freshness.
+fn dependency_paths(manifest: &manifest::Manifest) -> Vec<PathBuf> {
+    manifest
+        .resolve_dependencies(&libraries_dir())
+        .map(|resolved| {
+            dependency_pairs(resolved)
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Newest modification time among everything a build reads: every `.akk` file
+/// and `akk.toml` under `root` (skipping the build output folder), `extra`
+/// files, and the running `akk` itself -- so a new compiler invalidates output
+/// it did not write.
+fn newest_input(
+    root: &Path,
+    skip: Option<&Path>,
+    extra: &[PathBuf],
+) -> Option<std::time::SystemTime> {
+    fn walk(dir: &Path, skip: Option<&Path>, newest: &mut Option<std::time::SystemTime>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if skip.map(|s| path == s).unwrap_or(false) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, skip, newest);
+                continue;
+            }
+            let wanted = path.extension().map(|e| e == "akk").unwrap_or(false)
+                || path.file_name().map(|n| n == "akk.toml").unwrap_or(false);
+            if !wanted {
+                continue;
+            }
+            if let Ok(time) = fs::metadata(&path).and_then(|m| m.modified()) {
+                if newest.map(|n| time > n).unwrap_or(true) {
+                    *newest = Some(time);
+                }
+            }
+        }
+    }
+
+    let mut newest = None;
+    walk(root, skip, &mut newest);
+    let mut consider = |time: std::time::SystemTime| {
+        if newest.map(|n| time > n).unwrap_or(true) {
+            newest = Some(time);
+        }
+    };
+    for path in extra {
+        if let Ok(time) = fs::metadata(path).and_then(|m| m.modified()) {
+            consider(time);
+        }
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Ok(time) = fs::metadata(exe).and_then(|m| m.modified()) {
+            consider(time);
+        }
+    }
+    newest
+}
+
+/// Whether `out` already reflects every input a build reads.
+fn build_is_current(out: &Path, root: &Path, skip: Option<&Path>, extra: &[PathBuf]) -> bool {
+    let Ok(out_time) = fs::metadata(out).and_then(|m| m.modified()) else {
+        return false;
+    };
+    match newest_input(root, skip, extra) {
+        Some(newest) => out_time >= newest,
+        None => true,
+    }
+}
+
+/// The executable `akk run <file>` compiles to: `<file_name>` plus the
+/// platform's executable suffix (`.exe` on Windows), beside the source.
+fn single_file_output(file: &str) -> PathBuf {
+    let path = Path::new(file);
+    let mut name = path
+        .file_stem()
+        .map(|stem| stem.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("program"));
+    name.push(std::env::consts::EXE_SUFFIX);
+    path.with_file_name(name)
+}
+
+/// Run a built file, inheriting this process's stdio, and return its exit code.
+fn run_executable(path: &Path, args: &[&str]) -> i32 {
+    // A bare `one.exe` would be looked up on PATH, not in the current folder,
+    // so the file is resolved to an absolute path first.
+    let exe = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    match std::process::Command::new(&exe).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("ဖိုင် \"{}\" ကို ဖွင့်၍မရပါ - {}", plain_path(path), e);
+            1
+        }
+    }
+}
+
+/// `akk run` in a project: reuse `build/<name>` when it is current, otherwise
+/// build it first. Warnings are shown by the build; the executable it then
+/// runs is passed `--no-warn` so they are not printed twice.
+fn run_compiled_project(manifest: &manifest::Manifest, no_warn: bool) -> i32 {
+    if let Err(e) = manifest.validate_entry() {
+        eprintln!("{}", e);
+        return 1;
+    }
+    let out = match manifest_output_path(manifest) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let extra = dependency_paths(manifest);
+    let skip = manifest.root.join(&manifest.build.out_dir);
+    if build_is_current(&out, &manifest.root, Some(&skip), &extra) {
+        eprintln!("{}", progress::RUNNING);
+        eprintln!();
+        return run_executable(&out, &[]);
+    }
+    let code = cmd_build(no_warn);
+    if code != 0 {
+        return code;
+    }
+    eprintln!("{}", progress::RUNNING);
+    eprintln!();
+    run_executable(&out, &["--no-warn"])
+}
+
+/// `akk run <file>`: reuse `<file_name>.exe` when it is current, otherwise
+/// compile it first, then run it.
+fn run_compiled_file(file: &str, no_warn: bool, manifest: Option<&manifest::Manifest>) -> i32 {
+    let out = single_file_output(file);
+    // In a project every script the build can read sits under the project
+    // root, so a change anywhere there invalidates the file; without a
+    // manifest only the source's own folder is scanned.
+    let root = manifest.map(|m| m.root.clone()).unwrap_or_else(|| {
+        Path::new(file)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+    let extra = manifest.map(dependency_paths).unwrap_or_default();
+    if build_is_current(&out, &root, None, &extra) {
+        return run_executable(&out, &[]);
+    }
+    if let Err(code) = build_single_file(file, no_warn, manifest) {
+        return code;
+    }
+    run_executable(&out, &[])
+}
+
+/// Compile one source file into `<file_name>.exe` beside it. Bytecode is used
+/// when the program can be carried that way (no imported scripts, and no
+/// construct the VM refuses with `E170`); a program that needs the interpreter
+/// -- an `App` or `request` library, a script import -- is embedded as source,
+/// which still runs identically.
+fn build_single_file(
+    file: &str,
+    no_warn: bool,
+    manifest: Option<&manifest::Manifest>,
+) -> Result<(), i32> {
+    let started = std::time::Instant::now();
+    let src = match fs::read_to_string(file) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("ဖိုင် \"{}\" ကို ဖတ်၍မရပါ - {}", file, e);
+            return Err(1);
+        }
+    };
+    let stmts = match lexer::lex(&src).and_then(|tokens| parser::parse(&tokens)) {
+        Ok(stmts) => stmts,
+        Err(e) => {
+            eprintln!("{}", e);
+            return Err(1);
+        }
+    };
+    let script_dir = PathBuf::from(file)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut search_dirs = vec![script_dir.clone()];
+    if let Ok(cwd) = env::current_dir() {
+        if cwd != script_dir {
+            search_dirs.push(cwd);
+        }
+    }
+    let dependencies: Vec<(String, PathBuf)> = manifest
+        .map(|m| {
+            dependency_pairs(m.resolve_dependencies(&libraries_dir()).unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let embed_root = manifest
+        .map(|m| m.root.clone())
+        .unwrap_or_else(|| script_dir.clone());
+    let embedded = match collect_embedded(&stmts, &embed_root, &search_dirs, &dependencies) {
+        Ok(scripts) => scripts,
+        Err(e) => {
+            eprintln!("{}", e);
+            return Err(1);
+        }
+    };
+    let options = manifest
+        .map(|m| RunOptions::from_manifest(&m.run, no_warn))
+        .unwrap_or_else(|| RunOptions::defaults(no_warn));
+
+    let has_deps: u32 = if embedded.is_empty() { 0 } else { 0b0001 };
+    let transcript_bit: u32 = if options.transcript { 0b0010 } else { 0 };
+    let warnings_bit: u32 = if options.warnings { 0b0100 } else { 0 };
+    let run_flags = has_deps | transcript_bit | warnings_bit;
+
+    let wants_bytecode = manifest
+        .map(|m| matches!(m.build.mode, manifest::BuildMode::Bytecode))
+        .unwrap_or(true);
+    let compiled = if wants_bytecode && embedded.is_empty() {
+        match bytecode::compile(&stmts).and_then(|program| program.encode()) {
+            Ok(bytes) => Some(bytes),
+            // The VM cannot carry this program (a native library, a library
+            // function value). Source embedding runs it exactly as `akk` does.
+            Err(e) if e.contains("E170") => None,
+            Err(e) => {
+                eprintln!("{}", e);
+                return Err(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    let out = single_file_output(file);
+    let input = bundle::BuildInput {
+        source: &src,
+        bytecode: compiled.as_deref(),
+        deps: &embedded,
+        run_flags,
+    };
+    match bundle::write_bundle(&out, &input) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{}", e);
+            return Err(1);
+        }
+    }
+    println!("Compiled in {:.3}s", started.elapsed().as_secs_f64());
+    Ok(())
+}
+
 /// `akk build` -- write one executable that runs this project.
 ///
 /// The output is a copy of this interpreter with the program's source, and the
@@ -736,23 +1014,22 @@ fn cmd_build(no_warn: bool) -> i32 {
         return 1;
     }
 
-    let mut name = manifest.build.output.clone();
-    if cfg!(windows) {
-        if let Some(windows) = &manifest.windows_output {
-            if !windows.is_empty() {
-                name = windows.clone();
-            }
+    let out = match manifest_output_path(&manifest) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
         }
+    };
+
+    // `akk build` does nothing when the artifact already matches every input.
+    let dependencies_now = dependency_paths(&manifest);
+    let build_dir = manifest.root.join(&manifest.build.out_dir);
+    if build_is_current(&out, &manifest.root, Some(&build_dir), &dependencies_now) {
+        println!("Already compiled {}", plain_path(&out));
+        return 0;
     }
-    if let Err(e) = check_output_name(&name) {
-        eprintln!("{}", e);
-        return 1;
-    }
-    let suffix = std::env::consts::EXE_SUFFIX;
-    if !suffix.is_empty() && !name.ends_with(suffix) {
-        name.push_str(suffix);
-    }
-    let out = manifest.root.join(&manifest.build.out_dir).join(&name);
+    let started = std::time::Instant::now();
 
     if let Err(e) = manifest.validate_entry() {
         eprintln!("{}", e);
@@ -891,6 +1168,7 @@ fn cmd_build(no_warn: bool) -> i32 {
     };
 
     reporter.finished(&plain_path(&out), bytes);
+    println!("Compiled in {:.3}s", started.elapsed().as_secs_f64());
     0
 }
 
@@ -1194,10 +1472,8 @@ fn interpret(
             let started = std::time::Instant::now();
             let result = interp.run(&stmts);
             // Output is line-flushed as the program runs; this only gets out
-            // a last line that has no newline of its own, before the closing
-            // line (or the error) that follows it. This stays inside the
-            // timed section, so `Interpreted in ...` still covers the cost of
-            // writing it.
+            // a last line that has no newline of its own, before the error
+            // that may follow it.
             interp.flush_output();
             let elapsed = started.elapsed().as_secs_f64();
             let output = interp.take_output();
