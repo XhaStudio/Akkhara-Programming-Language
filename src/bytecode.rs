@@ -74,6 +74,11 @@ pub enum Instr {
     Load(String, u32),
     Store(String),
     Pop,
+    /// Pop a list or tuple and bind one name per item, in order:
+    /// `[a, b] = <value>;`. The line is carried so a non-collection (`E154`)
+    /// and a count mismatch (`E155`) point at the statement, as they do in the
+    /// interpreter, and a `pin` name is refused (`E104`).
+    Destructure(Vec<String>, u32),
     Add,
     Sub,
     Mul,
@@ -310,10 +315,11 @@ pub struct Program {
 
 /// A builtin the VM can run from evaluated values alone.
 ///
-/// The mutating list builtins (`push`, `pop`, ...) and `reverse` reach for a
-/// variable rather than a value, so they stay `E170` in bytecode mode.
-/// `map`/`filter`/`reduce` are not value-only either, but they have their own
-/// instructions -- see [`is_higher_order`].
+/// The mutating list builtins (`push`, `pop`, ...) reach for a variable rather
+/// than a value, so they stay `E170` in bytecode mode; `reverse` is compiled
+/// by [`Compiler::reverse_site`] instead. `map`/`filter`/`reduce` are not
+/// value-only either, but they have their own instructions -- see
+/// [`is_higher_order`].
 fn is_pure_builtin(name: &str) -> bool {
     crate::interpreter::is_eng_builtin(name)
         && !crate::interpreter::is_mutating_builtin(name)
@@ -373,11 +379,10 @@ fn unknown_var(name: &str, line: usize) -> String {
 // Compiler
 // ---------------------------------------------------------------------------
 
-/// A loop being compiled: where it starts, and the jump sites that still have
-/// to point at the loop's exit / its next iteration.
+/// A loop being compiled: the jump sites that still have to point at the
+/// loop's exit / its next iteration.
 #[derive(Default)]
 struct LoopCtx {
-    start: usize,
     breaks: Vec<usize>,
     continues: Vec<usize>,
     /// Set while compiling a `loop { }` used as a value: the temporary slot a
@@ -388,6 +393,9 @@ struct LoopCtx {
     /// `break`/`continue` out of a `try` inside the loop drops exactly the
     /// handlers it leaves behind.
     handlers: usize,
+    /// Set for a `switch`: its arms are a `break` target of their own, but a
+    /// `continue` there belongs to the enclosing loop, as in the interpreter.
+    is_switch: bool,
 }
 
 struct Compiler {
@@ -490,6 +498,14 @@ impl Compiler {
             Stmt::VarDecl { name, value, .. } => {
                 self.expr(value)?;
                 self.emit(Instr::Store(name.to_string()));
+                Ok(())
+            }
+            // `[a, b] = <value>;` -- the value runs once, then one name per
+            // item, in order.
+            Stmt::Destructure { names, value, line } => {
+                self.line = *line;
+                self.expr(value)?;
+                self.emit(Instr::Destructure(names.clone(), *line as u32));
                 Ok(())
             }
             // `x :int = 5;`: the declaration's own type check and `pin`
@@ -598,27 +614,25 @@ impl Compiler {
             // `continue;` -- jump back to the top of the innermost loop.
             Stmt::Continue { line } => {
                 self.line = *line;
-                if self.loops.is_empty() {
+                // A `switch` counts as a break target but not as a loop for
+                // `continue`: the interpreter records the continue and lets it
+                // reach the enclosing loop, so the jump is patched there.
+                let Some(index) = self.loops.iter().rposition(|ctx| !ctx.is_switch) else {
                     self.emit(Instr::Abort(
                         crate::interpreter::eng_continue_outside_loop_err(*line),
                     ));
                     return Ok(());
-                }
-                let target = self.loops.last().expect("loop context").handlers;
+                };
+                let target = self.loops[index].handlers;
                 self.leave_tries(target)?;
                 let at = self.emit(Instr::Jump(usize::MAX));
-                self.loops
-                    .last_mut()
-                    .expect("loop context")
-                    .continues
-                    .push(at);
+                self.loops[index].continues.push(at);
                 Ok(())
             }
             // `loop { ... }` -- run the body until a `break` leaves it.
             Stmt::EngLoop { body } => {
                 let start = self.here();
                 self.loops.push(LoopCtx {
-                    start,
                     handlers: self.handlers,
                     ..Default::default()
                 });
@@ -745,7 +759,6 @@ impl Compiler {
                 let slot = self.temp("loopvalue");
                 let start = self.here();
                 self.loops.push(LoopCtx {
-                    start,
                     handlers: self.handlers,
                     break_value: Some((slot.clone(), *line)),
                     ..Default::default()
@@ -836,6 +849,59 @@ impl Compiler {
                 body,
                 ..
             } => self.for_loop(var_name, source, body),
+            // `switch (<value>) { case ... default: ... }` and the Myanmar
+            // `ရွေးရန်`: the subject runs once, only the first matching case's
+            // body runs, and `default` runs only when no case matched, wherever
+            // it is written. A `break` in an arm stops the switch, so the arms
+            // are compiled with a loop context of their own.
+            Stmt::Switch {
+                subject,
+                arms,
+                line,
+            } => {
+                self.line = *line;
+                let slot = self.temp("switch");
+                self.expr(subject)?;
+                self.emit(Instr::Store(slot.clone()));
+                self.loops.push(LoopCtx {
+                    handlers: self.handlers,
+                    is_switch: true,
+                    ..Default::default()
+                });
+                let mut to_end: Vec<usize> = Vec::new();
+                let mut default_body: Option<&Vec<Stmt>> = None;
+                for arm in arms {
+                    match &arm.case {
+                        Some(case) => {
+                            self.emit(Instr::Load(slot.clone(), arm.line as u32));
+                            self.expr(case)?;
+                            self.emit(Instr::Eq);
+                            let skip = self.emit(Instr::JumpIfFalse(usize::MAX));
+                            self.block(&arm.body)?;
+                            to_end.push(self.emit(Instr::Jump(usize::MAX)));
+                            let next = self.here();
+                            self.patch_jump(skip, next);
+                        }
+                        None => {
+                            if default_body.is_none() {
+                                default_body = Some(&arm.body);
+                            }
+                        }
+                    }
+                }
+                if let Some(body) = default_body {
+                    self.block(body)?;
+                }
+                let end = self.here();
+                for site in to_end {
+                    self.patch_jump(site, end);
+                }
+                let ctx = self.loops.pop().expect("switch context");
+                for site in ctx.breaks {
+                    self.patch_jump(site, end);
+                }
+                Ok(())
+            }
             // Slots were registered in the first pass; the body is compiled
             // there too, so the statement itself emits nothing here.
             Stmt::FuncDef { .. } => Ok(()),
@@ -1152,6 +1218,11 @@ impl Compiler {
             self.emit(Instr::CallValue(index, args.len() as u8, line as u32, err));
             return Ok(());
         }
+        if fn_name == "reverse" {
+            // The caller stores the value, as it does for any call.
+            self.reverse_site(args, line)?;
+            return Ok(());
+        }
         if is_higher_order(fn_name) {
             // The caller stores the value, as it does for any call.
             self.higher_order_site(fn_name, args, line)?;
@@ -1365,15 +1436,6 @@ impl Compiler {
         Ok(())
     }
 
-    fn callee(&self, name: &str) -> Result<usize, String> {
-        self.slots.get(name).copied().ok_or_else(|| {
-            format!(
-                "E174 လိုင်း {} တွင် \"{}\" ဆိုသော အလုပ်ကို bytecode တွင် မတွေ့ပါ။",
-                self.line, name
-            )
-        })
-    }
-
     /// Compile a call to the user function `name`.
     ///
     /// The interpreter resolves a callee when it runs a call: an undefined name
@@ -1392,6 +1454,11 @@ impl Compiler {
         missing: u8,
     ) -> Result<(), String> {
         let Some(idx) = self.slots.get(name).copied() else {
+            if name == "reverse" {
+                // The caller discards the value, as it does for any call.
+                self.reverse_site(args, line)?;
+                return Ok(());
+            }
             if is_mutating_builtin(name) {
                 // The caller discards the value, as it does for any call.
                 self.mutate_site(name, args, line)?;
@@ -1467,7 +1534,6 @@ impl Compiler {
         self.cond(cond, negate)?;
         let exit = self.emit(Instr::JumpIfFalse(usize::MAX));
         self.loops.push(LoopCtx {
-            start,
             handlers: self.handlers,
             ..Default::default()
         });
@@ -1551,7 +1617,6 @@ impl Compiler {
 
         let exit = self.emit(Instr::JumpIfFalse(usize::MAX));
         self.loops.push(LoopCtx {
-            start: start_pc,
             handlers: self.handlers,
             ..Default::default()
         });
@@ -1604,7 +1669,6 @@ impl Compiler {
         self.emit(Instr::Store(var_name.to_string()));
 
         self.loops.push(LoopCtx {
-            start: start_pc,
             handlers: self.handlers,
             ..Default::default()
         });
@@ -1988,6 +2052,7 @@ fn stmt_name(stmt: &Stmt) -> &'static str {
         Stmt::EngExprCall { .. } => "eng အလုပ် ခေါ်ခြင်း",
         Stmt::EngAssign { .. } => "eng သတ်မှတ်ခြင်း",
         Stmt::EngMathAssign { .. } => "eng ပေါင်းထည့်ခြင်း",
+        Stmt::Switch { .. } => "switch ရွေးချယ်ခြင်း",
         _ => "ဤ ဖော်ပြချက်",
     }
 }
@@ -2002,6 +2067,7 @@ fn stmt_line(stmt: &Stmt) -> usize {
         | Stmt::FuncCall { line, .. }
         | Stmt::ForLoop { line, .. }
         | Stmt::While { line, .. }
+        | Stmt::Switch { line, .. }
         | Stmt::FuncDef { line, .. }
         | Stmt::InputNoAssign { line, .. }
         | Stmt::InputAssign { line, .. }
@@ -2088,6 +2154,11 @@ fn collect_classes(stmts: &[Stmt]) -> Vec<&Stmt> {
                     }
                 }
                 Stmt::While { body, .. } | Stmt::ForLoop { body, .. } => walk(body, out),
+                Stmt::Switch { arms, .. } => {
+                    for arm in arms {
+                        walk(&arm.body, out);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2230,6 +2301,11 @@ fn register_functions(stmts: &[Stmt], compiler: &mut Compiler) {
             Stmt::While { body, .. } | Stmt::ForLoop { body, .. } => {
                 register_functions(body, compiler);
             }
+            Stmt::Switch { arms, .. } => {
+                for arm in arms {
+                    register_functions(&arm.body, compiler);
+                }
+            }
             _ => {}
         }
     }
@@ -2248,6 +2324,11 @@ fn collect_defs(stmts: &[Stmt]) -> Vec<&Stmt> {
                     }
                 }
                 Stmt::While { body, .. } | Stmt::ForLoop { body, .. } => walk(body, out),
+                Stmt::Switch { arms, .. } => {
+                    for arm in arms {
+                        walk(&arm.body, out);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2548,6 +2629,7 @@ impl<'p> Vm<'p> {
     }
 
     /// Feed this VM scripted stdin instead of the process's own.
+    #[cfg(test)]
     pub fn feed(&mut self, text: &str) {
         self.input = Some(Box::new(std::io::Cursor::new(text.as_bytes().to_vec())));
     }
@@ -2978,6 +3060,35 @@ impl<'p> Vm<'p> {
                 Instr::Store(name) => {
                     let v = self.pop();
                     self.store(&name, v);
+                    self.set_pc(pc + 1);
+                }
+                Instr::Destructure(names, line) => {
+                    let value = self.pop();
+                    let items = match &value {
+                        Value::List(items) | Value::Tuple(items) => items.clone(),
+                        other => {
+                            return Err(crate::interpreter::destructure_not_collection_err(
+                                line as usize,
+                                crate::interpreter::type_name_mm(other),
+                            ))
+                        }
+                    };
+                    if items.len() != names.len() {
+                        return Err(crate::interpreter::destructure_count_err(
+                            line as usize,
+                            names.len(),
+                            items.len(),
+                        ));
+                    }
+                    for (name, item) in names.iter().zip(items.into_iter()) {
+                        if self.decls.contains_key(name) {
+                            return Err(crate::interpreter::eng_const_reassign_err(
+                                name,
+                                line as usize,
+                            ));
+                        }
+                        self.store(name, item);
+                    }
                     self.set_pc(pc + 1);
                 }
                 Instr::Pop => {
@@ -3690,6 +3801,7 @@ impl<'p> Vm<'p> {
 }
 
 /// Compile a source text all the way to instructions.
+#[cfg(test)]
 pub fn compile_source(src: &str) -> Result<Program, String> {
     let tokens = crate::lexer::lex(src)?;
     let stmts = crate::parser::parse(&tokens)?;
@@ -3697,6 +3809,7 @@ pub fn compile_source(src: &str) -> Result<Program, String> {
 }
 
 /// Compile and run a source text, returning the lines it printed.
+#[cfg(test)]
 pub fn run_source(src: &str) -> Result<Vec<String>, String> {
     let program = compile_source(src)?;
     let mut vm = Vm::new(&program);
@@ -3706,6 +3819,7 @@ pub fn run_source(src: &str) -> Result<Vec<String>, String> {
 
 /// Compile and run a source text with scripted stdin, returning the lines it
 /// printed -- what a program that asks for input does under a test.
+#[cfg(test)]
 pub fn run_source_with_input(src: &str, input: &str) -> Result<Vec<String>, String> {
     let program = compile_source(src)?;
     let mut vm = Vm::new(&program);
@@ -3738,7 +3852,9 @@ pub fn run_source_with_input(src: &str, input: &str) -> Result<Vec<String>, Stri
 /// Revision 15 made lambdas first-class values: `MakeFunc`, `LoadFn`,
 /// `CallableGuard`, `CallDyn`, `Reverse`, `ToBool`, `AndJump`, `OrJump`, a
 /// line on `Not`, and a value callback on `HigherOrder`.
-pub const FORMAT_VERSION: u16 = 15;
+/// Revision 16 added destructuring: `Destructure`, which binds one name per
+/// item of a list or tuple.
+pub const FORMAT_VERSION: u16 = 16;
 /// Container magic: `AKKBC` + the digits of the original container layout.
 /// The revision that decides compatibility is [`FORMAT_VERSION`], below the
 /// magic; older magic digits are kept so a built file stays recognisable.
@@ -3935,6 +4051,14 @@ fn encode_code(code: &[Instr], out: &mut Vec<u8>) -> Result<(), String> {
                 put_str(out, name)?;
             }
             Instr::Pop => out.push(3),
+            Instr::Destructure(names, line) => {
+                out.push(73);
+                put_u32(out, names.len() as u32);
+                for name in names {
+                    put_str(out, name)?;
+                }
+                put_u32(out, *line);
+            }
             Instr::Add => out.push(4),
             Instr::Sub => out.push(5),
             Instr::Mul => out.push(6),
@@ -4408,6 +4532,15 @@ fn decode_code(reader: &mut Reader<'_>) -> Result<Vec<Instr>, String> {
                 let target = reader.u32()? as usize;
                 let line = reader.u32()?;
                 Instr::OrJump(target, line)
+            }
+            73 => {
+                let count = reader.u32()? as usize;
+                let mut names = Vec::with_capacity(count.min(1024));
+                for _ in 0..count {
+                    names.push(reader.text()?);
+                }
+                let line = reader.u32()?;
+                Instr::Destructure(names, line)
             }
             op => return Err(malformed(&format!("မသိသော instruction {}", op))),
         };
@@ -4902,11 +5035,11 @@ msg ကို ဖော်ပြပါ။
     }
 
     #[test]
-    fn reverse_stays_e170_but_push_compiles() {
-        // `reverse` also takes a string as a value, so it keeps its own
-        // refusal; the list-mutating builtins compile.
-        let err = compile_source("reverse(1);\n").unwrap_err();
-        assert!(err.contains("E170"), "{err}");
+    fn reverse_compiles_as_a_statement_and_as_a_value() {
+        // `reverse(xs);` discards the result, `print(reverse(xs))` keeps it;
+        // both compile, and the list-mutating builtins still do too.
+        assert!(compile_source("xs မှာ [1, 2] ဖြစ်၏။\nreverse(xs);\nprint(xs);\n").is_ok());
+        assert!(compile_source("print(reverse([1, 2]));\n").is_ok());
         assert!(compile_source("xs မှာ [1] ဖြစ်၏။\nprint(push(xs, 2));\n").is_ok());
     }
 
