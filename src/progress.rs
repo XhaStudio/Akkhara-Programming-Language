@@ -38,7 +38,6 @@ const WIDTH: usize = 10;
 /// byte-for-byte unchanged.
 pub struct Reporter {
     header: Option<ProjectHeader>,
-    interactive: bool,
     blocks: bool,
 }
 
@@ -50,11 +49,7 @@ impl Reporter {
             cfg!(windows),
             std::env::var_os("WT_SESSION").is_some(),
         );
-        Reporter {
-            header,
-            interactive,
-            blocks,
-        }
+        Reporter { header, blocks }
     }
 
     /// `Compiling {name} {version} ({root})`, before the entry file is read.
