@@ -2317,8 +2317,8 @@ impl Interpreter {
 
     /// Flushes the output that is not newline-terminated yet (the last line
     /// of a program that ends without one). `akk` calls this once the run is
-    /// over, before printing the closing `Interpreted in ...` line or an
-    /// error, so the program's output is never misplaced behind them.
+    /// over, before printing an error, so the program's output is never
+    /// misplaced behind it.
     pub fn flush_output(&mut self) {
         let _ = self.out.flush();
     }
@@ -3112,9 +3112,6 @@ impl Interpreter {
 
     /// Substitute "{VarName}" placeholders inside a string literal with the
     /// current value of that variable, e.g. "Hello!, {Name}".
-    /// The self keyword inside a `{...}` placeholder: "{အတု <field>}".
-    const SELF_PREFIX: &'static str = SELF_PREFIX;
-
     fn interpolate(&self, s: &str, line: usize) -> Result<String, String> {
         interpolate_text(
             s,
@@ -6539,7 +6536,7 @@ pub(crate) fn eng_const_reassign_err(name: &str, line: usize) -> String {
 
 /// A destructuring assignment was given something that isn't a list or
 /// tuple, so there are no items to hand out.
-fn destructure_not_collection_err(line: usize, got: &str) -> String {
+pub(crate) fn destructure_not_collection_err(line: usize, got: &str) -> String {
     format!(
         "E154 လိုင်း {} တွင် ခွဲထုတ်ရန် စာရင်း သို့မဟုတ် tuple လိုအပ်ပါသည်၊ {} ရပါသည်။",
         line, got
@@ -6547,7 +6544,7 @@ fn destructure_not_collection_err(line: usize, got: &str) -> String {
 }
 
 /// A destructuring assignment whose names and items don't line up.
-fn destructure_count_err(line: usize, names: usize, items: usize) -> String {
+pub(crate) fn destructure_count_err(line: usize, names: usize, items: usize) -> String {
     format!(
         "E155 လိုင်း {} တွင် အမည် {} ခု ခွဲထုတ်ရန် ရေးထားပြီး တန်ဖိုးတွင် အချက် {} ခု ရှိပါသည်။",
         line, names, items
