@@ -23,7 +23,7 @@
 //! [run]
 //! transcript = true           # write <file>.akop (default: true)
 //! warnings = true             # show warnings (default: true)
-//! timing = true               # print "Interpreted in ..." (default: true)
+//! timing = true               # kept for compatibility; no run timer (default: true)
 //!
 //! [dependencies]
 //! Tools = "*"
@@ -105,7 +105,8 @@ pub struct RunSettings {
     pub transcript: bool,
     /// Show the static and runtime warnings.
     pub warnings: bool,
-    /// Print the closing `Interpreted in ...` line.
+    /// Kept for compatibility with existing manifests. Runs print no timer;
+    /// the `Compiled in ...` line belongs to a build.
     pub timing: bool,
 }
 
