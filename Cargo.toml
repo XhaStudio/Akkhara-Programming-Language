@@ -1,6 +1,6 @@
 [package]
 name = "akkhara"
-version = "1.3.0"
+version = "3.0.0-alpha.3"
 edition = "2021"
 
 [[bin]]
@@ -19,7 +19,7 @@ crossterm = "0.27"
 
 # String indexing and len count grapheme clusters, not Unicode scalar values,
 # so one Myanmar syllable (a consonant plus its medials, vowels and tone
-# marks) is one character to a program -- see src/text.rs.
+# marks) is one character to a program -- see src/text/.
 unicode-segmentation = "1"
 
 # Dicts and sets keep the insertion order they always had (printing and
@@ -27,7 +27,7 @@ unicode-segmentation = "1"
 # The crate is already in the dependency graph through eframe.
 indexmap = "2"
 
-# The App GUI library (libraries/App/main.rs). eframe's glow (OpenGL)
+# The App GUI library (src/stdlib/app/mod.rs). eframe's glow (OpenGL)
 # renderer is used instead of the default wgpu one: a smaller dependency
 # tree that works on older GPUs. `default_fonts` gives the Latin UI its
 # baseline font, on top of which a system Myanmar font is loaded at
@@ -41,7 +41,7 @@ eframe = { version = "0.36", default-features = false, features = [
 
 # App runs its GUI event loop on a background thread (the interpreter thread
 # stays inside App.run), and winit only allows that when it is asked
-# explicitly -- see the event-loop hook in libraries/App/main.rs. The
+# explicitly -- see the event-loop hook in src/stdlib/app/mod.rs. The
 # version must stay compatible with the one eframe builds against, or the
 # EventLoopBuilder types would not match.
 winit = "0.30"
@@ -66,7 +66,8 @@ opt-level = 3
 # module boundaries. Fat LTO with one codegen unit lets the whole crate be
 # optimized as a single body of code. `strip` keeps the executable small,
 # which also matters on every run: the OS loads the binary before the first
-# statement executes. (Measured effect and how to reproduce: benchmarks/.)
+# statement executes. (The benchmark harness that would reproduce the
+# numbers is not checked into the repository yet.)
 lto = "fat"
 codegen-units = 1
 strip = true
