@@ -215,7 +215,7 @@ fn emit_copy(code: &mut Code, from: i32, to: i32) {
 }
 
 pub(crate) fn emit(code: &mut Code) {
-    code.label("rt_print_float");
+    code.label("rt_write_float");
     code.push(RBP);
     code.mov_rbp_rsp();
     code.sub_rsp(FRAME);
@@ -615,11 +615,19 @@ pub(crate) fn emit(code: &mut Code) {
     append_out(code);
 
     code.label("pf_write");
-    code.mov_imm32_zero(RAX, b'\n' as u32);
-    append_out(code);
     code.mov_rr(RCX, R9);
     code.lea_disp32(RAX, RBP, OUT);
     code.call("rt_write");
+    code.leave();
+    code.ret();
+
+    // `rt_write_float` is the body without the print newline, so a float
+    // inside a collection is followed by `, ` rather than a line break.
+    code.label("rt_print_float");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_write_float");
+    code.call("rt_write_newline");
     code.leave();
     code.ret();
 

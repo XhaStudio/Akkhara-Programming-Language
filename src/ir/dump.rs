@@ -446,6 +446,7 @@ fn inst_text(inst: &MirInst) -> String {
             dest,
             base,
             indices,
+            ..
         } => format!("t{} = {}[{}]", dest, base, operands(indices)),
         MirInst::Field { dest, base, field } => format!("t{} = {}.{}", dest, base, field),
         MirInst::List { dest, items } => format!("t{} = [{}]", dest, operands(items)),

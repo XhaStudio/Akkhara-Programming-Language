@@ -1,6 +1,7 @@
 //! The code linked into a native executable: `write`/`exit` shims for the
-//! platform, `print` for int/bool/string, and the panic used when a modulo is
-//! taken by zero.
+//! platform, `print` for int/bool/string, the collection runtime (arena,
+//! indexing and collection printing), and the panics a compiled program can
+//! reach (division by zero, a bad index or key, and arena exhaustion).
 //!
 //! These are machine-code routines, emitted once per executable by [`emit`]
 //! and reached by `call` from the generated `main`. Nothing here depends on
@@ -8,6 +9,7 @@
 //! tiny import table the image writer builds.
 
 pub(crate) mod alloc;
+pub(crate) mod collections;
 pub(crate) mod float;
 pub(crate) mod panic;
 pub(crate) mod print;
@@ -46,6 +48,9 @@ pub(crate) fn emit(
     imports: &mut Vec<Import>,
     error_prefix: u32,
     error_payload: u32,
+    arena_used: u32,
+    arena_start: u32,
+    arena_size: u32,
 ) {
     // The import slots are reserved before any string, so they stay one
     // contiguous `FirstThunk` array for the Windows import descriptor.
@@ -59,4 +64,5 @@ pub(crate) fn emit(
     panic::emit_zero(code, data);
     panic::emit_div(code, data);
     raise::emit_report(code, data, error_prefix, error_payload);
+    collections::emit(code, data, arena_used, arena_start, arena_size);
 }

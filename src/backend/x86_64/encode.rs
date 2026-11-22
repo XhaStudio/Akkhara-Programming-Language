@@ -182,6 +182,30 @@ impl Code {
         self.modrm(0, src, ptr);
     }
 
+    /// `mov dst, [base + disp32]`
+    pub(crate) fn load_ptr_disp32(&mut self, dst: u8, base: u8, disp: i32) {
+        self.rex(true, dst, base);
+        self.byte(0x8B);
+        self.modrm(2, dst, base);
+        self.imm32(disp);
+    }
+
+    /// `mov [base + disp32], src`
+    pub(crate) fn store_ptr_disp32(&mut self, base: u8, disp: i32, src: u8) {
+        self.rex(true, src, base);
+        self.byte(0x89);
+        self.modrm(2, src, base);
+        self.imm32(disp);
+    }
+
+    /// `cmp dst, imm32`
+    pub(crate) fn cmp_imm32(&mut self, dst: u8, value: i32) {
+        self.rex(true, 0, dst);
+        self.byte(0x81);
+        self.modrm(3, 7, dst);
+        self.imm32(value);
+    }
+
     /// `mov [ptr], src8`
     pub(crate) fn store_byte(&mut self, ptr: u8, src: u8) {
         self.rex(false, src, ptr);

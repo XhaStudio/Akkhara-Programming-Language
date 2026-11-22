@@ -1,6 +1,6 @@
 # ADR 0001: Native runtime value representation
 
-- **Status:** Accepted (Step 2; runtime layer landed, codegen migration deferred to Step 3)
+- **Status:** Accepted (Step 2 landed; Step 3 collection slice in progress)
 - **Date:** 2026-11-22
 - **Scope:** the value word the native runtime and codegen will exchange
 
@@ -8,9 +8,10 @@
 > This file is that ADR: `docs/adr/0001-runtime-value-representation.md`.
 > The tested runtime layer is `src/runtime/alloc.rs` (bump allocator and GC
 > headers) and `src/runtime/value.rs` (the word, heap payloads, constructors,
-> accessors, and display/equality/condition dispatch). Neither the interpreter,
-> the VM nor the native backend reads this layer yet, so all user-visible
-> behavior is unchanged.
+> accessors, and display/equality/condition dispatch). Step 3's first slice now
+> makes native codegen use the tag vocabulary and collection display rules from
+> that layer; the interpreter and VM are untouched, and byte-identical output
+> is still the parity gate.
 
 ## Context
 
@@ -213,7 +214,7 @@ and it doubles slot/frame sizes for no additional kind capacity.
 - NaN payload preservation is intentionally not part of the language
   semantics; only `NaN` identity and printing matter, and both are preserved.
 
-## Implementation status (this step)
+## Implementation status
 
 Landed and proven by tests:
 
@@ -237,17 +238,65 @@ Landed and proven by tests:
   `rt_cmp_str` emitter and is untouched. This is a file-layout deviation, not
   a representation change.
 
+### Step 3, first collection slice (landed)
+
+The native backend now emits collections, so this slice is the codegen bridge
+the ADR anticipated. It deliberately does **not** yet make every slot a
+NaN-boxed word; it uses the same tag vocabulary and display rules, with a
+concrete descriptor layout the rest of the migration can replace:
+
+- `Kind` grew `List`, `Tuple`, `Set` and `Dict`, and the analyzer learns the
+element kind of a collection (and carries it through `StoreVar`) so `xs[0]`
+reaches the same `Kind` the interpreter's value would.
+- A collection value is one pointer to a writable descriptor:
+  `{ tag, length, [tag, word] * length }` (`[key_tag, key, val_tag, val]` for a
+  dict). The tags are the `TAG_*` constants in `src/runtime/value.rs`, plus two
+  descriptor-only tags (`TAG_FLOAT`, `TAG_BOOL`) where the word decides how to
+  print. `Kind::tag` in `src/backend/x86_64/mod.rs` is the single mapping.
+- `src/runtime/collections.rs` emits the runtime side in machine code:
+  `rt_alloc` (bump allocation over a 256 KiB zeroed arena in the image),
+  `rt_index_seq`, `rt_index_dict`, `rt_print_value`/`rt_print_collection`, and
+  the `E049`/`E053` diagnostics. `MirInst::Index` carries its lowered source
+  line, so those two diagnostics are byte-identical to the interpreter's
+  (the older E036/E037/E038 panics still omit a line). The printers reuse the
+  existing int/float/bool/string writers through new no-newline entry points.
+  Exhausting the arena takes an honest error path: `rt_alloc` writes
+  `E177 native runtime arena ကုန်ဆုံးသွားပါသည်။` to stderr and exits 1; a
+  native test builds a literal past 256 KiB and observes exactly that.
+- Constructors write the descriptor the analyzer typed; list/tuple/set/dict
+  printing matches the interpreter, including nested collections, quoted
+  strings inside collections, and `1.0` float spelling. Set members and dict
+  keys are deduplicated at compile time: a run-time set member or dict key is
+  refused rather than silently keeping a duplicate.
+- `len(collection)` and `MirInst::Len` read the descriptor's length; the
+  `for`-loop `Len`/`Index` shape is emitted, but `MirInst::Items` (iteration)
+  is still refused, so no parity fixture flips: the split remains 6 match /
+  48 refuse, with the refusal for each collection fixture now naming the next
+  construct instead of "a list".
+- New native fixture `tests/native/fixtures/collections.akk` is compared with
+  the interpreter through `akk build` in both optimiser modes. Two native
+  tests cover the rest: `collection_diagnostics_match_the_interpreter` asserts
+  byte-identical `E049`/`E053` stderr for range, negative and missing-key
+  cases, and `the_collection_arena_reports_exhaustion_honestly` observes the
+  documented exhaustion path. Three unit tests cover index typing and the
+  heterogeneous-list / run-time-set refusals.
+
 Still deferred (and to which step):
 
-- **Step 3:** mark-sweep traversal/collection, the shadow stack/root table,
-  hash indexes for dict/set, and the codegen migration from static `Kind` to
-  `Value` with arithmetic/print runtime helpers. Step 3's collection work
-  needs that migration; until then no compiled program allocates.
-- **Step 3 acceptance:** list/dict/object print fixtures and the million-
-  iteration loop (plan Step 2's acceptance) are proven only once codegen uses
-  this layer.
-- **Step 4:** closure capture cells in `HeapFunction`, and interpolation as a
-  runtime string helper.
+- **Step 3:** `Items`/`for`-over-collection, `StoreIndex`/`StoreField`,
+  collection equality/ordering, indexing a nested collection more than one
+  level deep or a collection parameter (element kinds do not cross calls yet),
+  `len(string)` (grapheme clusters), run-time set members and dict keys,
+  mark-sweep traversal/collection, the shadow stack/root table, hash indexes
+  for dict/set, and the full move from static `Kind` slots to one NaN-boxed
+  `Value` per slot. The current bridge stores `int`/`float`/`bool` inline in
+  slots and writes explicit element tags, so it is a layout step, not the
+  final ABI.
+- **Step 3 acceptance:** list/dict/object print fixtures (the interpreter's
+  own `collections.akk`) and the million-iteration loop need the remaining
+  constructs above; the new native fixture proves the subset that landed.
+- **Step 4:** closure capture cells in `HeapFunction`, interpolation as a
+  runtime string helper, and function values.
 
-No engine reads this layer yet. The existing interpreter, VM and native
-backend therefore produce byte-for-byte identical output and error text.
+The interpreter and VM still produce byte-for-byte identical output and error
+text, which the parity harness enforces.

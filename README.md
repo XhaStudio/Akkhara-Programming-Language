@@ -313,6 +313,10 @@ error.
   exactly as it does when interpreted. A `break`, `continue` or `return` that
   would leave a `finally` without running it is refused with `E177` rather than
   skipping the block.
+- `akk build` supports list/tuple/set/dict literals, indexing, `len` and
+  collection printing. Iterating a collection, storing into an element and
+  comparing two collections are still refused with `E177`. Collections use a
+  fixed runtime arena; exhausting it reports `E177` on stderr and exits 1.
 
 ### Type keywords
 `စာသား`(str) `ကိန်းပြည့်`(int) `ဒဿမ`/`ဒဿမကိန်း`(float) `မှန်/မှား`(bool) `စာရင်း`(list) `အစု`(tuple) `အုပ်စု`(set) `အဘိဓာန်`(dict) `ဇယား`(table)

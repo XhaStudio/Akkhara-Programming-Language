@@ -294,6 +294,7 @@ mod tests {
                 dest,
                 base: Operand::Const(Const::Str("a".to_string())),
                 indices: vec![Operand::Const(Const::Int(9))],
+                line: 1,
             });
             builder.terminate(Terminator::Exit);
         });

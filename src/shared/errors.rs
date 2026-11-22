@@ -89,7 +89,7 @@ pub(crate) const KIND_STR_MM: &str = "စာသား";
 /// diagnostic always says what was not supported.
 pub(crate) fn native_unsupported(what: &str) -> String {
     format!(
-        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
+        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
         what
     )
 }

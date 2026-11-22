@@ -73,7 +73,22 @@ pub(crate) struct Data {
     interned: HashMap<String, u32>,
 }
 
+/// The zeroed arena the collection runtime bump-allocates from. It lives in
+/// the image's writable data and is never grown or collected in this slice.
+pub(crate) const ARENA_SIZE: u32 = 256 * 1024;
+
 impl Data {
+    /// Reserve `size` zeroed bytes and return their offset. The collection
+    /// runtime writes descriptors here at run time.
+    pub(crate) fn reserve_arena(&mut self, size: usize) -> u32 {
+        while self.bytes.len() % 8 != 0 {
+            self.bytes.push(0);
+        }
+        let offset = self.bytes.len() as u32;
+        self.bytes.resize(self.bytes.len() + size, 0);
+        offset
+    }
+
     pub(crate) fn intern(&mut self, text: &str) -> u32 {
         if let Some(offset) = self.interned.get(text) {
             return *offset;
@@ -111,6 +126,9 @@ pub(crate) fn compile(program: &MirProgram, target: Target) -> Result<Image, Str
     let error_prefix = data.reserve_slot();
     let error_identity = data.reserve_slot();
     let error_payload = data.reserve_slot();
+    // The collection arena: its bump offset and the zeroed bytes themselves.
+    let arena_used = data.reserve_slot();
+    let arena_start = data.reserve_arena(ARENA_SIZE as usize);
     let mut imports = Vec::new();
     // Label names must be unique across the whole image: `finish` resolves a
     // branch to the first label that matches, so a per-function counter would
@@ -201,6 +219,9 @@ pub(crate) fn compile(program: &MirProgram, target: Target) -> Result<Image, Str
         &mut imports,
         error_prefix,
         error_payload,
+        arena_used,
+        arena_start,
+        ARENA_SIZE,
     );
     let (text, data_fixups) = code.finish()?;
     Ok(Image {
@@ -318,6 +339,13 @@ fn dest_of(instruction: &MirInst) -> Option<Temp> {
         | MirInst::Neg { dest, .. }
         | MirInst::Move { dest, .. }
         | MirInst::Call { dest, .. }
+        | MirInst::List { dest, .. }
+        | MirInst::Tuple { dest, .. }
+        | MirInst::Set { dest, .. }
+        | MirInst::Dict { dest, .. }
+        | MirInst::Index { dest, .. }
+        | MirInst::Len { dest, .. }
+        | MirInst::Items { dest, .. }
         | MirInst::ErrorMatches { dest, .. } => Some(*dest),
         _ => None,
     }
@@ -333,6 +361,14 @@ fn operands_of(instruction: &MirInst) -> Vec<&Operand> {
         | MirInst::StoreVar { value, .. }
         | MirInst::SetError { value, .. } => vec![value],
         MirInst::Print(value) | MirInst::Eval(value) => vec![value],
+        MirInst::List { items, .. } | MirInst::Tuple { items, .. } | MirInst::Set { items, .. } => {
+            items.iter().collect()
+        }
+        MirInst::Dict { pairs, .. } => pairs.iter().flat_map(|(key, value)| [key, value]).collect(),
+        MirInst::Index { base, indices, .. } => {
+            std::iter::once(base).chain(indices.iter()).collect()
+        }
+        MirInst::Len { value, .. } | MirInst::Items { value, .. } => vec![value],
         _ => Vec::new(),
     }
 }
@@ -361,6 +397,64 @@ fn compare_cc(op: &str) -> Option<u8> {
         ">=" => CC_GE,
         _ => return None,
     })
+}
+
+/// A set member or dict key in literal form, for the compile-time
+/// deduplication the interpreter's insertion-ordered containers need.
+#[derive(PartialEq, Eq)]
+enum DedupKey {
+    Int(i64),
+    Float(u64),
+    Bool(bool),
+    Str(String),
+}
+
+fn dedup_key(operand: &Operand) -> Result<DedupKey, String> {
+    match operand {
+        Operand::Const(Const::Int(value)) => Ok(DedupKey::Int(*value)),
+        Operand::Const(Const::Float(value)) => Ok(DedupKey::Float(value.to_bits())),
+        Operand::Const(Const::Bool(value)) => Ok(DedupKey::Bool(*value)),
+        Operand::Const(Const::Str(value)) => Ok(DedupKey::Str(value.clone())),
+        _ => Err(unsupported(
+            "a set built from run-time values (only literal members are in the slice)",
+        )),
+    }
+}
+
+/// Deduplicate a set literal the way the interpreter's insertion-ordered set
+/// does: a value keeps the position where it first appeared.
+fn dedup_set(items: &[Operand]) -> Result<Vec<Operand>, String> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for item in items {
+        let key = dedup_key(item)?;
+        if !seen.contains(&key) {
+            seen.push(key);
+            out.push(item.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Deduplicate a dict literal: an existing key keeps its first position and
+/// takes the last value, as `IndexMap::insert` does.
+fn dedup_dict(pairs: &[(Operand, Operand)]) -> Result<Vec<(Operand, Operand)>, String> {
+    let mut out: Vec<(Operand, Operand)> = Vec::new();
+    for (key, value) in pairs {
+        let Operand::Const(Const::Str(text)) = key else {
+            return Err(unsupported(
+                "a dict with a key computed at run time (only string literals are in the slice)",
+            ));
+        };
+        if let Some(slot) = out.iter_mut().find(
+            |(existing, _)| matches!(existing, Operand::Const(Const::Str(other)) if other == text),
+        ) {
+            slot.1 = value.clone();
+        } else {
+            out.push((key.clone(), value.clone()));
+        }
+    }
+    Ok(out)
 }
 
 struct Gen {
@@ -750,10 +844,131 @@ impl Gen {
                     Kind::Float => code.call("rt_print_float"),
                     Kind::Bool => code.call("rt_print_bool"),
                     Kind::Str => code.call("rt_print_str"),
+                    Kind::List | Kind::Tuple | Kind::Set | Kind::Dict => {
+                        // The collection printer writes the `repr` form; the
+                        // top-level `print` adds the statement newline.
+                        code.mov_imm32_zero(RDI, kind.tag() as u32);
+                        code.call("rt_print_collection");
+                        code.call("rt_write_newline");
+                    }
                 }
+            }
+            MirInst::List { dest, items } => {
+                self.sequence(code, data, *dest, Kind::List, items)?;
+            }
+            MirInst::Tuple { dest, items } => {
+                self.sequence(code, data, *dest, Kind::Tuple, items)?;
+            }
+            MirInst::Set { dest, items } => {
+                let unique = dedup_set(items)?;
+                self.sequence(code, data, *dest, Kind::Set, &unique)?;
+            }
+            MirInst::Dict { dest, pairs } => {
+                let unique = dedup_dict(pairs)?;
+                self.dictionary(code, data, *dest, &unique)?;
+            }
+            MirInst::Index {
+                dest,
+                base,
+                indices,
+                line,
+            } => {
+                let base_kind = self.kind(base)?;
+                let index = indices
+                    .first()
+                    .ok_or_else(|| unsupported("an index with no part"))?;
+                // Evaluate the base, then the index, left to right.
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, index);
+                // `r8` carries the source line for the E049/E053 text.
+                code.mov_imm32(R8, *line as i32);
+                if base_kind == Kind::Dict {
+                    code.mov_rr(RDX, RAX);
+                    code.mov_rr(RAX, R11);
+                    code.call("rt_index_dict");
+                } else {
+                    code.mov_rr(RCX, RAX);
+                    code.mov_rr(RAX, R11);
+                    code.call("rt_index_seq");
+                }
+                self.store(code, &Operand::Temp(*dest));
+            }
+            MirInst::Len { dest, value } => {
+                // A collection descriptor keeps its length in the second word.
+                self.load(code, data, value);
+                code.load_ptr_disp32(RAX, RAX, 8);
+                self.store(code, &Operand::Temp(*dest));
             }
             other => return Err(unsupported(&format!("{:?}", other))),
         }
+        Ok(())
+    }
+
+    /// Emit a list or tuple descriptor: `{ kind, len, [tag, word] * len }`.
+    /// The tag for each element is the static kind the analyzer settled, so a
+    /// homogeneous literal needs no per-element dispatch at construction.
+    fn sequence(
+        &mut self,
+        code: &mut Code,
+        data: &mut Data,
+        dest: Temp,
+        kind: Kind,
+        items: &[Operand],
+    ) -> Result<(), String> {
+        let size = 16 + 16 * items.len() as i32;
+        code.mov_imm32(RDI, size);
+        code.call("rt_alloc");
+        code.mov_rr(R11, RAX);
+        code.mov_imm32(RCX, kind.tag() as i32);
+        code.store_ptr_disp32(R11, 0, RCX);
+        code.mov_imm32(RCX, items.len() as i32);
+        code.store_ptr_disp32(R11, 8, RCX);
+        for (position, item) in items.iter().enumerate() {
+            let item_kind = self.kind(item)?;
+            let offset = 16 + 16 * position as i32;
+            self.load(code, data, item);
+            code.store_ptr_disp32(R11, offset + 8, RAX);
+            code.mov_imm32(RCX, item_kind.tag() as i32);
+            code.store_ptr_disp32(R11, offset, RCX);
+        }
+        code.mov_rr(RAX, R11);
+        self.store(code, &Operand::Temp(dest));
+        Ok(())
+    }
+
+    /// Emit a dict descriptor: `{ TAG_DICT, len, [key_tag, key, val_tag, val] }
+    /// * len`. Keys are string literals, deduplicated by the analyzer/codegen;
+    /// a run-time key needs the runtime's hash/equality and is refused.
+    fn dictionary(
+        &mut self,
+        code: &mut Code,
+        data: &mut Data,
+        dest: Temp,
+        pairs: &[(Operand, Operand)],
+    ) -> Result<(), String> {
+        let size = 16 + 32 * pairs.len() as i32;
+        code.mov_imm32(RDI, size);
+        code.call("rt_alloc");
+        code.mov_rr(R11, RAX);
+        code.mov_imm32(RCX, Kind::Dict.tag() as i32);
+        code.store_ptr_disp32(R11, 0, RCX);
+        code.mov_imm32(RCX, pairs.len() as i32);
+        code.store_ptr_disp32(R11, 8, RCX);
+        for (position, (key, value)) in pairs.iter().enumerate() {
+            let value_kind = self.kind(value)?;
+            let offset = 16 + 32 * position as i32;
+            self.load(code, data, key);
+            code.store_ptr_disp32(R11, offset + 8, RAX);
+            code.mov_imm32(RCX, Kind::Str.tag() as i32);
+            code.store_ptr_disp32(R11, offset, RCX);
+            self.load(code, data, value);
+            code.store_ptr_disp32(R11, offset + 24, RAX);
+            code.mov_imm32(RCX, value_kind.tag() as i32);
+            code.store_ptr_disp32(R11, offset + 16, RCX);
+        }
+        code.mov_rr(RAX, R11);
+        self.store(code, &Operand::Temp(dest));
         Ok(())
     }
 
@@ -829,6 +1044,13 @@ impl Gen {
                     .first()
                     .ok_or_else(|| unsupported(&format!("`{}` with no argument", name)))?;
                 self.round_call(code, data, arg, builtin)?;
+            }
+            Builtin::Len => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`len` with no argument"))?;
+                self.load(code, data, arg);
+                code.load_ptr_disp32(RAX, RAX, 8);
             }
             Builtin::Min | Builtin::Max => {
                 let keep = match builtin {

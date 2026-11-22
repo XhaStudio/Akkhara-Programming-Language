@@ -3,8 +3,10 @@
 //! One target is implemented -- x86-64, for Linux (`elf`) and Windows (`pe`) --
 //! and only a slice of the language: functions over `int`, `float`, `bool`
 //! and string literals, with arithmetic, comparisons (strings included),
-//! `print`, calls, `return` and the numeric builtins
-//! `abs`/`min`/`max`/`floor`/`ceil`/`round`.
+//! `print`, calls, `return`, the numeric builtins
+//! `abs`/`min`/`max`/`floor`/`ceil`/`round`, and Step 3's first collection
+//! slice: list/tuple/set/dict literals, indexing, `len` and collection
+//! printing through the runtime value layer.
 //! Everything else is refused with `E177` by
 //! [`x86_64::analyze`] before a single byte is emitted, so an unsupported
 //! program cannot become silently different code.

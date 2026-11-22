@@ -53,6 +53,25 @@ const CASES: &[Case] = &[
         name: "builtins",
         stdout: &["7", "2.5", "1", "3", "2.5", "-2.5", "4", "1.5"],
     },
+    // Collection literals: a list indexed and printed, `len`, a dict looked
+    // up by key, set deduplication, a tuple, a nested list and a float list.
+    // The interpreter is the reference for every line.
+    Case {
+        name: "collections",
+        stdout: &[
+            "20",
+            "[10, 20, 30]",
+            "3",
+            "2",
+            "{\"a\": 1, \"b\": 2}",
+            "{1, 2, 3}",
+            "(1, 2, 3)",
+            "[[1, 2], [3]]",
+            "[1.5, 2.0]",
+            "[True, False]",
+            "[\"a\", \"b\"]",
+        ],
+    },
     // `floor`, `ceil` and `round`: positive, negative, exact half, an int
     // argument, an int beyond 2^53 (the interpreter converts to a double
     // first), and one reached through a function's parameter.
@@ -484,25 +503,38 @@ const REFUSED: &[Refused] = &[
         mentions: "float",
         source: "x သည် 5.5 % 2.0 ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
     },
+    // A collection with two element kinds needs the dynamic value word; this
+    // slice writes one tag per collection and refuses a mixed literal.
     Refused {
-        name: "list",
+        name: "list_mixed",
         mentions: "list",
-        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs ကို ဖော်ပြပါ။\n",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nxs ကို ဖော်ပြပါ။\n",
     },
+    // A set drops duplicates, so its members must be known well enough to
+    // compare; a member computed at run time is still refused.
     Refused {
-        name: "tuple",
-        mentions: "tuple",
-        source: "t မှာ (1, 2) ဖြစ်၏။\nt ကို ဖော်ပြပါ။\n",
+        name: "set_runtime",
+        mentions: "set built from run-time",
+        source: "n သည် 1 ဖြစ်၏။\ns မှာ {n, 2} ဖြစ်၏။\ns ကို ဖော်ပြပါ။\n",
     },
+    // A dict key has to be a literal so that duplicate keys keep the
+    // interpreter's first position / last value rule.
     Refused {
-        name: "dict",
+        name: "dict_key",
         mentions: "dict",
-        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd ကို ဖော်ပြပါ။\n",
+        source: "k သည် \"a\" ဖြစ်၏။\nd မှာ { k သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd ကို ဖော်ပြပါ။\n",
+    },
+    // Iterating a collection and writing into an element are the next part of
+    // Step 3; both are still refused by name.
+    Refused {
+        name: "iteration",
+        mentions: "iteration",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nx သည် xs ထဲမှ တစ်ခုစီ\n    x ကို ဖော်ပြပါ။\nပြီး။\n",
     },
     Refused {
-        name: "set",
-        mentions: "set",
-        source: "s မှာ {1, 2, 3} ဖြစ်၏။\ns ကို ဖော်ပြပါ။\n",
+        name: "store_index",
+        mentions: "store into an element",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] = 9;\nxs ကို ဖော်ပြပါ။\n",
     },
     // `min`/`max` take one numeric kind in the slice: the interpreter would
     // compare across int and float, but then the result's kind depends on the
@@ -680,6 +712,133 @@ fn unsupported_constructs_are_refused_by_name() {
     assert!(
         failures.is_empty(),
         "{} refusal check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// The collection runtime's `E049` (index out of range) and `E053` (missing
+/// dict key) must read exactly like the interpreter's, including the source
+/// line, in both build modes.
+#[test]
+fn collection_diagnostics_match_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let cases = [
+        ("index_range", "xs မှာ [1, 2] ဖြစ်၏။\nxs[5] ကို ဖော်ပြပါ။\n"),
+        ("index_negative", "xs မှာ [1, 2] ဖြစ်၏။\nxs[-1] ကို ဖော်ပြပါ။\n"),
+        (
+            "dict_missing",
+            "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd[\"z\"] ကို ဖော်ပြပါ။\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, program) in cases {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let dir = work_dir(name, label);
+            let source = dir.join(format!("{name}.akk"));
+            fs::write(&source, program).expect("the source");
+
+            let reference = interpret(&source);
+            let built = build(&source, optimize);
+            if !built.status.success() {
+                failures.push(format!(
+                    "{name} ({label}): `akk build` failed: {}",
+                    text(&built.stderr).trim()
+                ));
+                continue;
+            }
+            let native = execute(&executable_for(&source));
+            if native.status.code() != reference.status.code() {
+                failures.push(format!(
+                    "{name} ({label}): exit {:?}, interpreter exited {:?}",
+                    native.status.code(),
+                    reference.status.code()
+                ));
+            }
+            if program_output(text(&native.stdout)) != program_output(text(&reference.stdout)) {
+                failures.push(format!(
+                    "{name} ({label}): stdout {:?}, interpreter {:?}",
+                    program_output(text(&native.stdout)),
+                    program_output(text(&reference.stdout))
+                ));
+            }
+            if text(&native.stderr) != text(&reference.stderr) {
+                failures.push(format!(
+                    "{name} ({label}): stderr {:?}, interpreter {:?}",
+                    text(&native.stderr),
+                    text(&reference.stderr)
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} collection diagnostic check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// The collection arena is fixed at 256 KiB. A single list literal larger than
+/// that must take the documented exhaustion path: `E177` on stderr and exit 1,
+/// with no memory corruption and no success. The interpreter, which has no such
+/// arena, runs the same program normally, so the test also proves the program
+/// itself is valid.
+#[test]
+fn the_collection_arena_reports_exhaustion_honestly() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    // `16 + 16 * 16400` bytes for one list descriptor: 262416, past the
+    // 262144-byte arena. A single literal keeps the test cheap and makes the
+    // failure happen on the constructor's first `rt_alloc`.
+    let items = vec!["0"; 16_400].join(", ");
+    let program = format!("xs မှာ [{items}] ဖြစ်၏။\nprint(len(xs));\n");
+    let mut failures = Vec::new();
+    for optimize in [true, false] {
+        let label = if optimize { "opt" } else { "no-opt" };
+        let dir = work_dir("arena_exhaustion", label);
+        let source = dir.join("arena_exhaustion.akk");
+        fs::write(&source, &program).expect("the source");
+
+        let reference = interpret(&source);
+        if !reference.status.success() || program_output(text(&reference.stdout)) != "16400\n" {
+            failures.push(format!(
+                "{label}: the interpreter should print 16400 and exit 0, got {:?} / {:?}",
+                reference.status.code(),
+                text(&reference.stderr).trim()
+            ));
+            continue;
+        }
+
+        let built = build(&source, optimize);
+        if !built.status.success() {
+            failures.push(format!(
+                "{label}: `akk build` failed: {}",
+                text(&built.stderr).trim()
+            ));
+            continue;
+        }
+        let native = execute(&executable_for(&source));
+        let stderr = text(&native.stderr);
+        if native.status.code() != Some(1) {
+            failures.push(format!(
+                "{label}: exhausted program exited {:?}, expected 1",
+                native.status.code()
+            ));
+        }
+        if !stderr.starts_with("E177") || !stderr.contains("arena") {
+            failures.push(format!(
+                "{label}: expected an E177 arena diagnostic, got {stderr:?}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} arena-exhaustion check(s) failed:\n\n{}",
         failures.len(),
         failures.join("\n\n")
     );

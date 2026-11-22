@@ -354,14 +354,18 @@ xs မှာ [1, 2] ဖြစ်၏။
 #         အခြေအနေ ရေးသားပုံ မှား
 ```
 
-### ၁၁.၂ `akk build` တွင် စုစည်းမှုများ မထောက်ပံ့သေး
+### ၁၁.၂ `akk build` တွင် စုစည်းမှု အချို့ မထောက်ပံ့သေး
 
-Native backend (`akk build <file>`) သည် စာရင်း၊ အစု၊ အုပ်စု၊ အဘိဓာန်တို့ကို မထောက်ပံ့သေးဘဲ
-`E177` ဖြင့် ငြင်းသည်။ ဤစုစည်းမှုများကို `akk` interpreter/VM တွင် အပြည့်အဝ သုံးနိုင်သည်။
+Native backend (`akk build <file>`) သည် စာရင်း၊ အစု၊ အုပ်စု၊ အဘိဓာန် literal၊ ၎င်းတို့၏
+index/`len` နှင့် print ကို ထောက်ပံ့ပြီးဖြစ်သည်။ `for` ဖြင့် စုစည်းမှုကို လှည့်ပတ်ခြင်း
+(iteration) နှင့် index ဖြင့် တန်ဖိုး ပြောင်းခြင်းတို့ကို မထောက်ပံ့သေးဘဲ `E177` ဖြင့် ငြင်းသည်။
+ဤစုစည်းမှုများကို `akk` interpreter/VM တွင် အပြည့်အဝ သုံးနိုင်သည်။
 
 ```akk-build
 xs မှာ [1, 2] ဖြစ်၏။
-xs ကို ဖော်ပြပါ။
+x သည် xs ထဲမှ တစ်ခုစီ
+    x ကို ဖော်ပြပါ။
+ပြီး။
 # အမှား:
-# E177 native backend တွင် a list ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
+# E177 native backend တွင် iteration ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
 ```

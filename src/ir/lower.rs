@@ -1006,6 +1006,7 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
                 dest: item,
                 base: Operand::Temp(items),
                 indices: vec![Operand::Temp(index)],
+                line: *line,
             });
             builder.emit(MirInst::StoreVar {
                 var: *var,
@@ -1304,6 +1305,7 @@ fn operand(
                 dest,
                 base,
                 indices,
+                line,
             });
             Operand::Temp(dest)
         }

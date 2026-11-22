@@ -126,10 +126,34 @@ fn call_import(code: &mut Code, slot: u32) {
     code.call_rax();
 }
 
-/// `rt_print_int`: decimal, with a leading `-` and the print newline.
+/// The integer writers: `rt_write_int` to stdout and `rt_write_int_err` to
+/// stderr, both without a trailing newline. `rt_print_int` adds the newline
+/// the `print` statement uses, and `rt_write_newline` is the shared ending.
 pub(crate) fn emit_int(code: &mut Code, data: &mut Data) {
     let newline = data.intern("\n");
+    emit_int_body(code, "rt_write_int", "rt_write");
+    emit_int_body(code, "rt_write_int_err", "rt_write_err");
+
+    code.label("rt_write_newline");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.mov_data_address(RAX, newline + 8);
+    code.mov_imm32(RCX, 1);
+    code.call("rt_write");
+    code.leave();
+    code.ret();
+
     code.label("rt_print_int");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_write_int");
+    code.call("rt_write_newline");
+    code.leave();
+    code.ret();
+}
+
+fn emit_int_body(code: &mut Code, label: &str, write: &str) {
+    code.label(label);
     code.push(RBP);
     code.mov_rbp_rsp();
     code.sub_rsp(64);
@@ -137,31 +161,30 @@ pub(crate) fn emit_int(code: &mut Code, data: &mut Data) {
     code.mov_rr(R10, RAX);
     code.mov_imm32_zero(R11, 0);
     code.test_rr(R10, R10);
-    code.jcc(CC_NS, "int_abs");
+    code.jcc(CC_NS, &format!("{label}_abs"));
     code.neg(R10);
     code.mov_imm32_zero(R11, 1);
-    code.label("int_abs");
+    code.label(&format!("{label}_abs"));
     code.mov_rr(RAX, R10);
     code.mov_imm32(RCX, 10);
-    code.label("int_loop");
+    code.label(&format!("{label}_loop"));
     code.xor_rr(RDX, RDX);
     code.div(RCX);
     code.add_imm8(RDX, b'0' as i8);
     code.store_byte(RSI, RDX);
     code.dec(RSI);
     code.test_rr(RAX, RAX);
-    code.jcc(CC_NE, "int_loop");
+    code.jcc(CC_NE, &format!("{label}_loop"));
     code.test_rr(R11, R11);
-    code.jcc(CC_E, "int_done");
+    code.jcc(CC_E, &format!("{label}_done"));
     code.store_byte_imm(RSI, b'-');
     code.dec(RSI);
-    code.label("int_done");
+    code.label(&format!("{label}_done"));
     code.lea_disp8(RAX, RSI, 1);
     code.mov_rr(RCX, RBP);
     code.sub_rr(RCX, RSI);
     code.sub_imm8(RCX, 1);
-    code.call("rt_write");
-    write_newline(code, newline);
+    code.call(write);
     code.leave();
     code.ret();
 }
@@ -170,8 +193,7 @@ pub(crate) fn emit_bool(code: &mut Code, data: &mut Data) {
     // The interpreter prints booleans capitalized, so the generated program does too.
     let yes = data.intern("True");
     let no = data.intern("False");
-    let newline = data.intern("\n");
-    code.label("rt_print_bool");
+    code.label("rt_write_bool");
     code.push(RBP);
     code.mov_rbp_rsp();
     code.test_rr(RAX, RAX);
@@ -185,26 +207,63 @@ pub(crate) fn emit_bool(code: &mut Code, data: &mut Data) {
     code.mov_imm32(RCX, 5);
     code.call("rt_write");
     code.label("bool_end");
-    write_newline(code, newline);
     code.pop(RBP);
+    code.ret();
+
+    code.label("rt_print_bool");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_write_bool");
+    code.call("rt_write_newline");
+    code.leave();
     code.ret();
 }
 
 pub(crate) fn emit_str(code: &mut Code, data: &mut Data) {
-    let newline = data.intern("\n");
-    code.label("rt_print_str");
+    let quote = data.intern("\"");
+    code.label("rt_write_str");
     code.push(RBP);
     code.mov_rbp_rsp();
     code.load_ptr(RCX, RAX);
     code.lea_disp8(RAX, RAX, 8);
     code.call("rt_write");
-    write_newline(code, newline);
     code.pop(RBP);
     code.ret();
-}
 
-fn write_newline(code: &mut Code, newline: u32) {
-    code.mov_data_address(RAX, newline + 8);
+    // The same routine on stderr, for a run-time diagnostic that quotes a
+    // string (an unknown dict key).
+    code.label("rt_write_str_err");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.load_ptr(RCX, RAX);
+    code.lea_disp8(RAX, RAX, 8);
+    code.call("rt_write_err");
+    code.pop(RBP);
+    code.ret();
+
+    // A string printed inside a collection: the interpreter's `repr` quotes
+    // it, while a top-level `print` writes the bytes raw.
+    code.label("rt_write_str_quoted");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(16);
+    code.store(-8, RAX);
+    code.mov_data_address(RAX, quote + 8);
     code.mov_imm32(RCX, 1);
     code.call("rt_write");
+    code.load(RAX, -8);
+    code.call("rt_write_str");
+    code.mov_data_address(RAX, quote + 8);
+    code.mov_imm32(RCX, 1);
+    code.call("rt_write");
+    code.leave();
+    code.ret();
+
+    code.label("rt_print_str");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_write_str");
+    code.call("rt_write_newline");
+    code.leave();
+    code.ret();
 }

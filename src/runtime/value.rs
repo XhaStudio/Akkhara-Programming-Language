@@ -42,17 +42,26 @@ const TAG_MASK: u64 = 0xFFF8_0000_0000_0000;
 const PAYLOAD_MASK: u64 = (1 << 47) - 1;
 const TAG_SHIFT: u32 = 47;
 
-const TAG_NULL: u64 = 0;
-const TAG_FALSE: u64 = 1;
-const TAG_TRUE: u64 = 2;
-const TAG_INT: u64 = 3;
-const TAG_STR: u64 = 4;
-const TAG_LIST: u64 = 5;
-const TAG_TUPLE: u64 = 6;
-const TAG_SET: u64 = 7;
-const TAG_DICT: u64 = 8;
-const TAG_OBJECT: u64 = 9;
-const TAG_FUNCTION: u64 = 10;
+pub(crate) const TAG_NULL: u64 = 0;
+pub(crate) const TAG_FALSE: u64 = 1;
+pub(crate) const TAG_TRUE: u64 = 2;
+pub(crate) const TAG_INT: u64 = 3;
+pub(crate) const TAG_STR: u64 = 4;
+pub(crate) const TAG_LIST: u64 = 5;
+pub(crate) const TAG_TUPLE: u64 = 6;
+pub(crate) const TAG_SET: u64 = 7;
+pub(crate) const TAG_DICT: u64 = 8;
+pub(crate) const TAG_OBJECT: u64 = 9;
+pub(crate) const TAG_FUNCTION: u64 = 10;
+
+/// A descriptor-only tag: a float occupies the untagged bit space in a
+/// `Value`, so a runtime collection element needs an explicit tag to say
+/// "these bits are a double" (the codegen bridge uses this vocabulary).
+pub(crate) const TAG_FLOAT: u64 = 11;
+/// A descriptor-only tag for a bool whose value decides the tag: a boxed
+/// `Value` uses [`TAG_TRUE`]/[`TAG_FALSE`], but a collection element stores
+/// the word `0`/`1` and inspects it at print time.
+pub(crate) const TAG_BOOL: u64 = 12;
 
 /// A boxed `int`: a full `i64` plus its GC header.
 #[repr(C)]

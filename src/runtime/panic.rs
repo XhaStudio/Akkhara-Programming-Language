@@ -1,6 +1,8 @@
-//! The one run-time failure the slice can still hit: `%` by zero, which the
-//! interpreter reports as `E038` and exits 1 from. A computed `idiv` would trap
-//! the process instead, so the generated code checks first and calls here.
+//! Arithmetic run-time failures the slice can hit: `%` by zero (`E038`) and a
+//! zero divisor for `/` (`E036`/`E037`). The interpreter reports them and exits
+//! 1; a computed `idiv` would trap the process instead, so the generated code
+//! checks first and calls here. The collection runtime's `E049`/`E053` panics
+//! live in `collections.rs`, next to the indexing code that raises them.
 
 use crate::backend::x86_64::{Code, Data, RAX, RBP, RCX};
 

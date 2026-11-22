@@ -145,6 +145,10 @@ pub(crate) enum MirInst {
         dest: Temp,
         base: Operand,
         indices: Vec<Operand>,
+        /// The source line, so the native runtime's `E049`/`E053` text is
+        /// byte-identical to the interpreter's (the other compiled panics
+        /// still have no span).
+        line: usize,
     },
     Field {
         dest: Temp,

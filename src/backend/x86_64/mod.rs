@@ -38,10 +38,13 @@
 //! the interpreter's own `E110`, because that is a broken program rather than a
 //! construct outside the slice. `sqrt` is still outside the slice: its error
 //! message quotes the offending value, which compiled code has no way to
-//! render into a diagnostic. Anything else -- a closure, a class, a list, a
-//! dict, a float remainder -- is refused with `E177`, naming the item.
-//! Refusing is what keeps the backend honest: a construct it cannot emit must
-//! never become silently different code.
+//! render into a diagnostic. A collection literal (`list`/`tuple`/`set`/`dict`)
+//! is in the slice, with indexing, `len` and printing through the native
+//! collection runtime; iterating one, writing into an element and comparing
+//! two of them are still refused. Anything else -- a closure, a class, a float
+//! remainder -- is refused with `E177`, naming the item. Refusing is what
+//! keeps the backend honest: a construct it cannot emit must never become
+//! silently different code.
 //!
 //! A raise (`ပစ်ပါ` / `throw`) and the try/catch clause that handles it are in
 //! the slice. The message has to be a string (it is what a catch clause binds
@@ -70,6 +73,10 @@ pub(crate) enum Kind {
     Float,
     Bool,
     Str,
+    List,
+    Tuple,
+    Set,
+    Dict,
 }
 
 impl Kind {
@@ -78,6 +85,12 @@ impl Kind {
     /// float, except in the builtins, which need one kind).
     fn is_number(self) -> bool {
         matches!(self, Kind::Int | Kind::Float)
+    }
+
+    /// Whether this kind is one of the four collection descriptors the
+    /// runtime emits.
+    fn is_collection(self) -> bool {
+        matches!(self, Kind::List | Kind::Tuple | Kind::Set | Kind::Dict)
     }
 }
 
@@ -92,6 +105,7 @@ pub(crate) enum Builtin {
     Floor,
     Ceil,
     Round,
+    Len,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -104,6 +118,7 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "floor" => Some(Builtin::Floor),
         "ceil" => Some(Builtin::Ceil),
         "round" => Some(Builtin::Round),
+        "len" => Some(Builtin::Len),
         _ => None,
     }
 }
@@ -141,6 +156,10 @@ fn number_error(name: &str, kind: Kind) -> String {
 pub(crate) struct Typed {
     pub(crate) temps: HashMap<Temp, Kind>,
     pub(crate) vars: HashMap<VarId, Kind>,
+    /// The element kind of a list/tuple/set, or the value kind of a dict.
+    /// Absence means the collection is empty or its elements are not settled.
+    pub(crate) elems: HashMap<Temp, Kind>,
+    pub(crate) var_elems: HashMap<VarId, Kind>,
     /// What callers have told each parameter, while the fixpoint runs.
     learned: Vec<Option<Kind>>,
     /// One settled kind per declared parameter, in order.
@@ -257,15 +276,9 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
                 if matches!(
                     instruction,
                     MirInst::LibCall { .. }
-                        | MirInst::Index { .. }
                         | MirInst::Field { .. }
-                        | MirInst::List { .. }
-                        | MirInst::Tuple { .. }
-                        | MirInst::Set { .. }
-                        | MirInst::Dict { .. }
                         | MirInst::IsType { .. }
                         | MirInst::Items { .. }
-                        | MirInst::Len { .. }
                         | MirInst::StoreIndex { .. }
                         | MirInst::StoreField { .. }
                 ) {
@@ -318,6 +331,24 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
                                 }
                                 result.result = Some(kind);
                                 changed = true;
+                            }
+                        }
+                    }
+                    // A branch condition is the interpreter's `bool` rule:
+                    // a collection pointer or a number is E043, not truthy.
+                    if let Some(Terminator::Branch { cond, .. }) = &block.term {
+                        match kind_of(cond, &typed.functions[index]) {
+                            Some(Kind::Bool) => {}
+                            Some(other) => {
+                                return Err(unsupported(&format!(
+                                    "a condition that is a {}",
+                                    other.name()
+                                )))
+                            }
+                            None => {
+                                let mut typed_fn = std::mem::take(&mut typed.functions[index]);
+                                changed |= learn_operand(cond, Kind::Bool, &mut typed_fn)?;
+                                typed.functions[index] = typed_fn;
                             }
                         }
                     }
@@ -731,6 +762,16 @@ fn learn_instruction(
             let ordered = !matches!(op.as_str(), "==" | "!=");
             let left = kind_of(lhs, typed);
             let right = kind_of(rhs, typed);
+            if let Some(kind) = left
+                .into_iter()
+                .chain(right)
+                .find(|kind| kind.is_collection())
+            {
+                // Structural equality and ordering of collections need the
+                // runtime's value comparison; this slice settles kinds
+                // statically and refuses rather than guessing.
+                return Err(unsupported(&format!("comparing a {}", kind.name())));
+            }
             let string = left == Some(Kind::Str) || right == Some(Kind::Str);
             if string {
                 // Strings compare with strings: byte-wise for equality and
@@ -761,9 +802,12 @@ fn learn_instruction(
             changed |= learn_temp(&mut typed.temps, *dest, Kind::Bool)?;
         }
         MirInst::Not { dest, value } => {
-            if let Some(Kind::Str) = kind_of(value, typed) {
-                return Err(unsupported("negating a string"));
+            if let Some(kind) = kind_of(value, typed) {
+                if kind != Kind::Bool {
+                    return Err(unsupported(&format!("negating a {}", kind.name())));
+                }
             }
+            changed |= learn_operand(value, Kind::Bool, typed)?;
             changed |= learn_temp(&mut typed.temps, *dest, Kind::Bool)?;
         }
         MirInst::Neg { dest, value } => {
@@ -810,6 +854,26 @@ fn learn_instruction(
             }
             if let Some(kind) = typed.vars.get(var).copied() {
                 changed |= learn_operand(value, kind, typed)?;
+            }
+            // A collection's element kind travels with the binding, so
+            // `ys = xs` followed by `ys[0]` is typed like `xs[0]`.
+            if let Some(elem) = elems_of(value, typed) {
+                match typed.var_elems.get(var).copied() {
+                    Some(existing) if existing != elem => {
+                        return Err(unsupported(&format!(
+                            "the binding {} holding a {} of {} and of {}",
+                            var,
+                            typed.vars.get(var).copied().unwrap_or(Kind::List).name(),
+                            existing.name(),
+                            elem.name()
+                        )))
+                    }
+                    Some(_) => {}
+                    None => {
+                        typed.var_elems.insert(*var, elem);
+                        changed = true;
+                    }
+                }
             }
         }
         MirInst::Call { dest, name, args } => {
@@ -884,19 +948,112 @@ fn learn_instruction(
         // A discarded value is computed and thrown away; nothing to learn.
         MirInst::Eval(_) => {}
         MirInst::Print(_) => {}
+        MirInst::List { dest, items } => {
+            let elem = items_kind("list", items, typed)?;
+            changed |= learn_collection(*dest, Kind::List, elem, typed)?;
+        }
+        MirInst::Tuple { dest, items } => {
+            let elem = items_kind("tuple", items, typed)?;
+            changed |= learn_collection(*dest, Kind::Tuple, elem, typed)?;
+        }
+        MirInst::Set { dest, items } => {
+            // A set drops duplicates, so its members have to be known here:
+            // the code generator deduplicates literal members exactly as the
+            // interpreter's insertion-ordered set does. A member computed at
+            // run time would need the runtime's equality and is refused.
+            if !items.iter().all(|item| matches!(item, Operand::Const(_))) {
+                return Err(unsupported(
+                    "a set built from run-time values (only literal members are in the slice)",
+                ));
+            }
+            let elem = items_kind("set", items, typed)?;
+            changed |= learn_collection(*dest, Kind::Set, elem, typed)?;
+        }
+        MirInst::Dict { dest, pairs } => {
+            let mut value_kind: Option<Kind> = None;
+            for (key, value) in pairs {
+                // Only literal keys can be deduplicated at compile time; a
+                // run-time key needs the runtime's hash/equality, which is
+                // later Step 3 work.
+                if !matches!(key, Operand::Const(Const::Str(_))) {
+                    return Err(unsupported(
+                        "a dict with a key computed at run time (only string literals are in the slice)",
+                    ));
+                }
+                match kind_of(key, typed) {
+                    Some(Kind::Str) => {}
+                    Some(other) => {
+                        return Err(unsupported(&format!(
+                            "a dict with a {} key (only string keys are in the slice)",
+                            other.name()
+                        )))
+                    }
+                    None => {
+                        changed |= learn_operand(key, Kind::Str, typed)?;
+                    }
+                }
+                if let Some(kind) = kind_of(value, typed) {
+                    match value_kind {
+                        Some(existing) if existing != kind => {
+                            return Err(unsupported(&format!(
+                                "a dict whose values are a {} and a {}",
+                                existing.name(),
+                                kind.name()
+                            )))
+                        }
+                        _ => value_kind = Some(kind),
+                    }
+                }
+            }
+            changed |= learn_collection(*dest, Kind::Dict, value_kind, typed)?;
+        }
+        MirInst::Index {
+            dest,
+            base,
+            indices,
+            ..
+        } => {
+            if indices.len() != 1 {
+                return Err(unsupported(
+                    "an index with more than one part (a `[row, column]` lookup)",
+                ));
+            }
+            let index = &indices[0];
+            match kind_of(base, typed) {
+                Some(Kind::List | Kind::Tuple | Kind::Set) => {
+                    changed |= learn_operand(index, Kind::Int, typed)?;
+                    if let Some(elem) = elems_of(base, typed) {
+                        changed |= learn_temp(&mut typed.temps, *dest, elem)?;
+                    }
+                }
+                Some(Kind::Dict) => {
+                    changed |= learn_operand(index, Kind::Str, typed)?;
+                    if let Some(elem) = elems_of(base, typed) {
+                        changed |= learn_temp(&mut typed.temps, *dest, elem)?;
+                    }
+                }
+                Some(Kind::Str) => return Err(unsupported("an index into a string")),
+                Some(other) => {
+                    return Err(unsupported(&format!("an index into a {}", other.name())))
+                }
+                None => {}
+            }
+        }
+        MirInst::Len { dest, value } => match kind_of(value, typed) {
+            Some(kind) if kind.is_collection() => {
+                changed |= learn_temp(&mut typed.temps, *dest, Kind::Int)?;
+            }
+            Some(Kind::Str) => return Err(unsupported("len() of a string")),
+            Some(other) => return Err(unsupported(&format!("len() of a {}", other.name()))),
+            None => {}
+        },
         other => {
             if matches!(
                 other,
                 MirInst::LibCall { .. }
-                    | MirInst::Index { .. }
                     | MirInst::Field { .. }
-                    | MirInst::List { .. }
-                    | MirInst::Tuple { .. }
-                    | MirInst::Set { .. }
-                    | MirInst::Dict { .. }
                     | MirInst::IsType { .. }
                     | MirInst::Items { .. }
-                    | MirInst::Len { .. }
                     | MirInst::StoreIndex { .. }
                     | MirInst::StoreField { .. }
             ) {
@@ -945,6 +1102,20 @@ fn learn_builtin(
                 }
             }
             learn_temp(&mut typed.temps, dest, Kind::Int)
+        }
+        // `len` over a collection is the descriptor's length word. A string's
+        // length is counted in grapheme clusters, which needs the text helper
+        // the native runtime does not carry yet, so it is refused.
+        Builtin::Len => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(kind) if kind.is_collection() => learn_temp(&mut typed.temps, dest, Kind::Int),
+                Some(Kind::Str) => Err(unsupported("len() of a string")),
+                Some(other) => Err(unsupported(&format!("len() of a {}", other.name()))),
+                None => Ok(false),
+            }
         }
         Builtin::Min | Builtin::Max => {
             if args.is_empty() {
@@ -1010,6 +1181,29 @@ impl Kind {
             Kind::Float => "float",
             Kind::Bool => "bool",
             Kind::Str => "string",
+            Kind::List => "list",
+            Kind::Tuple => "tuple",
+            Kind::Set => "set",
+            Kind::Dict => "dict",
+        }
+    }
+
+    /// The runtime `Value` tag number the code generator writes for this kind
+    /// as a collection element. Floats and bools use the descriptor-only tags
+    /// because their word decides how to print them.
+    pub(crate) fn tag(self) -> u64 {
+        use crate::runtime::value::{
+            TAG_BOOL, TAG_DICT, TAG_FLOAT, TAG_INT, TAG_LIST, TAG_SET, TAG_STR, TAG_TUPLE,
+        };
+        match self {
+            Kind::Int => TAG_INT,
+            Kind::Float => TAG_FLOAT,
+            Kind::Bool => TAG_BOOL,
+            Kind::Str => TAG_STR,
+            Kind::List => TAG_LIST,
+            Kind::Tuple => TAG_TUPLE,
+            Kind::Set => TAG_SET,
+            Kind::Dict => TAG_DICT,
         }
     }
 
@@ -1021,8 +1215,84 @@ impl Kind {
             Kind::Float => crate::shared::errors::KIND_FLOAT_MM,
             Kind::Bool => crate::shared::errors::KIND_BOOL_MM,
             Kind::Str => crate::shared::errors::KIND_STR_MM,
+            Kind::List => "စာရင်း",
+            Kind::Tuple => "အစုအဖွဲ့",
+            Kind::Set => "အစု",
+            Kind::Dict => "အဘိဓာန်",
         }
     }
+}
+
+/// The common element kind of a sequence literal, or `None` while an element's
+/// kind is still unknown. Two different known kinds are refused: the code
+/// generator writes one tag per collection and cannot emit a mixed one
+/// without the dynamic `Value` representation.
+fn items_kind(what: &str, items: &[Operand], typed: &Typed) -> Result<Option<Kind>, String> {
+    let mut kind: Option<Kind> = None;
+    for item in items {
+        let Some(item_kind) = kind_of(item, typed) else {
+            continue;
+        };
+        match kind {
+            Some(existing) if existing != item_kind => {
+                return Err(unsupported(&format!(
+                    "a {what} with a {} element and a {} element",
+                    existing.name(),
+                    item_kind.name()
+                )))
+            }
+            _ => kind = Some(item_kind),
+        }
+    }
+    Ok(kind)
+}
+
+/// The element kind recorded for a collection operand, if it is known.
+fn elems_of(operand: &Operand, typed: &Typed) -> Option<Kind> {
+    match operand {
+        Operand::Temp(temp) => typed.elems.get(temp).copied(),
+        Operand::Var(var) => typed.var_elems.get(var).copied(),
+        _ => None,
+    }
+}
+
+/// Record that `dest` is a collection of `kind` whose elements are `elem`.
+fn learn_collection(
+    dest: Temp,
+    kind: Kind,
+    elem: Option<Kind>,
+    typed: &mut Typed,
+) -> Result<bool, String> {
+    if let Some(existing) = typed.temps.get(&dest) {
+        if *existing != kind {
+            return Err(unsupported(&format!(
+                "the value in t{} being used as a {} and as a {}",
+                dest,
+                existing.name(),
+                kind.name()
+            )));
+        }
+    }
+    let mut changed = learn_temp(&mut typed.temps, dest, kind)?;
+    if let Some(elem) = elem {
+        match typed.elems.get(&dest).copied() {
+            Some(existing) if existing != elem => {
+                return Err(unsupported(&format!(
+                    "the {} in t{} holding {} and {} elements",
+                    kind.name(),
+                    dest,
+                    existing.name(),
+                    elem.name()
+                )))
+            }
+            Some(_) => {}
+            None => {
+                typed.elems.insert(dest, elem);
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn kind_of(operand: &Operand, typed: &Typed) -> Option<Kind> {
@@ -1114,6 +1384,14 @@ fn read_operands(instruction: &MirInst) -> Vec<&Operand> {
         | MirInst::StoreVar { value, .. }
         | MirInst::SetError { value, .. } => vec![value],
         MirInst::Print(value) | MirInst::Eval(value) => vec![value],
+        MirInst::List { items, .. } | MirInst::Tuple { items, .. } | MirInst::Set { items, .. } => {
+            items.iter().collect()
+        }
+        MirInst::Dict { pairs, .. } => pairs.iter().flat_map(|(key, value)| [key, value]).collect(),
+        MirInst::Index { base, indices, .. } => {
+            std::iter::once(base).chain(indices.iter()).collect()
+        }
+        MirInst::Len { value, .. } | MirInst::Items { value, .. } => vec![value],
         _ => Vec::new(),
     }
 }
@@ -1424,5 +1702,83 @@ mod tests {
         let main = function(|builder| builder.terminate(Terminator::Exit));
         let error = analyze(&program_of(vec![main, f])).expect_err("kind is unknown");
         assert!(error.contains("parameter"), "{}", error);
+    }
+
+    #[test]
+    fn a_list_index_is_typed_from_its_members() {
+        let mut list_id = None;
+        let mut item_id = None;
+        let function = function(|builder| {
+            let list = builder.temp();
+            list_id = Some(list);
+            builder.emit(MirInst::List {
+                dest: list,
+                items: vec![Operand::Const(Const::Int(1)), Operand::Const(Const::Int(2))],
+            });
+            let index = builder.temp();
+            builder.emit(MirInst::Move {
+                dest: index,
+                value: Operand::Const(Const::Int(0)),
+            });
+            let item = builder.temp();
+            item_id = Some(item);
+            builder.emit(MirInst::Index {
+                dest: item,
+                base: Operand::Temp(list),
+                indices: vec![Operand::Temp(index)],
+                line: 1,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(item)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("collections are in the slice");
+        let main = &typed.functions[0];
+        assert_eq!(main.temps.get(&list_id.expect("a list")), Some(&Kind::List));
+        assert_eq!(main.elems.get(&list_id.expect("a list")), Some(&Kind::Int));
+        assert_eq!(main.temps.get(&item_id.expect("an item")), Some(&Kind::Int));
+    }
+
+    #[test]
+    fn a_list_with_two_element_kinds_is_refused() {
+        let function = function(|builder| {
+            let list = builder.temp();
+            builder.emit(MirInst::List {
+                dest: list,
+                items: vec![
+                    Operand::Const(Const::Int(1)),
+                    Operand::Const(Const::Str("two".to_string())),
+                ],
+            });
+            builder.emit(MirInst::Print(Operand::Temp(list)));
+            builder.terminate(Terminator::Exit);
+        });
+        let error = analyze(&program_of(vec![function])).expect_err("mixed elements");
+        assert!(error.contains("E177"), "{}", error);
+        assert!(error.contains("list"), "{}", error);
+    }
+
+    #[test]
+    fn a_set_built_from_a_run_time_member_is_refused() {
+        let function = function(|builder| {
+            let member = builder.temp();
+            builder.emit(MirInst::Move {
+                dest: member,
+                value: Operand::Const(Const::Int(2)),
+            });
+            let set = builder.temp();
+            builder.emit(MirInst::Set {
+                dest: set,
+                items: vec![Operand::Const(Const::Int(1)), Operand::Temp(member)],
+            });
+            builder.emit(MirInst::Print(Operand::Temp(set)));
+            builder.terminate(Terminator::Exit);
+        });
+        let error = analyze(&program_of(vec![function])).expect_err("run-time set member");
+        assert!(error.contains("E177"), "{}", error);
+        assert!(
+            error.contains("set built from run-time values"),
+            "{}",
+            error
+        );
     }
 }
