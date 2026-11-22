@@ -1,0 +1,3 @@
+# a break outside any loop
+print("before");
+break;

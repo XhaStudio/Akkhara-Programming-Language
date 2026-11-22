@@ -1,0 +1,16 @@
+# lambda_capture.akk -- a returned lambda reading a captured binding on
+# successive calls, its writes staying local to each call, and lambdas as
+# map/filter/reduce callbacks.
+fn make(n) {
+    return fn(x) { return x + n; };
+}
+step = make(10);
+print(step(1));
+print(step(2));
+bump = fn() { n = n + 1; return n; };
+print(bump());
+print(bump());
+xs = [1, 2, 3];
+print(map(xs, fn(v) { return v * 10; }));
+print(filter(xs, fn(v) { return v > 1; }));
+print(reduce(xs, fn(a, b) { return a + b; }, 0));

@@ -1,0 +1,47 @@
+# app_headless.akk -- the App GUI library without opening a window: widget
+# handles, values, styling and a couple of conversions.
+နည်းပညာများ App ကို သုံးမည်။
+
+w သည် App.screen(800, 600) ဖြစ်၏။
+
+hello သည် App.label(w, "Hello", 10, 10) ဖြစ်၏။
+print(App.get(hello));
+
+notes သည် App.textarea(w, 10, 40, 200, 80) ဖြစ်၏။
+App.set(notes, "notes text");
+print(App.get(notes));
+
+agree သည် App.checkbox(w, "Agree", 10, 140) ဖြစ်၏။
+App.set(agree, true);
+print(App.get(agree));
+
+pick သည် App.choice(w, ["", "Green"], 10, 180) ဖြစ်၏။
+(App.get(pick) == "") ဖြစ်ရင်
+    print("choice empty");
+ပြီး။
+App.set(pick, "Green");
+print(App.get(pick));
+
+namel သည် App.label(w, "Name (required)", 10, 220) ဖြစ်၏။
+print(App.get(namel));
+
+namef သည် App.input(w, 10, 260, 150) ဖြစ်၏။
+App.set(namef, 12);
+print(App.number(namef));
+App.set(namef, -3.5);
+print(App.number(namef));
+print(round(App.number(namef) + 8.5));
+print(App.number(namef) + 17);
+
+step မှာ 0 ဖြစ်၏။
+print(step);
+step ကို 1 တိုးပါ။
+print(step);
+
+print(namef.kind);
+
+eng သည် App.label(w, "eng works", 0, 0) ဖြစ်၏။
+print(App.get(eng));
+
+print(App.number(namef) < 0);
+print(10 / 4);

@@ -1,0 +1,13 @@
+# json_lib.akk -- the json library through the bytecode backend: text to
+# values, values to text, and the lenient member read. Braces are escaped
+# because an unescaped `{` is a string placeholder.
+use json;
+text :str = json.stringify([1, 2, 3]);
+print(text);
+print(json.parse(text));
+print(json.parse("1"));
+print(json.parse("\{\"a\": 1, \"b\": [true, null]\}"));
+print(json.get(json.parse("\{\"a\": 1\}"), "a", "none"));
+print(json.get(json.parse("[1]"), "missing", "fallback"));
+print(json.pretty([1]));
+json.stringify([1, 2]);

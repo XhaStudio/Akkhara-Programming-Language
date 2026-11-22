@@ -1,0 +1,3 @@
+# a return outside any function
+print("before");
+return;

@@ -1,0 +1,5 @@
+# lambda_stmt_error.akk -- a callable stored in a variable is still called
+# through a value, so a statement call whose body yields nothing is the
+# interpreter's E114 (the same rule `x = f();` follows).
+f = fn() { print("void"); };
+f();

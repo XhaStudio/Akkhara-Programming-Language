@@ -1,0 +1,19 @@
+# div_zero.akk -- division by zero, caught and uncaught, in a function and at
+# top level: the harness compares the exact code, text and line of each error.
+xs မှာ [10, 4] ဖြစ်၏။
+print(xs[0] / xs[1]);
+fn share(n :int) {
+    print("share");
+    return n / 0;
+}
+စမ်းရန်
+    print(share(1));
+E036 ကို ဖမ်းပါ။
+    print("E036 caught");
+ပြီး။
+စမ်းရန်
+    print(10 / 0.0);
+E037 ကို ဖမ်းပါ။
+    print("E037 caught");
+ပြီး။
+print(xs[0] / 0);

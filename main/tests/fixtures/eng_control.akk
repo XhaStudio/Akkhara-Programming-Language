@@ -1,0 +1,43 @@
+# eng_control.akk -- English-spelled if / while blocks and both spellings
+# of the logical operators.
+age :int = 20;
+if (age >= 18) {
+    print("adult");
+} else {
+    print("minor");
+}
+
+i :int = 0;
+while (i < 3) {
+    print(i);
+    i = i + 1;
+}
+
+a :int = 1;
+b :int = 2;
+if (a > 0 && b > 0) {
+    print("and ok");
+}
+if (a > 5 || b > 0) {
+    print("or ok");
+}
+
+fn saw(n :int) {
+    if (n == 3) {
+        print("eng saw three");
+    }
+}
+
+လုပ်ငန်း mm(n)သည်
+    (n == 3) ဖြစ်ရင်
+        "mm saw three" ကို ဖော်ပြပါ။
+    ပြီး။
+ပြီး။
+
+mm(3);
+if (true) {
+    if (b == 2) {
+        saw(3);
+        print("nested ok");
+    }
+}

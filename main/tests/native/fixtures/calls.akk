@@ -1,0 +1,13 @@
+# calls.akk -- a two-argument function, a chain of calls through it.
+fn add(a, b) {
+    return a + b;
+}
+fn twice(x) {
+    return add(x, x);
+}
+fn shuffle(a, b) {
+    return add(a, b) - twice(b);
+}
+add(10, 3) ကို ဖော်ပြပါ။
+twice(6) ကို ဖော်ပြပါ။
+shuffle(10, 3) ကို ဖော်ပြပါ။

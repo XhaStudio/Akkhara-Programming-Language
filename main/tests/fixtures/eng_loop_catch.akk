@@ -1,0 +1,24 @@
+# eng_loop_catch.akk -- loop-control errors are catchable by code.
+စမ်းရန်
+    break;
+E116 ကို ဖမ်းပါ။
+    "E116 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+စမ်းရန်
+    v = loop {
+        break;
+    };
+    print(v);
+E115 ကို ဖမ်းပါ။
+    "E115 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+စမ်းရန်
+    m :int = "no";
+    print(m);
+E103 ကို ဖမ်းပါ။
+    "E103 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+print(1);

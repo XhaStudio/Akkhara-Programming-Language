@@ -1,0 +1,7 @@
+# native_while.akk -- a while loop, run by both the interpreter and a
+# native build. The parity harness in tests/parity checks they agree.
+i သည် 0 ဖြစ်၏။
+အခြေအနေ (i < 3) ဖြစ်နေစဉ်
+    i ကို ဖော်ပြပါ။
+    i ကို 1 တိုးပါ။
+ပြီး။

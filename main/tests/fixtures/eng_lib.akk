@@ -1,0 +1,8 @@
+# eng_lib.akk -- `use <lib>;` imports and `<lib>.<fn>(args);` calls.
+use ကျပန်း;
+
+print(ကျပန်း.ကိန်း(5, 6));
+print(ကျပန်း.ကိန်း(7, 8));
+print(ကျပန်း.တန်ဖိုး(["A"]));
+print(ကျပန်း.ကိန်း(1, 2));
+print(ကျပန်း.တန်ဖိုး([true]));

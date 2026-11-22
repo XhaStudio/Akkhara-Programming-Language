@@ -1,0 +1,15 @@
+# locals.akk -- several locals in a frame, prints interleaved with calls.
+fn combine(a, b) {
+    sum သည် a + b ဖြစ်၏။
+    diff သည် a - b ဖြစ်၏။
+    prod သည် sum * diff ဖြစ်၏။
+    sum ကို ဖော်ပြပါ။
+    prod ကို ဖော်ပြပါ။
+    return prod;
+}
+a သည် 9 ဖြစ်၏။
+b သည် 4 ဖြစ်၏။
+"before" ကို ဖော်ပြပါ။
+r သည် combine(a, b) ဖြစ်၏။
+r ကို ဖော်ပြပါ။
+"after" ကို ဖော်ပြပါ။

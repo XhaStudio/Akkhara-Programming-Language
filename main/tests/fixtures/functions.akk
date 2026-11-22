@@ -1,0 +1,12 @@
+# functions.akk -- user-defined functions, plus string interpolation.
+လုပ်ငန်း greet အတွက် who ဖြင့်
+    "Hello, {who}!" ကို ဖော်ပြပါ။
+ပြီး။
+greet ကို လုပ်ရန် "World" ဖြင့်။
+
+# a function whose final statement is a bare expression returns that value
+လုပ်ငန်း twice အတွက် x ဖြင့်
+    x * 2
+ပြီး။
+y အတွက် twice ကို လုပ်ရန် 21 ဖြင့်။
+y ကို ဖော်ပြပါ။

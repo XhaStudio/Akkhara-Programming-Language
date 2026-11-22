@@ -1,0 +1,881 @@
+//! End-to-end tests for the `akk` binary.
+//!
+//! Each case runs the compiled binary against a program in `tests/fixtures/`
+//! and checks three things: the exit code, the exact stdout, and (for failing
+//! programs) the error code reported on stderr. The fixtures deliberately
+//! avoid randomness, wall-clock waits, and the network so the suite is fast
+//! and deterministic: random calls are pinned to a single-element list or an
+//! end-exclusive `(min, max)` pair with `max == min + 1`, and the `request`
+//! fixtures stop at the "not imported" guard, before any I/O happens.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// One fixture and the behavior running it should produce.
+struct Case {
+    /// Fixture file stem, e.g. `"hello"` for `tests/fixtures/hello.akk`.
+    name: &'static str,
+    /// Expected process exit code (0 = success, 1 = error).
+    exit: i32,
+    /// Expected stdout, line by line (no trailing newline needed).
+    stdout: &'static [&'static str],
+    /// An error code that must appear in stderr, if the program should fail.
+    stderr_code: Option<&'static str>,
+    /// Lines piped to the program's stdin, one per line (default: empty).
+    stdin: &'static [&'static str],
+}
+
+const CASES: &[Case] = &[
+    // --- programs that run to completion -----------------------------------
+    Case {
+        name: "hello",
+        exit: 0,
+        stdout: &["Hello, World!"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "control_flow",
+        exit: 0,
+        stdout: &["two", "0", "2", "4", "7", "8", "1", "2", "3"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "shorthand",
+        exit: 0,
+        stdout: &[
+            "adult",
+            "လူကြီး",
+            "[2, 4, 6]",
+            "[2, 3]",
+            "6",
+            "in ok",
+            "no 9",
+            "1",
+            "2",
+            "3",
+            "1",
+            "2",
+            "0",
+            "2",
+            "4",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "functions",
+        exit: 0,
+        stdout: &["Hello, World!", "42"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "collections",
+        exit: 0,
+        stdout: &["20", "2", "{1, 2, 3}", "7", "f=", "7.5"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lib_call_forms",
+        exit: 0,
+        stdout: &["A", "A", "A", "5", "5"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lib_alias",
+        exit: 0,
+        stdout: &["Syntax1:", "A", "Syntax2:", "B", "Form1:", "C"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: English-spelled typed declarations alongside Myanmar ones
+    Case {
+        name: "eng_declare",
+        exit: 0,
+        stdout: &["John", "25", "5.9", "True", "100", "adult", "မင်္ဂလာပါ", "30"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_catch",
+        exit: 0,
+        stdout: &[
+            "E104 reassign ok",
+            "E103 type ok",
+            "E105 redeclare ok",
+            "10",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: English-spelled if / while blocks and fn definitions
+    Case {
+        name: "eng_control",
+        exit: 0,
+        stdout: &[
+            "adult",
+            "0",
+            "1",
+            "2",
+            "and ok",
+            "or ok",
+            "mm saw three",
+            "eng saw three",
+            "nested ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_fn",
+        exit: 0,
+        stdout: &[
+            "Hello, David!",
+            "5",
+            "negative",
+            "zero",
+            "55",
+            "42",
+            "John",
+            "Hello, မြန်မာ!",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: loop { ... } with break / break <value> / ရပ်ပါ
+    Case {
+        name: "eng_loop",
+        exit: 0,
+        stdout: &["12", "4", "5", "2", "6", "3"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_loop_catch",
+        exit: 0,
+        stdout: &["E116 ok", "E115 ok", "E103 ok", "1"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: `use <lib>;` imports and `<lib>.<fn>(args);` calls
+    Case {
+        name: "eng_lib",
+        exit: 0,
+        stdout: &["5", "7", "A", "1", "True"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_lib_catch",
+        exit: 0,
+        stdout: &["E089 ok", "E085 ok", "E117 ok", "done"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // eng library: the core builtin helpers (len / abs / min / ... / contains)
+    Case {
+        name: "eng_builtin",
+        exit: 0,
+        stdout: &[
+            "3", "5", "7", "2.5", "2", "9", "1", "3", "4.0", "2.5", "3", "4", "4", "ENG",
+            "english", "Akkhara", "True", "True", "4", "sqrt ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // --- programs that catch their own errors ------------------------------
+    Case {
+        name: "error_catch",
+        exit: 0,
+        stdout: &[
+            "E091 ok", "E092 ok", "E085 ok", "E086 ok", "E087 ok", "E064 ok", "E031 ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // --- errors the program raises itself (`ပစ်ပါ` / `throw`) ----------------
+    Case {
+        name: "raise_catch",
+        exit: 0,
+        stdout: &[
+            "start",
+            "လက်ကျန်ငွေ မလုံလောက်ပါ",
+            "finally",
+            "42",
+            "[1, 2]",
+            "inner finally",
+            "negative -3",
+            "end",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "raise_uncaught",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E178"),
+        stdin: &[],
+    },
+    Case {
+        name: "request_not_imported",
+        exit: 0,
+        stdout: &["E078 get ok", "E078 post ok", "E089 ok"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // App GUI library: handles, values, styling and canvas calls. Nothing
+    // here opens a window -- only App.run does, and these fixtures avoid it
+    // so the suite stays headless and fast.
+    Case {
+        name: "app_headless",
+        exit: 0,
+        stdout: &[
+            "Hello",
+            "notes text",
+            "True",
+            "choice empty",
+            "Green",
+            "Name (required)",
+            "12",
+            "-3.5",
+            "5",
+            "13.5",
+            "0",
+            "1",
+            "input",
+            "eng works",
+            "True",
+            "2.5",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // App listbox / table: row selection and item get/set, still headless.
+    Case {
+        name: "app_lists",
+        exit: 0,
+        stdout: &[
+            "nothing selected",
+            "Tue",
+            "[\"Mon\", \"Tue\", \"Wed\"]",
+            "",
+            "B",
+            "",
+            "[]",
+            "[\"Su\", \"25\"]",
+            "Su",
+            "26",
+            "[[\"Aung\", \"30\"], [\"Su\", \"26\"]]",
+            "[]",
+            "[\"solo\"]",
+            "E122 row ok",
+            "E122 cell ok",
+            "E122 item ok",
+            "E126 ok",
+            "[\"B\", \"C\"]",
+            "mm",
+            "solo",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "app_run_closed",
+        exit: 0,
+        stdout: &["before run", "after run"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "app_errors",
+        exit: 0,
+        stdout: &[
+            "E086 ok",
+            "E087 ok",
+            "E090 ok",
+            "E120 ok",
+            "E122 get ok",
+            "E122 set ok",
+            "E122 draw ok",
+            "E124 ok",
+            "E125 ok",
+            "E126 ok",
+            "E126 callback ok",
+            "E126 number ok",
+            "E128 ok",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "mutating",
+        exit: 0,
+        stdout: &[
+            "4",
+            "[3, 1, 2, 4]",
+            "4",
+            "[3, 1, 2]",
+            "[1, 2, 3]",
+            "[1, 2, 3]",
+            "4",
+            "1",
+            "[9, 2, 3]",
+            "4",
+            "[9, 2, 3, 7]",
+            "[2, 3, 7, 9]",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "json_lib",
+        exit: 0,
+        stdout: &[
+            "[1,2,3]",
+            "[1, 2, 3]",
+            "1",
+            "{\"a\": 1, \"b\": [True, null]}",
+            "1",
+            "fallback",
+            "[",
+            "  1",
+            "]",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "file_lib",
+        exit: 0,
+        stdout: &[
+            "True",
+            "18",
+            "[\"line one\", \"line two\"]",
+            "line one",
+            "line two",
+            "three",
+            "False",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "defaults",
+        exit: 0,
+        stdout: &[
+            "A!",
+            "B?",
+            "[1, 2, 4]",
+            "[1, 5, 10]",
+            "[1, 5, 9]",
+            "from outer",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // --- programs that fail ------------------------------------------------
+    Case {
+        name: "div_zero",
+        exit: 1,
+        stdout: &["2.5", "share", "E036 caught", "E037 caught"],
+        stderr_code: Some("E036"),
+        stdin: &[],
+    },
+    Case {
+        name: "mod_zero",
+        exit: 1,
+        stdout: &["2", "1", "E038 caught", "E039 caught"],
+        stderr_code: Some("E038"),
+        stdin: &[],
+    },
+    Case {
+        name: "parse_alias_missing",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E093"),
+        stdin: &[],
+    },
+    Case {
+        name: "parse_missing_period",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E002"),
+        stdin: &[],
+    },
+    Case {
+        name: "parse_syntax_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E001"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_parse_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E100"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_type_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E101"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_return_error",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E108"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_break_error",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E116"),
+        stdin: &[],
+    },
+    Case {
+        name: "eng_use_error",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E118"),
+        stdin: &[],
+    },
+    Case {
+        name: "app_not_imported",
+        exit: 1,
+        stdout: &[],
+        stderr_code: Some("E089"),
+        stdin: &[],
+    },
+    Case {
+        name: "runtime_uncaught",
+        exit: 1,
+        stdout: &["before"],
+        stderr_code: Some("E031"),
+        stdin: &[],
+    },
+    // eng library: print()/input()
+    Case {
+        name: "eng_print",
+        exit: 0,
+        stdout: &[
+            "Hello, world!",
+            "David",
+            "30",
+            "1.75",
+            "True",
+            "42",
+            "Hi, David!",
+            "David",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "eng_input",
+        exit: 0,
+        // Prompts are printed without a trailing newline, so each prompt
+        // shares its line with the (echoed by the terminal) typed input.
+        stdout: &[
+            ">> What is your name?: David",
+            "Give a number: 50",
+            "Ratio: 3.5",
+            "Ready? (true/false): False",
+        ],
+        stderr_code: None,
+        // The first line is consumed by the prompt-only `input(">> ")`.
+        stdin: &["skip me", "David", "42", "3.5", "false"],
+    },
+    // --- lambdas as first-class values, and the remaining value forms ----
+    Case {
+        name: "lambda_value",
+        exit: 0,
+        stdout: &["8", "10", "12", "5"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lambda_arg",
+        exit: 0,
+        stdout: &["21", "10", "1", "25"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lambda_return",
+        exit: 0,
+        stdout: &["6", "105", "6", "6"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lambda_capture",
+        exit: 0,
+        stdout: &["11", "12", "11", "11", "[10, 20, 30]", "[2, 3]", "6"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "lambda_stmt_error",
+        exit: 1,
+        stdout: &["void"],
+        stderr_code: Some("E114"),
+        stdin: &[],
+    },
+    Case {
+        name: "remaining_forms",
+        exit: 0,
+        stdout: &[
+            "[3, 2, 1]",
+            "[3, 2, 1]",
+            "cba",
+            "(2, 1)",
+            "yes",
+            "short",
+            "False",
+            "True",
+            "[5, 4]",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "destructure_forms",
+        exit: 0,
+        stdout: &["3", "200", "-1", "3", "12", "4", "5"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "switch_forms",
+        exit: 0,
+        stdout: &[
+            "nine", "fallback", "two", "after", "i=0", "skip-one", "i=2", "seven",
+        ],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // --- fixtures the native parity harness also runs ---------------------
+    // Their expected native outcome lives in tests/parity/expectations.txt.
+    Case {
+        name: "native_while",
+        exit: 0,
+        stdout: &["0", "1", "2"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "native_range_for",
+        exit: 0,
+        stdout: &["0", "1", "2"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "native_import",
+        exit: 0,
+        stdout: &["before", "after"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    Case {
+        name: "native_interpolation",
+        exit: 0,
+        stdout: &["value 2.5"],
+        stderr_code: None,
+        stdin: &[],
+    },
+];
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+}
+
+/// Run the binary with the given arguments.
+fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_akk"));
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.output().expect("failed to spawn the akk binary")
+}
+
+/// Run the binary on a fixture file. `stdin_lines`, when non-empty, is
+/// piped to the program's stdin one line at a time (the pipe is closed
+/// afterward, so reads hit EOF); otherwise stdin is /dev/null.
+fn run_fixture(name: &str, stdin_lines: &[&str]) -> Output {
+    run_fixture_with(name, stdin_lines, &[])
+}
+
+/// `run_fixture` with extra arguments in front of the fixture path, so the
+/// same expectations can be checked against the bytecode VM (`--vm`) as well.
+fn run_fixture_with(name: &str, stdin_lines: &[&str], extra: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_akk"));
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    cmd.arg(fixtures_dir().join(format!("{name}.akk")));
+    if stdin_lines.is_empty() {
+        cmd.stdin(std::process::Stdio::null());
+        return cmd.output().expect("failed to spawn the akk binary");
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    // Unlike output(), spawn() leaves stdout/stderr inherited by default,
+    // so pipe them explicitly or wait_with_output() would collect nothing.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn the akk binary");
+    use std::io::Write;
+    let mut stdin = child.stdin.take().expect("stdin");
+    for line in stdin_lines {
+        writeln!(stdin, "{line}").expect("failed to write to stdin");
+    }
+    stdin.flush().expect("failed to flush stdin");
+    drop(stdin); // close the pipe so the child's reads see EOF
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for the akk binary");
+    output
+}
+
+fn text(bytes: &[u8]) -> String {
+    // Normalize CRLF so the expectations hold on every platform.
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// Drops a `Compiled in ...` line, which `akk run` prints when it had to
+/// build. Fixture expectations list just the program's output, so comparing
+/// against it word for word would fail otherwise.
+fn without_timing_line(stdout: String) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("Compiled in "))
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn expected_stdout(lines: &[&str]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+/// The fixtures the bytecode backend compiles today. Every one of them must
+/// produce exactly what the interpreter produces -- the list is the promise
+/// that `akk --vm` never silently diverges, so it only grows when a feature
+/// actually lands.
+const VM_FIXTURES: &[&str] = &[
+    "eng_builtin",
+    "eng_lib",
+    "eng_lib_catch",
+    "div_zero",
+    "mod_zero",
+    "mutating",
+    "json_lib",
+    "file_lib",
+    "defaults",
+    "error_catch",
+    "raise_catch",
+    "raise_uncaught",
+    "functions",
+    "shorthand",
+    "lib_alias",
+    "lib_call_forms",
+    "eng_break_error",
+    "eng_catch",
+    "eng_control",
+    "eng_declare",
+    "eng_fn",
+    "eng_input",
+    "eng_loop",
+    "eng_loop_catch",
+    "eng_parse_error",
+    "eng_print",
+    "eng_return_error",
+    "eng_type_error",
+    "eng_use_error",
+    "runtime_uncaught",
+    "lambda_value",
+    "lambda_arg",
+    "lambda_return",
+    "lambda_capture",
+    "lambda_stmt_error",
+    "remaining_forms",
+    "switch_forms",
+    "destructure_forms",
+];
+
+/// Check one run against its `Case`, pushing a line per mismatch.
+fn check_case(case: &Case, output: &Output, vm: bool) -> Vec<String> {
+    let mut failures = Vec::new();
+    let label = if vm {
+        format!("{} (--vm)", case.name)
+    } else {
+        case.name.to_string()
+    };
+    let exit = output.status.code().unwrap_or(-1);
+    let stdout = without_timing_line(text(&output.stdout));
+    let stderr = text(&output.stderr);
+
+    if exit != case.exit {
+        failures.push(format!(
+            "{label}: exit code {exit}, expected {}\n    stderr: {}",
+            case.exit,
+            stderr.trim()
+        ));
+    }
+
+    let want_stdout = expected_stdout(case.stdout);
+    if stdout != want_stdout {
+        failures.push(format!(
+            "{label}: stdout was {:?}, expected {:?}",
+            stdout, want_stdout
+        ));
+    }
+
+    match case.stderr_code {
+        Some(code) if !stderr.contains(code) => failures.push(format!(
+            "{label}: stderr did not contain {code}\n    stderr: {}",
+            stderr.trim()
+        )),
+        None if !stderr.is_empty() => {
+            failures.push(format!("{label}: unexpected stderr: {}", stderr.trim()))
+        }
+        _ => {}
+    }
+    failures
+}
+
+#[test]
+fn fixtures_match_expected_behavior() {
+    let mut failures = Vec::new();
+    for case in CASES {
+        let output = run_fixture(case.name, case.stdin);
+        failures.extend(check_case(case, &output, false));
+    }
+    assert!(
+        failures.is_empty(),
+        "{} fixture(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// The same expectations, through the bytecode compiler and VM. A fixture that
+/// hits `E170` here is a bug in this list, not a pass: the compiler either runs
+/// the program exactly or refuses it loudly.
+#[test]
+fn vm_fixtures_match_expected_behavior() {
+    let mut failures = Vec::new();
+    for name in VM_FIXTURES {
+        let Some(case) = CASES.iter().find(|case| case.name == *name) else {
+            failures.push(format!("{name}: not in CASES"));
+            continue;
+        };
+        let output = run_fixture_with(case.name, case.stdin, &["--vm"]);
+        failures.extend(check_case(case, &output, true));
+    }
+    assert!(
+        failures.is_empty(),
+        "{} bytecode fixture(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// A raised error must read the same through both engines -- stdout, stderr
+/// and the exit status, byte for byte -- not merely agree on the error code.
+#[test]
+fn user_raise_output_matches_between_engines() {
+    for name in ["raise_catch", "raise_uncaught"] {
+        let interpreted = run_fixture(name, &[]);
+        let on_vm = run_fixture_with(name, &[], &["--vm"]);
+        assert_eq!(
+            interpreted.status.code(),
+            on_vm.status.code(),
+            "{name}: exit status"
+        );
+        assert_eq!(
+            text(&interpreted.stdout),
+            text(&on_vm.stdout),
+            "{name}: stdout"
+        );
+        assert_eq!(
+            text(&interpreted.stderr),
+            text(&on_vm.stderr),
+            "{name}: stderr"
+        );
+    }
+}
+
+/// Every `.akk` file under `tests/fixtures/` should be registered above, so a
+/// new fixture can't be added without also saying what it should do.
+#[test]
+fn every_fixture_is_covered() {
+    let mut on_disk: Vec<String> = std::fs::read_dir(fixtures_dir())
+        .expect("tests/fixtures/ should exist")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "akk" {
+                return None;
+            }
+            Some(path.file_stem()?.to_string_lossy().into_owned())
+        })
+        .collect();
+    on_disk.sort();
+
+    let mut registered: Vec<String> = CASES.iter().map(|c| c.name.to_string()).collect();
+    registered.sort();
+
+    assert_eq!(
+        on_disk, registered,
+        "add every fixture in tests/fixtures/ to the CASES list in tests/cli.rs"
+    );
+}
+
+#[test]
+fn version_flag_reports_the_cargo_version() {
+    let output = run(&["--version"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = text(&output.stdout);
+    assert_eq!(stdout.trim(), format!("akk {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn help_exits_successfully() {
+    let output = run(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(text(&output.stderr).contains("Usage: akk"));
+}
+
+#[test]
+fn no_arguments_prints_usage_and_fails() {
+    let output = run(&[] as &[&str]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(text(&output.stderr).contains("Usage: akk"));
+}
+
+#[test]
+fn missing_file_fails_with_a_message() {
+    let output = run(&[fixtures_dir().join("does_not_exist.akk")]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!text(&output.stderr).trim().is_empty());
+}

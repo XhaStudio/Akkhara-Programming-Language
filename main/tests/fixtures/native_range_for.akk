@@ -1,0 +1,5 @@
+# native_range_for.akk -- a range for-loop, run by both the interpreter and
+# a native build. The parity harness in tests/parity checks they agree.
+k သည် 0, 3 ထဲမှ တစ်ခုစီ 1 တိုးခြင်းဖြင့်
+    k ကို ဖော်ပြပါ။
+ပြီး။

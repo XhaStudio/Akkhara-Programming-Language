@@ -1,0 +1,3 @@
+# App without importing it
+w = App.screen(400, 300);
+print(w);

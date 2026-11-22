@@ -1,0 +1,16 @@
+# eng_input.akk -- input() prompts, and typed reads.
+# A prompt is written without a newline, so it shares its line with whatever
+# is printed next: `input(">> ")` then `input("What is your name?: ")` read
+# as one ">> What is your name?: <answer>" exchange.
+input(">> ");
+name :str = input("What is your name?: ");
+print(name);
+
+n :int = input("Give a number: ");
+print(n + 8);
+
+r :float = input("Ratio: ");
+print(r);
+
+ok :bool = input("Ready? (true/false): ");
+print(ok);

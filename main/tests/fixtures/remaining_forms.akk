@@ -1,0 +1,15 @@
+# remaining_forms.akk -- reverse (in place and as a value), the conditional
+# expression, and short-circuit and/or.
+xs = [1, 2, 3];
+print(reverse(xs));
+print(xs);
+print(reverse("abc"));
+print(reverse((1, 2)));
+fn noise() { print("noise"); return 1; }
+print(true ? "yes" : "no");
+print(false ? noise() : "short");
+print(false && noise() == 1);
+print(true || noise() == 1);
+xs2 = [4, 5];
+reverse(xs2);
+print(xs2);

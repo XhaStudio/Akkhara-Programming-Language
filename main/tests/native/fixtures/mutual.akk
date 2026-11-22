@@ -1,0 +1,17 @@
+# mutual.akk -- each function calls the other, so both must be reachable
+# before either is emitted.
+fn is_even(n) {
+    အကယ်၍ (n == 0) ဖြစ်လျှင်
+        return 1;
+    ပြီး။
+    return is_odd(n - 1);
+}
+fn is_odd(n) {
+    အကယ်၍ (n == 0) ဖြစ်လျှင်
+        return 0;
+    ပြီး။
+    return is_even(n - 1);
+}
+is_even(10) ကို ဖော်ပြပါ။
+is_odd(10) ကို ဖော်ပြပါ။
+is_even(7) ကို ဖော်ပြပါ။

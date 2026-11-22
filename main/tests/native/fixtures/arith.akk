@@ -1,0 +1,11 @@
+# arith.akk -- integer arithmetic: the results have to be computed, not written down.
+a သည် 6 * 7 ဖြစ်၏။
+a ကို ဖော်ပြပါ။
+b သည် a - 2 ဖြစ်၏။
+b ကို ဖော်ပြပါ။
+c သည် b * 3 ဖြစ်၏။
+c ကို ဖော်ပြပါ။
+d သည် c % 40 ဖြစ်၏။
+d ကို ဖော်ပြပါ။
+e သည် 9 - 5 ဖြစ်၏။
+e ကို ဖော်ပြပါ။

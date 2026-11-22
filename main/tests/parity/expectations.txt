@@ -1,0 +1,71 @@
+# Native parity expectations.
+#
+# One line per fixture in tests/fixtures/, tab-separated:
+#
+#   <name>	match
+#       The native build must succeed and its exit status, stdout and stderr
+#       must equal the interpreter's. `Wxxx` warning lines and the
+#       timing-dependent "Compiled in ..." line are ignored.
+#
+#   <name>	refuse	<keyword>	[<keyword> ...]
+#       The native build must fail with an Exxx diagnostic that contains every
+#       keyword. A compiler panic does not count as a refusal.
+#
+# A refusal is recorded only when the native backend honestly says it cannot
+# compile the program yet; a silently dropped statement or a wrong answer is a
+# failure, not a refusal.
+hello	match
+eng_control	match
+eng_declare	match
+native_while	match
+native_range_for	match
+raise_uncaught	match
+
+app_errors	refuse	E176	a library import
+app_headless	refuse	E176	a library import
+app_lists	refuse	E176	a library import
+app_not_imported	refuse	E177	a library call
+app_run_closed	refuse	E176	a library import
+collections	refuse	E177	a list
+control_flow	refuse	E177	a list
+defaults	refuse	E177	a list
+destructure_forms	refuse	E176	destructuring into
+div_zero	refuse	E177	a list
+eng_break_error	refuse	E176	a break outside a loop
+eng_builtin	refuse	E177	a list
+eng_catch	refuse	E177	a catch clause for `E104`
+eng_fn	refuse	E176	a string with {…} interpolation
+eng_input	refuse	E177	a function call to "input"
+eng_lib	refuse	E176	a library import
+eng_lib_catch	refuse	E176	a library import
+eng_loop	refuse	E176	a loop used as a value
+eng_loop_catch	refuse	E176	a break outside a loop
+eng_parse_error	refuse	E100
+eng_print	refuse	E176	a string with {…} interpolation
+eng_return_error	refuse	E177	a return from the top-level program
+eng_type_error	refuse	E101
+eng_use_error	refuse	E118
+error_catch	refuse	E176	a library import
+file_lib	refuse	E176	a library import
+functions	refuse	E176	a string with {…} interpolation
+json_lib	refuse	E176	a library import
+lambda_arg	refuse	E177	a function call to "f"
+lambda_capture	refuse	E177	a list
+lambda_return	refuse	E177	a closure (`fn` that captures a variable)
+lambda_stmt_error	refuse	E177	a function call to "f"
+lambda_value	refuse	E177	a function call to "twice"
+lib_alias	refuse	E176	a library import
+lib_call_forms	refuse	E176	a library import
+mod_zero	refuse	E177	a remainder (`%`) on a float
+mutating	refuse	E177	a list
+native_import	refuse	E176	a library import
+native_interpolation	refuse	E176	a string with {…} interpolation
+parse_alias_missing	refuse	E093
+parse_missing_period	refuse	E002
+parse_syntax_error	refuse	E001
+raise_catch	refuse	E177	a list
+remaining_forms	refuse	E177	a list
+request_not_imported	refuse	E176	an HTTP get through "request"
+runtime_uncaught	refuse	E177	a function call to "nosuchfunction"
+shorthand	refuse	E177	a list
+switch_forms	refuse	E176	switch

@@ -1,0 +1,686 @@
+//! End-to-end tests for `akk build <file>`: the native code generator.
+//!
+//! Each case compiles a program from `tests/native/fixtures/`, runs the
+//! executable that `akk build` wrote, and checks that it prints exactly what
+//! the interpreter prints for the same file and exits with the same status.
+//! Every case runs twice: once through the optimiser and once with
+//! `--no-opt`, so the slice cannot quietly depend on `opt`.
+//!
+//! The programs are built and run on this machine, so the test only means
+//! something on a platform the backend writes for (`x86_64` Linux or Windows).
+//! On anything else it says so and skips.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// One fixture and the exact stdout it must produce.
+struct Case {
+    /// `tests/native/fixtures/<name>.akk`
+    name: &'static str,
+    stdout: &'static [&'static str],
+}
+
+const CASES: &[Case] = &[
+    // Arithmetic that has to be computed: `6 * 7`, then `- 2`, then `* 3`,
+    // then `% 40`, then `9 - 5`.
+    Case {
+        name: "arith",
+        stdout: &["42", "40", "120", "0", "4"],
+    },
+    // A comparison decides which print runs, twice, then a bool is printed.
+    Case {
+        name: "branch",
+        stdout: &["big", "seven", "False"],
+    },
+    // Several literals, each printed on its own line by the runtime.
+    Case {
+        name: "strings",
+        stdout: &["first", "second line", "third", "end"],
+    },
+    // String comparison: equality and lexicographic ordering, including a
+    // proper prefix (the shorter string is the smaller one).
+    Case {
+        name: "strcmp",
+        stdout: &[
+            "True", "False", "True", "True", "True", "True", "True", "True", "True",
+        ],
+    },
+    // The numeric builtins: `abs` of an int and of a float, `min`/`max` over
+    // several candidates, one candidate, and a float `min` reached through a
+    // function's parameters.
+    Case {
+        name: "builtins",
+        stdout: &["7", "2.5", "1", "3", "2.5", "-2.5", "4", "1.5"],
+    },
+    // `floor`, `ceil` and `round`: positive, negative, exact half, an int
+    // argument, an int beyond 2^53 (the interpreter converts to a double
+    // first), and one reached through a function's parameter.
+    Case {
+        name: "rounding",
+        stdout: &[
+            "3",
+            "4",
+            "3",
+            "-3",
+            "-3",
+            "-2",
+            "2",
+            "7",
+            "9007199254740992",
+            "0",
+            "1",
+            "-1",
+            "2",
+        ],
+    },
+    // `add(a, b)` called directly, called through `twice(x)`, and called as
+    // part of an expression whose other operand is another call.
+    Case {
+        name: "calls",
+        stdout: &["13", "12", "7"],
+    },
+    // Self-recursion where each call needs its own frame: `factorial(10)`
+    // nests ten deep and `fib(15)` fans out into hundreds of calls.
+    Case {
+        name: "recursion",
+        stdout: &["3628800", "610"],
+    },
+    // Mutual recursion: `is_even` and `is_odd` call each other, so a call to
+    // a function defined later in the file has to work.
+    Case {
+        name: "mutual",
+        stdout: &["1", "0", "0"],
+    },
+    // Three locals in one frame (`sum`, `diff`, `prod`) with prints between
+    // them and around the call, so nothing survives by luck in a register.
+    Case {
+        name: "locals",
+        stdout: &["before", "13", "65", "65", "after"],
+    },
+    // Arguments that are themselves calls, nested two deep, plus a callee that
+    // prints while its argument is being evaluated (`noisy(1)` before
+    // `noisy(2)`, left to right as the interpreter does it).
+    Case {
+        name: "nested",
+        stdout: &["22", "9", "1", "2", "3"],
+    },
+    // Float literals, a zero and a negated float, printed with the
+    // interpreter's exact spelling (`0.30000000000000004`, not `0.3`).
+    Case {
+        name: "floats",
+        stdout: &["1.5", "0.0", "-2.25", "0.30000000000000004"],
+    },
+    // True division and mixed int/float arithmetic: `7 / 2` must be `3.5`
+    // rather than a truncated `3`, and the compound assignments stay float.
+    Case {
+        name: "floatmath",
+        stdout: &[
+            "3.5",
+            "0.3333333333333333",
+            "6.0",
+            "3.5",
+            "4.0",
+            "0.25",
+            "3.3333333333333335",
+            "1.5",
+        ],
+    },
+    // Ordering promotes an int, but `==` keeps the interpreter's rule that an
+    // int and a float are never equal, and `0.1 + 0.2` is not `0.3`.
+    Case {
+        name: "floatcmp",
+        stdout: &["True", "False", "False", "True", "True", "False"],
+    },
+    // Floats through parameters and returns, a call nested in a call's
+    // argument, and an int argument promoted at the call site.
+    Case {
+        name: "floatfn",
+        stdout: &["3.0", "4.5", "1.5"],
+    },
+    // Raising and catching: an identity clause, `E178` (every raise), `E`
+    // (anything), and a raise from inside a function that crosses a clause
+    // which does not match it -- running that clause's finally first -- before
+    // the caller's own clause takes it.
+    Case {
+        name: "raise",
+        stdout: &[
+            "start",
+            "caught by identity",
+            "insufficient",
+            "identity finally",
+            "caught by E178",
+            "second",
+            "caught by E",
+            "third",
+            "inner finally",
+            "outer caught",
+            "negative",
+            "plain body",
+            "plain finally",
+            "end",
+        ],
+    },
+];
+
+fn akk() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_akk"))
+}
+
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("native")
+        .join("fixtures")
+}
+
+/// A clean directory per case and build mode, so the interpreter's `.akop`
+/// and the executable from one run cannot leak into another.
+fn work_dir(name: &str, label: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("native-tests")
+        .join(format!("{name}-{label}"));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("a work directory");
+    dir
+}
+
+fn text(bytes: &[u8]) -> String {
+    // Normalize CRLF so the expectations hold on every platform.
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// Drops the `Compiled in ...` line the interpreter prints when it has to
+/// build, so only the program's own output is compared.
+fn program_output(stdout: String) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.starts_with("Compiled in "))
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn expected(lines: &[&str]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+/// The path `akk build` writes for `source`: beside it, with the platform's
+/// executable suffix.
+fn executable_for(source: &Path) -> PathBuf {
+    let mut name = source
+        .file_stem()
+        .map(|stem| stem.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("program"));
+    name.push(std::env::consts::EXE_SUFFIX);
+    source.with_file_name(name)
+}
+
+fn run(command: &mut Command) -> Output {
+    command
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {:?}: {error}", command))
+}
+
+/// `akk <path>`: the interpreter, which is the reference for every case.
+fn interpret(source: &Path) -> Output {
+    run(&mut Command::new(akk()).arg(source))
+}
+
+/// `akk build <path>` (plus `--no-opt`), which must write the executable.
+fn build(source: &Path, optimize: bool) -> Output {
+    let mut command = Command::new(akk());
+    command.arg("build").arg(source);
+    if !optimize {
+        command.arg("--no-opt");
+    }
+    run(&mut command)
+}
+
+fn execute(program: &Path) -> Output {
+    run(&mut Command::new(program))
+}
+
+#[test]
+fn built_programs_match_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        eprintln!("skipping: the native backend writes x86_64 only");
+        return;
+    }
+    let mut failures = Vec::new();
+    for case in CASES {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let name = format!("{} ({label})", case.name);
+            let dir = work_dir(case.name, label);
+            let source = dir.join(format!("{}.akk", case.name));
+            fs::copy(fixtures().join(format!("{}.akk", case.name)), &source).expect("the fixture");
+
+            let reference = interpret(&source);
+            let reference_stdout = program_output(text(&reference.stdout));
+            let reference_exit = reference.status.code().unwrap_or(-1);
+
+            let built = build(&source, optimize);
+            if !built.status.success() {
+                failures.push(format!(
+                    "{name}: `akk build` failed with {}\n    stderr: {}",
+                    built.status,
+                    text(&built.stderr).trim()
+                ));
+                continue;
+            }
+
+            let program = executable_for(&source);
+            if !program.exists() {
+                failures.push(format!(
+                    "{name}: no executable was written to {}",
+                    program.display()
+                ));
+                continue;
+            }
+
+            let native = execute(&program);
+            let native_stdout = text(&native.stdout);
+            let native_exit = native.status.code().unwrap_or(-1);
+
+            let want = expected(case.stdout);
+            if native_stdout != want {
+                failures.push(format!(
+                    "{name}: stdout was {native_stdout:?}, expected {want:?}"
+                ));
+            }
+            if native_stdout != reference_stdout {
+                failures.push(format!(
+                    "{name}: the executable and the interpreter disagree\n    executable: {native_stdout:?}\n    interpreter: {reference_stdout:?}"
+                ));
+            }
+            if native_exit != reference_exit {
+                failures.push(format!(
+                    "{name}: exit code {native_exit}, the interpreter exited {reference_exit}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} native check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// `%` by zero is the one run-time failure the slice can hit. The interpreter
+/// reports `E038` on stderr and exits 1; the executable writes the same
+/// message to stderr (with no line number, because compiled code carries no
+/// spans) and exits 1 too.
+#[test]
+fn a_modulo_by_zero_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let dir = work_dir("mod_zero", "opt");
+    let source = dir.join("mod_zero.akk");
+    fs::copy(fixtures().join("mod_zero.akk"), &source).expect("the fixture");
+
+    let reference = interpret(&source);
+    let built = build(&source, true);
+    assert!(
+        built.status.success(),
+        "`akk build` failed: {}",
+        text(&built.stderr).trim()
+    );
+    let native = execute(&executable_for(&source));
+
+    assert_eq!(
+        program_output(text(&reference.stdout)),
+        "before\n",
+        "the interpreter prints the statement before the panic"
+    );
+    assert_eq!(
+        text(&native.stdout),
+        "before\n",
+        "the executable prints the statement before the panic"
+    );
+    let reference_stderr = text(&reference.stderr);
+    let native_stderr = text(&native.stderr);
+    assert!(
+        reference_stderr.contains("E038"),
+        "the interpreter should report E038, got {reference_stderr:?}"
+    );
+    assert!(
+        native_stderr.starts_with("E038"),
+        "the executable should reach the panic, got {native_stderr:?}"
+    );
+    assert_eq!(
+        native.status.code(),
+        reference.status.code(),
+        "exit codes should match (stderr: {})",
+        text(&native.stderr).trim()
+    );
+    assert_eq!(native.status.code(), Some(1));
+}
+
+/// The interpreter reports `E037` for a float divided by zero, and so does the
+/// executable: the divisor is checked before the divide, so the hardware never
+/// produces an infinity the interpreter would not print.
+#[test]
+fn a_float_division_by_zero_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let dir = work_dir("float_div_zero", "opt");
+    let source = dir.join("float_div_zero.akk");
+    fs::copy(fixtures().join("float_div_zero.akk"), &source).expect("the fixture");
+
+    let reference = interpret(&source);
+    let built = build(&source, true);
+    assert!(
+        built.status.success(),
+        "`akk build` failed: {}",
+        text(&built.stderr).trim()
+    );
+    let native = execute(&executable_for(&source));
+
+    assert_eq!(
+        program_output(text(&reference.stdout)),
+        "before\n",
+        "the interpreter prints the statement before the panic"
+    );
+    assert_eq!(
+        text(&native.stdout),
+        "before\n",
+        "the executable prints the statement before the panic"
+    );
+    let reference_stderr = text(&reference.stderr);
+    let native_stderr = text(&native.stderr);
+    assert!(
+        reference_stderr.contains("E037"),
+        "the interpreter should report E037, got {reference_stderr:?}"
+    );
+    assert!(
+        native_stderr.starts_with("E037"),
+        "the executable should reach the panic, got {native_stderr:?}"
+    );
+    assert_eq!(native.status.code(), Some(1));
+    assert_eq!(native.status.code(), reference.status.code());
+}
+
+/// A raise that reaches the top level terminates the built program the way it
+/// terminates the interpreter: the `E178` line -- with its line number and its
+/// identity -- on stderr, and exit 1.
+#[test]
+fn an_uncaught_raise_reports_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    for optimize in [true, false] {
+        let label = if optimize { "opt" } else { "no-opt" };
+        let dir = work_dir("raise_uncaught", label);
+        let source = dir.join("raise_uncaught.akk");
+        fs::copy(fixtures().join("raise_uncaught.akk"), &source).expect("the fixture");
+
+        let reference = interpret(&source);
+        let built = build(&source, optimize);
+        assert!(
+            built.status.success(),
+            "`akk build` ({label}) failed: {}",
+            text(&built.stderr).trim()
+        );
+        let native = execute(&executable_for(&source));
+
+        assert_eq!(
+            program_output(text(&reference.stdout)),
+            "before\n",
+            "the interpreter prints the statement before the raise"
+        );
+        assert_eq!(
+            text(&native.stdout),
+            "before\n",
+            "the built program prints the statement before the raise"
+        );
+        let reference_stderr = text(&reference.stderr);
+        let native_stderr = text(&native.stderr);
+        assert!(
+            reference_stderr.contains("E178 လိုင်း 2 တွင် [Broken] boom"),
+            "the interpreter should report the raise, got {reference_stderr:?}"
+        );
+        assert_eq!(
+            native_stderr, reference_stderr,
+            "the built program and the interpreter should put the same line on stderr"
+        );
+        assert_eq!(
+            native.status.code(),
+            reference.status.code(),
+            "exit codes should match (stderr: {})",
+            native_stderr.trim()
+        );
+        assert_eq!(native.status.code(), Some(1));
+    }
+}
+
+/// A construct is outside the slice, with the word the message should name it
+/// by. The program itself is valid: the interpreter runs it before `akk build`
+/// is asked to, so the refusal is about the slice and not about the syntax.
+struct Refused {
+    name: &'static str,
+    /// What `E177` should mention.
+    mentions: &'static str,
+    source: &'static str,
+}
+
+const REFUSED: &[Refused] = &[
+    // `%` needs integer operands; the interpreter has float remainders, the
+    // slice does not.
+    Refused {
+        name: "float_rem",
+        mentions: "float",
+        source: "x သည် 5.5 % 2.0 ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Refused {
+        name: "list",
+        mentions: "list",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs ကို ဖော်ပြပါ။\n",
+    },
+    Refused {
+        name: "tuple",
+        mentions: "tuple",
+        source: "t မှာ (1, 2) ဖြစ်၏။\nt ကို ဖော်ပြပါ။\n",
+    },
+    Refused {
+        name: "dict",
+        mentions: "dict",
+        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd ကို ဖော်ပြပါ။\n",
+    },
+    Refused {
+        name: "set",
+        mentions: "set",
+        source: "s မှာ {1, 2, 3} ဖြစ်၏။\ns ကို ဖော်ပြပါ။\n",
+    },
+    // `min`/`max` take one numeric kind in the slice: the interpreter would
+    // compare across int and float, but then the result's kind depends on the
+    // values.
+    Refused {
+        name: "min_mixed",
+        mentions: "min",
+        source: "m သည် min(1, 2.5) ဖြစ်၏။\nm ကို ဖော်ပြပါ။\n",
+    },
+    // A compiled program raises only the errors it writes; a clause for one
+    // of the interpreter's own codes could never match, so it is refused
+    // instead of building a program that silently differs.
+    Refused {
+        name: "catch_code",
+        mentions: "E036",
+        source: "စမ်းရန်\n    print(\"ok\");\nE036 ကို ဖမ်းပါ။\n    print(\"never\");\nပြီး။\n",
+    },
+    Refused {
+        name: "closure",
+        mentions: "closure",
+        source: "fn outer() {\n    n သည် 1 ဖြစ်၏။\n    fn inner() {\n        return n;\n    }\n    return inner();\n}\nouter() ကို ဖော်ပြပါ။\n",
+    },
+    Refused {
+        name: "class",
+        mentions: "E177",
+        source: "ပုံသေ Point သည်\n    fn sum() {\n        return 1;\n    }\nပြီး။\np သည် Point() ဖြစ်၏။\np ကို ဖော်ပြပါ။\n",
+    },
+];
+
+/// A builtin called with the wrong kind or number of arguments is a broken
+/// program, not a construct outside the slice: the interpreter reports `E110`
+/// and `akk build` refuses it with the same code (and the interpreter's
+/// wording), only without the line number compiled code has no span for.
+struct Misuse {
+    name: &'static str,
+    /// What the refusal should mention.
+    mentions: &'static str,
+    source: &'static str,
+}
+
+const MISUSE: &[Misuse] = &[
+    Misuse {
+        name: "floor_kind",
+        mentions: "floor",
+        source: "x သည် floor(\"a\") ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "round_arity",
+        mentions: "round",
+        source: "x သည် round() ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "abs_kind",
+        mentions: "abs",
+        source: "x သည် abs(\"a\") ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "min_arity",
+        mentions: "min",
+        source: "x သည် min() ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+];
+
+/// Both sides must reject each program with `E110`, in both build modes, and
+/// no executable may be left behind.
+#[test]
+fn builtin_misuse_reports_the_interpreters_code() {
+    let mut failures = Vec::new();
+    for case in MISUSE {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let name = format!("{} ({label})", case.name);
+            let dir = work_dir(case.name, label);
+            let source = dir.join(format!("{}.akk", case.name));
+            fs::write(&source, case.source).expect("the source");
+
+            let reference = interpret(&source);
+            let reference_stderr = text(&reference.stderr);
+            if reference.status.code() != Some(1) || !reference_stderr.contains("E110") {
+                failures.push(format!(
+                    "{name}: the interpreter should exit 1 with E110, got {}\n    stderr: {}",
+                    reference.status,
+                    reference_stderr.trim()
+                ));
+                continue;
+            }
+
+            let built = build(&source, optimize);
+            if built.status.code() != Some(1) {
+                failures.push(format!(
+                    "{name}: `akk build` should exit 1, it exited {}",
+                    built.status
+                ));
+            }
+            let stderr = text(&built.stderr);
+            if !stderr.contains("E110") {
+                failures.push(format!(
+                    "{name}: stderr should carry the interpreter's E110, was {stderr:?}"
+                ));
+            }
+            if !stderr.contains(case.mentions) {
+                failures.push(format!(
+                    "{name}: stderr should mention {:?}, was {stderr:?}",
+                    case.mentions
+                ));
+            }
+            let program = executable_for(&source);
+            if program.exists() {
+                failures.push(format!(
+                    "{name}: a refused program wrote {}",
+                    program.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} builtin-misuse check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Everything outside the slice must fail with `E177` naming it, in both build
+/// modes, and must not leave an executable behind that would silently mean
+/// something else. The interpreter runs each program first, so the failure is
+/// the slice's and not the parser's.
+#[test]
+fn unsupported_constructs_are_refused_by_name() {
+    let mut failures = Vec::new();
+    for case in REFUSED {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let name = format!("{} ({label})", case.name);
+            let dir = work_dir(case.name, label);
+            let source = dir.join(format!("{}.akk", case.name));
+            fs::write(&source, case.source).expect("the source");
+
+            let reference = interpret(&source);
+            if !reference.status.success() {
+                failures.push(format!(
+                    "{name}: the interpreter should accept this program, it exited {}\n    stderr: {}",
+                    reference.status,
+                    text(&reference.stderr).trim()
+                ));
+                continue;
+            }
+
+            let built = build(&source, optimize);
+            if built.status.code() != Some(1) {
+                failures.push(format!(
+                    "{name}: `akk build` should exit 1, it exited {}",
+                    built.status
+                ));
+            }
+            let stderr = text(&built.stderr);
+            if !stderr.contains("E177") {
+                failures.push(format!("{name}: stderr should carry E177, was {stderr:?}"));
+            }
+            if !stderr.contains(case.mentions) {
+                failures.push(format!(
+                    "{name}: stderr should mention {:?}, was {stderr:?}",
+                    case.mentions
+                ));
+            }
+            let program = executable_for(&source);
+            if program.exists() {
+                failures.push(format!(
+                    "{name}: a refused program wrote {}",
+                    program.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} refusal check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}

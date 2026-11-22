@@ -1,0 +1,57 @@
+=== env
+MINGW64_NT-10.0-26200 DESKTOP-BG3BD1P 3.6.10-5a1665c8.x86_64 2026-09-28 10:40 UTC x86_64 Msys
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+check.sh: line 18: cc: command not found
+perl: /usr/bin/perl
+make: MISSING
+pkg-config: MISSING
+8
+=== build + tests (debug)
+--- build: exit=101
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: linking with `link.exe` failed: exit code: 1
+error: could not compile `khronos_api` (build script) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `num-traits` (build script) due to 1 previous error
+error: could not compile `quote` (build script) due to 1 previous error
+error: could not compile `windows_x86_64_msvc` (build script) due to 1 previous error
+error: could not compile `proc-macro2` (build script) due to 1 previous error
+error: could not compile `crc32fast` (build script) due to 1 previous error
+error: could not compile `zerocopy` (build script) due to 1 previous error
+build failed: tail of log
+          
+
+error: linking with `link.exe` failed: exit code: 1
+  |
+  = note: "link.exe" "/NOLOGO" "C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\proc-macro2-f53a34703f179e48\\rustcLXZMtO\\symbols.o" "<2 object files omitted>" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/{libstd-*,libpanic_unwind-*,libcfg_if-*,libwindows_link-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libunwind-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\proc-macro2-f53a34703f179e48\\build_script_build-f53a34703f179e48.exe" "/OPT:REF,NOICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/DELAYLOAD:opengl32.dll" "/DELAYLOAD:gdi32.dll" "/DELAYLOAD:user32.dll" "/DELAYLOAD:dwmapi.dll" "/DELAYLOAD:uxtheme.dll" "/DELAYLOAD:imm32.dll" "/DELAYLOAD:shell32.dll" "/DELAYLOAD:ole32.dll" "/DELAYLOAD:combase.dll" "/DELAYLOAD:ws2_32.dll" "/DELAYLOAD:crypt32.dll" "/DELAYLOAD:secur32.dll" "/DELAYLOAD:bcrypt.dll" "/DELAYLOAD:bcryptprimitives.dll" "/DELAYLOAD:advapi32.dll" "delayimp.lib" "/IGNORE:4199"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: link: extra operand 'C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\proc-macro2-f53a34703f179e48\\build_script_build-f53a34703f179e48.build_script_build.5afabac5e44aee4f-cgu.0.rcgu.o'
+          Try 'link --help' for more information.
+          
+
+error: linking with `link.exe` failed: exit code: 1
+  |
+  = note: "link.exe" "/NOLOGO" "C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\zerocopy-5766fcab8d03e74e\\rustcFUfllx\\symbols.o" "<3 object files omitted>" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/{libstd-*,libpanic_unwind-*,libcfg_if-*,libwindows_link-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libunwind-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\zerocopy-5766fcab8d03e74e\\build_script_build-5766fcab8d03e74e.exe" "/OPT:REF,NOICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/DELAYLOAD:opengl32.dll" "/DELAYLOAD:gdi32.dll" "/DELAYLOAD:user32.dll" "/DELAYLOAD:dwmapi.dll" "/DELAYLOAD:uxtheme.dll" "/DELAYLOAD:imm32.dll" "/DELAYLOAD:shell32.dll" "/DELAYLOAD:ole32.dll" "/DELAYLOAD:combase.dll" "/DELAYLOAD:ws2_32.dll" "/DELAYLOAD:crypt32.dll" "/DELAYLOAD:secur32.dll" "/DELAYLOAD:bcrypt.dll" "/DELAYLOAD:bcryptprimitives.dll" "/DELAYLOAD:advapi32.dll" "delayimp.lib" "/IGNORE:4199"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: link: extra operand 'C:\\Users\\Administrator\\Downloads\\Akkhara-compiler-research\\main\\target\\debug\\build\\zerocopy-5766fcab8d03e74e\\build_script_build-5766fcab8d03e74e.build_script_build.ae74e38026cb1bff-cgu.0.rcgu.o'
+          Try 'link --help' for more information.
+          
+
+note: `link.exe` returned an unexpected error
+
+note: you may need to install Visual Studio build tools with the "C++ build tools" workload
+
+error: could not compile `khronos_api` (build script) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `num-traits` (build script) due to 1 previous error
+error: could not compile `quote` (build script) due to 1 previous error
+error: could not compile `windows_x86_64_msvc` (build script) due to 1 previous error
+error: could not compile `proc-macro2` (build script) due to 1 previous error
+error: could not compile `crc32fast` (build script) due to 1 previous error
+error: could not compile `zerocopy` (build script) due to 1 previous error

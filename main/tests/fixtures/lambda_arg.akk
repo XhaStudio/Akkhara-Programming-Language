@@ -1,0 +1,9 @@
+# lambda_arg.akk -- a lambda passed to a user-defined function, and a named
+# function or a lambda variable passed the same way.
+fn apply(f, v) { return f(v); }
+fn inc(x) { return x + 1; }
+print(apply(fn(x) { return x * 3; }, 7));
+print(apply(inc, 9));
+print(inc(0));
+sq = fn(x) { x * x; };
+print(apply(sq, 5));

@@ -1,0 +1,11 @@
+# eng_print.akk -- print() with every value shape.
+print("Hello, world!");
+name :str = "David";
+print(name);
+print(30);
+print(1.75);
+print(true);
+print(6 * 7);
+print("Hi, {name}!");
+who :str = "David";
+print(who);

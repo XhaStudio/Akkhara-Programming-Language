@@ -1,0 +1,15 @@
+# recursion.akk -- real frames, deep enough to matter.
+fn factorial(n) {
+    အကယ်၍ (n < 2) ဖြစ်လျှင်
+        return 1;
+    ပြီး။
+    return n * factorial(n - 1);
+}
+fn fib(n) {
+    အကယ်၍ (n < 2) ဖြစ်လျှင်
+        return n;
+    ပြီး။
+    return fib(n - 1) + fib(n - 2);
+}
+factorial(10) ကို ဖော်ပြပါ။
+fib(15) ကို ဖော်ပြပါ။

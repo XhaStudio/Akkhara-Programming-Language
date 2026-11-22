@@ -1,0 +1,16 @@
+# mutating.akk -- the list builtins that change the list their first argument
+# names, and the value each one hands back.
+xs မှာ [3, 1, 2] ဖြစ်၏။
+print(push(xs, 4));
+print(xs);
+print(pop(xs));
+print(xs);
+print(sort(xs));
+print(xs);
+print(insert(xs, 1, 9));
+print(remove(xs, 0));
+print(xs);
+print(append(xs, 7));
+print(xs);
+sort(xs);
+print(xs);

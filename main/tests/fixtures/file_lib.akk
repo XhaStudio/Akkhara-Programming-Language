@@ -1,0 +1,10 @@
+# file_lib.akk -- the file library: write, read back, append, then delete.
+use file;
+file.write("akk_fixture_tmp.txt", "line one\nline two\n");
+print(file.exists("akk_fixture_tmp.txt"));
+print(file.size("akk_fixture_tmp.txt"));
+print(file.lines("akk_fixture_tmp.txt"));
+file.append("akk_fixture_tmp.txt", "three");
+print(file.read("akk_fixture_tmp.txt"));
+file.delete("akk_fixture_tmp.txt");
+print(file.exists("akk_fixture_tmp.txt"));

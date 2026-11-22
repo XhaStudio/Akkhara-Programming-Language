@@ -1,0 +1,6 @@
+# mod_zero.akk -- the one run-time failure the native slice can still hit: a
+# remainder with a zero divisor panics with E038 and exits 1.
+"before" ကို ဖော်ပြပါ။
+n သည် 7 ဖြစ်၏။
+m သည် n % 0 ဖြစ်၏။
+m ကို ဖော်ပြပါ။

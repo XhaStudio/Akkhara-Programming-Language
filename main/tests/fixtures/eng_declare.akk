@@ -1,0 +1,23 @@
+# eng_declare.akk -- typed English declarations next to Myanmar ones.
+name :str = "John";
+print(name);
+
+age :int = 25;
+print(age);
+
+height :float = 5.9;
+print(height);
+
+ok :bool = true;
+print(ok);
+
+pin LIMIT :int = 100;
+print(LIMIT);
+
+if (age > 18) {
+    print("adult");
+}
+
+greeting မှာ "မင်္ဂလာပါ" ဖြစ်၏။
+print(greeting);
+print(age + 5);

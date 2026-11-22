@@ -1,0 +1,5 @@
+# native_interpolation.akk -- the interpreter expands {n} in the string; a
+# native build must refuse the interpolation with E176 instead of printing
+# the braces literally. See tests/parity.
+n သည် 2.5 ဖြစ်၏။
+print("value {n}");

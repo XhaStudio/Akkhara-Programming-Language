@@ -1,0 +1,20 @@
+# destructure_forms.akk -- destructuring: a list, a tuple, names that already
+# exist (an assignment), a function-local unpack, and the Myanmar spelling.
+[a, b] = [1, 2];
+print(a + b);
+(a, b) = (10, 20);
+print(a * b);
+x = 0;
+y = 0;
+[x, y] = [7, 8];
+print(x - y);
+[p, q] = true ? [1, 2] : [3, 4];
+print(p + q);
+fn split(pair) {
+    [u, v] = pair;
+    return u * v;
+}
+print(split([3, 4]));
+[c, d] သည် [4, 5] ဖြစ်၏။
+c ကို ဖော်ပြပါ။
+d ကို ဖော်ပြပါ။

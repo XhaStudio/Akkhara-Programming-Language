@@ -1,0 +1,58 @@
+print("start");
+
+# a raise caught by the identity it was given; the clause holds the message
+စမ်းရန်
+    "insufficient" ကို Funds အမည်ဖြင့် ပစ်ပါ။
+Funds ကို ဖမ်းပါ။
+    print("caught by identity");
+    print(Funds);
+နောက်ဆုံးတွင်
+    print("identity finally");
+ပြီး။
+
+# the shared E178 code selects every raise
+စမ်းရန်
+    "second" ကို Other အမည်ဖြင့် ပစ်ပါ။
+E178 ကို ဖမ်းပါ။
+    print("caught by E178");
+    print(E178);
+ပြီး။
+
+# `E` catches anything
+စမ်းရန်
+    throw "third" as Third;
+E ကို ဖမ်းပါ။
+    print("caught by E");
+    print(E);
+ပြီး။
+
+fn check(n) {
+    if (n < 0) {
+        throw "negative" as Negative;
+    }
+    return n;
+}
+
+# a raise from inside a function crosses a clause that does not match it,
+# runs that clause's finally, and lands in the caller's own clause
+စမ်းရန်
+    စမ်းရန်
+        check(-1);
+    Other ကို ဖမ်းပါ။
+        print("wrong");
+    နောက်ဆုံးတွင်
+        print("inner finally");
+    ပြီး။
+Negative ကို ဖမ်းပါ။
+    print("outer caught");
+    print(Negative);
+ပြီး။
+
+# a try with no clause at all: the body and then finally
+စမ်းရန်
+    print("plain body");
+နောက်ဆုံးတွင်
+    print("plain finally");
+ပြီး။
+
+print("end");

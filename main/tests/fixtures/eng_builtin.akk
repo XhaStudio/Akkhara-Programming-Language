@@ -1,0 +1,26 @@
+# eng_builtin.akk -- the core builtin helpers, one print each.
+print(len("abc"));
+print(abs(-5));
+print(max(3, 7));
+print(sqrt(6.25));
+print(floor(2.9));
+print(ceil(8.1));
+print(round(1.4));
+print(find("abcd", "d"));
+print(sqrt(16));
+print(min(2.5, 3.5));
+print(round(2.6));
+print(len([1, 2, 3, 4]));
+print(sum([1, 1, 2]));
+print(upper("eng"));
+print(lower("ENGLISH"));
+print(trim("  Akkhara  "));
+print(contains("abc", "b"));
+print(starts_with("abc", "ab"));
+print(len(split("a,b,c,d", ",")));
+
+စမ်းရန်
+    sqrt(-1);
+E111 ကို ဖမ်းပါ။
+    "sqrt ok" ကို ဖော်ပြပါ။
+ပြီး။

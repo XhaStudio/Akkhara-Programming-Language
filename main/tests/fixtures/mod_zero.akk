@@ -1,0 +1,18 @@
+# mod_zero.akk -- a zero remainder divisor, caught and uncaught, in a function
+# and at top level; the Euclidean remainder is printed first.
+print(-7 % 3);
+print(7 % -3);
+fn wrap(n :int) {
+    return n % 0;
+}
+စမ်းရန်
+    print(wrap(3));
+E038 ကို ဖမ်းပါ။
+    print("E038 caught");
+ပြီး။
+စမ်းရန်
+    print(3 % 0.0);
+E039 ကို ဖမ်းပါ။
+    print("E039 caught");
+ပြီး။
+print(3 % 0);

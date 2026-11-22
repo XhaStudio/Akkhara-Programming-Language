@@ -1,0 +1,39 @@
+# switch_forms.akk -- switch in both spellings: a default written first runs
+# only when no case matched, only the first matching case runs, a `break` in an
+# arm stops the switch, and the Myanmar `ရွေးရန်` form compiles too.
+n = 9;
+switch (n) {
+    default: print("default-first");
+    case 1: print("one");
+    case 9: print("nine");
+}
+switch (n) {
+    case 1: print("one");
+    case 2: print("two");
+}
+switch (100) {
+    case 1: print("one");
+    default: print("fallback");
+}
+switch (2) {
+    case 2:
+        print("two");
+        break;
+    default: print("no");
+}
+print("after");
+i = 0;
+while (i < 3) {
+    switch (i) {
+        case 1: print("skip-one"); break;
+        default: print("i=" + str(i));
+    }
+    i += 1;
+}
+x သည် 7 ဖြစ်၏။
+ရွေးရန် (x)
+    7 ဖြစ်ရင်
+        "seven" ကို ပြပါ။
+    မူလ
+        "other" ကို ပြပါ။
+ပြီး။

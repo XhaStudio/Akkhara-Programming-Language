@@ -1,0 +1,22 @@
+# defaults.akk -- default parameters (each default sees the ones before it),
+# a callee reading a caller's local (the interpreter's dynamic scope), and a
+# list built from expressions.
+fn greet(name, punct = "!") {
+    print(name + punct);
+}
+greet("A");
+greet("B", "?");
+fn f(a, b = a + 1, c = b * 2) {
+    return [a, b, c];
+}
+print(f(1));
+print(f(1, 5));
+print(f(1, 5, 9));
+fn inner() {
+    print(seen);
+}
+fn outer() {
+    seen = "from outer";
+    inner();
+}
+outer();

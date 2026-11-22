@@ -1,0 +1,7 @@
+# native_import.akk -- the interpreter runs an import and the statements
+# after it; a native build has no library loader and must refuse the import
+# with E176 instead of silently dropping it. See tests/parity.
+print("before");
+နည်းပညာများ json ကို သုံးမည်။
+json.stringify(1);
+print("after");

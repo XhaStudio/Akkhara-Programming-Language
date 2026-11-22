@@ -1,0 +1,5 @@
+# strings.akk -- several literals, each printed on its own line.
+"first" ကို ဖော်ပြပါ။
+"second line" ကို ဖော်ပြပါ။
+"third" ကို ဖော်ပြပါ။
+"end" ကို ဖော်ပြပါ။

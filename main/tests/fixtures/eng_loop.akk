@@ -1,0 +1,40 @@
+# eng_loop.akk -- loop { } with break / break <value> / continue.
+total :int = 0;
+for n in [3, 4, 5] {
+    total = total + n;
+}
+print(total);
+
+i :int = 0;
+while (i < 4) {
+    i = i + 1;
+}
+print(i);
+
+odds :int = 0;
+for k in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
+    if (k % 2 == 0) {
+        continue;
+    }
+    odds = odds + 1;
+}
+print(odds);
+
+picked = loop {
+    break 2;
+};
+print(picked);
+
+sum :int = 0;
+for m in [1, 2, 3] {
+    sum = sum + m;
+}
+print(sum);
+
+letters :int = 0;
+for ch in "abc" {
+    if (ch != "") {
+        letters = letters + 1;
+    }
+}
+print(letters);

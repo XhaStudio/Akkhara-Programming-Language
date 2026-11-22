@@ -1,0 +1,10 @@
+# lambda_value.akk -- a lambda stored in a variable, and a named function
+# bound as a value, both called later.
+fn double(x) { return x * 2; }
+twice = fn(x) { return x + x; };
+print(twice(4));
+print(double(5));
+alias = double;
+print(alias(6));
+add = fn(a, b) { return a + b; };
+print(add(2, 3));

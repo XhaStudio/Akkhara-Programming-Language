@@ -1,0 +1,9 @@
+# app_run_closed.akk -- App.run on a window that is already closed returns at
+# once, and the program carries on after it.
+နည်းပညာများ App ကို သုံးမည်။
+
+w သည် App.screen(400, 300) ဖြစ်၏။
+print("before run");
+App.close(w);
+App.run(w);
+print("after run");

@@ -20,7 +20,7 @@
 use std::cell::Cell;
 
 use crate::runtime::value::{
-    HeapDict, HeapFunction, HeapInt, HeapList, HeapObject, HeapString,
+    HeapDict, HeapFunction, HeapInt, HeapList, HeapObject, HeapSet, HeapString, HeapTuple,
 };
 
 /// The kind stored in an object header. The value word's tag says the same
@@ -116,8 +116,8 @@ impl Heap {
     }
 
     fn alloc<T>(&mut self, value: T) -> *mut T {
-        let pointer = self.alloc_bytes(std::mem::size_of::<T>(), std::mem::align_of::<T>())
-            as *mut T;
+        let pointer =
+            self.alloc_bytes(std::mem::size_of::<T>(), std::mem::align_of::<T>()) as *mut T;
         unsafe { pointer.write(value) };
         pointer
     }
@@ -143,7 +143,9 @@ impl Heap {
 
     /// The kind of the `index`th allocation, in allocation order.
     pub(crate) fn object_kind(&self, index: usize) -> Option<HeapKind> {
-        self.objects.get(index).map(|&header| unsafe { (*header).kind })
+        self.objects
+            .get(index)
+            .map(|&header| unsafe { (*header).kind })
     }
 
     /// Mark one object, as a collector would when it reaches it.
@@ -199,8 +201,8 @@ impl Drop for Heap {
                     HeapKind::Int => std::ptr::drop_in_place(header as *mut HeapInt),
                     HeapKind::String => std::ptr::drop_in_place(header as *mut HeapString),
                     HeapKind::List => std::ptr::drop_in_place(header as *mut HeapList),
-                    HeapKind::Tuple => std::ptr::drop_in_place(header as *mut HeapList),
-                    HeapKind::Set => std::ptr::drop_in_place(header as *mut HeapList),
+                    HeapKind::Tuple => std::ptr::drop_in_place(header as *mut HeapTuple),
+                    HeapKind::Set => std::ptr::drop_in_place(header as *mut HeapSet),
                     HeapKind::Dict => std::ptr::drop_in_place(header as *mut HeapDict),
                     HeapKind::Object => std::ptr::drop_in_place(header as *mut HeapObject),
                     HeapKind::Function => std::ptr::drop_in_place(header as *mut HeapFunction),

@@ -1,0 +1,37 @@
+# eng_fn.akk -- fn definitions, return values and calls in both spellings.
+fn greet(name :str) {
+    print("Hello, {name}!");
+}
+greet("David");
+
+fn add(a :int, b :int) {
+    return a + b;
+}
+print(add(2, 3));
+
+fn sign(n :int) {
+    if (n < 0) {
+        return "negative";
+    } else if (n == 0) {
+        return "zero";
+    }
+}
+print(sign(-1));
+print(sign(0));
+
+fn eleven(n :int) {
+    return n * 11;
+}
+print(eleven(5));
+
+fn answer() {
+    return 42;
+}
+print(answer());
+
+fn person() {
+    return "John";
+}
+print(person());
+
+greet("မြန်မာ");

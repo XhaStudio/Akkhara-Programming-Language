@@ -1,0 +1,11 @@
+# lambda_return.akk -- a function that returns a lambda, called later. The
+# interpreter binds a parameter that had no binding into the shared
+# environment, so the returned lambda can still read it; a parameter that
+# shadowed an existing binding is put back when the call returns.
+fn adder(n) { return fn(x) { return x + n; }; }
+add5 = adder(5);
+print(add5(1));
+print(add5(100));
+add9 = adder(9);
+print(add9(1));
+print(add5(1));

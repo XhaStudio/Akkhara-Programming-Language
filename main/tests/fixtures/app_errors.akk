@@ -1,0 +1,84 @@
+# app_errors.akk -- every App error code, caught by code.
+နည်းပညာများ App ကို သုံးမည်။
+
+w သည် App.screen(800, 600) ဖြစ်၏။
+lbl သည် App.label(w, "errors", 10, 10) ဖြစ်၏။
+cv သည် App.canvas(w, 10, 40, 200, 100) ဖြစ်၏။
+
+စမ်းရန်
+    App.nosuch(w);
+E086 ကို ဖမ်းပါ။
+    print("E086 ok");
+ပြီး။
+
+စမ်းရန်
+    App.label(w, "x");
+E087 ကို ဖမ်းပါ။
+    print("E087 ok");
+ပြီး။
+
+စမ်းရန်
+    App.move(lbl, "x", 0);
+E090 ကို ဖမ်းပါ။
+    print("E090 ok");
+ပြီး။
+
+စမ်းရန်
+    App.get(42);
+E120 ကို ဖမ်းပါ။
+    print("E120 ok");
+ပြီး။
+
+စမ်းရန်
+    App.get(cv);
+E122 ကို ဖမ်းပါ။
+    print("E122 get ok");
+ပြီး။
+
+စမ်းရန်
+    App.set(cv, "x");
+E122 ကို ဖမ်းပါ။
+    print("E122 set ok");
+ပြီး။
+
+စမ်းရန်
+    App.rect(lbl, 0, 0, 10, 10, "red");
+E122 ကို ဖမ်းပါ။
+    print("E122 draw ok");
+ပြီး။
+
+စမ်းရန်
+    App.on_key(w, "NoSuchKey", "tick");
+E124 ကို ဖမ်းပါ။
+    print("E124 ok");
+ပြီး။
+
+စမ်းရန်
+    App.color(lbl, "nope", "white");
+E125 ကို ဖမ်းပါ။
+    print("E125 ok");
+ပြီး။
+
+စမ်းရန်
+    App.color(lbl, 5, "white");
+E126 ကို ဖမ်းပါ။
+    print("E126 ok");
+ပြီး။
+
+စမ်းရန်
+    App.button(w, "Go", 0, 0, 5);
+E126 ကို ဖမ်းပါ။
+    print("E126 callback ok");
+ပြီး။
+
+စမ်းရန်
+    App.every(w, "ten", "tick");
+E126 ကို ဖမ်းပါ။
+    print("E126 number ok");
+ပြီး။
+
+စမ်းရန်
+    App.number(lbl);
+E128 ကို ဖမ်းပါ။
+    print("E128 ok");
+ပြီး။

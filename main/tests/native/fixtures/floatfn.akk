@@ -1,0 +1,12 @@
+fn scale(x, k) {
+    return x * k;
+}
+fn halve(x) {
+    return x / 2.0;
+}
+a သည် scale(1.5, 2.0) ဖြစ်၏။
+a ကို ဖော်ပြပါ။
+b သည် halve(scale(3.0, 3.0)) ဖြစ်၏။
+b ကို ဖော်ပြပါ။
+c သည် halve(3.0) ဖြစ်၏။
+c ကို ဖော်ပြပါ။

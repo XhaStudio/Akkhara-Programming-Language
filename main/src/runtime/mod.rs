@@ -7,6 +7,7 @@
 //! libc: on Linux the shims are syscalls, on Windows they are calls through a
 //! tiny import table the image writer builds.
 
+pub(crate) mod alloc;
 pub(crate) mod float;
 pub(crate) mod panic;
 pub(crate) mod print;

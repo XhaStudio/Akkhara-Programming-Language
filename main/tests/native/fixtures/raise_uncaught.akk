@@ -1,0 +1,3 @@
+print("before");
+"boom" ကို Broken အမည်ဖြင့် ပစ်ပါ။
+print("unreachable");

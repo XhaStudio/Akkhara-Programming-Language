@@ -1,0 +1,3 @@
+# runtime_uncaught.akk -- an uncaught runtime error exits with code 1.
+"before" ကို ဖော်ပြပါ။
+nosuchfunction ကို လုပ်ပါ။

@@ -1,0 +1,46 @@
+print("start");
+
+# a raise caught by the identity it was given; the catch name holds the message
+စမ်းရန်
+    "လက်ကျန်ငွေ မလုံလောက်ပါ" ကို ငွေမလုံလောက်မှု အမည်ဖြင့် ပစ်ပါ။
+ငွေမလုံလောက်မှု ကို ဖမ်းပါ။
+    print(ငွေမလုံလောက်မှု);
+နောက်ဆုံးတွင်
+    print("finally");
+ပြီး။
+
+# catch-all `E` takes a raise and binds its message too
+စမ်းရန်
+    throw 42 as LowBalance;
+E ကို ဖမ်းပါ။
+    print(E);
+ပြီး။
+
+# the shared E178 code selects every raise, whatever its identity
+စမ်းရန်
+    [1, 2] ကို BadData အမည်ဖြင့် ပစ်ပါ။
+E178 ကို ဖမ်းပါ။
+    print(E178);
+ပြီး။
+
+fn check(n) {
+    if (n < 0) {
+        throw n as Negative;
+    }
+    return n;
+}
+
+# a raise from inside a function crosses a catch that does not match it,
+# runs that clause's finally, and lands in the caller's own catch
+စမ်းရန်
+    စမ်းရန်
+        check(-3);
+    Other ကို ဖမ်းပါ။
+        print("wrong");
+    နောက်ဆုံးတွင်
+        print("inner finally");
+    ပြီး။
+Negative ကို ဖမ်းပါ။
+    print("negative " + Negative);
+ပြီး။
+print("end");

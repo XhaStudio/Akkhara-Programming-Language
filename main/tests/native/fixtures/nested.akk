@@ -1,0 +1,14 @@
+# nested.akk -- arguments that are themselves calls, evaluated left to right.
+fn add(a, b) {
+    return a + b;
+}
+fn scale(x, k) {
+    return x * k;
+}
+fn noisy(x) {
+    x ကို ဖော်ပြပါ။
+    return x;
+}
+add(scale(2, 5), scale(3, 4)) ကို ဖော်ပြပါ။
+add(add(1, 2), scale(add(1, 1), 3)) ကို ဖော်ပြပါ။
+add(noisy(1), noisy(2)) ကို ဖော်ပြပါ။

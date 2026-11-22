@@ -1,0 +1,23 @@
+# eng_catch.akk -- the typed-declaration errors are catchable by code.
+pin N :int = 1;
+စမ်းရန်
+    N = 2;
+E104 ကို ဖမ်းပါ။
+    "E104 reassign ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+စမ်းရန်
+    bad :int = "no";
+    print(bad);
+E103 ကို ဖမ်းပါ။
+    "E103 type ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+pin P :int = 1;
+စမ်းရန်
+    pin P :int = 2;
+E105 ကို ဖမ်းပါ။
+    "E105 redeclare ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+print(N + P + 8);

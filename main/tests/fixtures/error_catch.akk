@@ -1,0 +1,51 @@
+# error_catch.akk -- runtime error codes are catchable by code.
+နည်းပညာများ ကျပန်း ကို အသုံးပြုပါ။
+
+# E091 -- empty collection
+စမ်းရန်
+    ကျပန်း ၏ တန်ဖိုး([]) ကို လုပ်ပါ။
+E091 ကို ဖမ်းပါ။
+    "E091 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E092 -- not a collection
+စမ်းရန်
+    ကျပန်း ၏ တန်ဖိုး(5) ကို လုပ်ပါ။
+E092 ကို ဖမ်းပါ။
+    "E092 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E085 -- unknown library
+စမ်းရန်
+    nosuchlib ၏ get("x") ကို လုပ်ပါ။
+E085 ကို ဖမ်းပါ။
+    "E085 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E086 -- unknown function in a known library
+စမ်းရန်
+    ကျပန်း ၏ nosuchfn(1) ကို လုပ်ပါ။
+E086 ကို ဖမ်းပါ။
+    "E086 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E087 -- wrong number of arguments
+စမ်းရန်
+    ကျပန်း ၏ ကိန်း(1) ကို လုပ်ပါ။
+E087 ကို ဖမ်းပါ။
+    "E087 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E064 -- min >= max
+စမ်းရန်
+    ကျပန်း ၏ ကိန်း(5, 5) ကို လုပ်ပါ။
+E064 ကို ဖမ်းပါ။
+    "E064 ok" ကို ဖော်ပြပါ။
+ပြီး။
+
+# E031 -- aliasing something that is neither a function nor a library
+စမ်းရန်
+    nosuchfunction အဖြစ် alias1။
+E031 ကို ဖမ်းပါ။
+    "E031 ok" ကို ဖော်ပြပါ။
+ပြီး။

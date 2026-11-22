@@ -1,0 +1,67 @@
+# app_lists.akk -- listbox / choice / table item lists, selections and cells.
+နည်းပညာများ App ကို သုံးမည်။
+
+w သည် App.screen(640, 480) ဖြစ်၏။
+lbl သည် App.label(w, "lists", 10, 440) ဖြစ်၏။
+lb သည် App.listbox(w, ["Mon", "Tue", "Wed"], 10, 10, 120, 90) ဖြစ်၏။
+(App.get(lb) == "") ဖြစ်ရင်
+    print("nothing selected");
+ပြီး။
+App.set(lb, "Tue");
+print(App.get(lb));
+print(App.items(lb));
+App.set(lb, "");
+print(App.get(lb));
+
+lb2 သည် App.listbox(w, ["A", "B"], 10, 110, 120, 60) ဖြစ်၏။
+App.set(lb2, "B");
+
+empty သည် App.listbox(w, [], 10, 180, 120, 60) ဖြစ်၏။
+print(App.get(lb2));
+App.set(lb2, "");
+print(App.get(lb2));
+print(App.items(empty));
+
+tb သည် App.table(w, ["Name", "Age"], [["Aung", "30"], ["Su", "25"]], 10, 250, 220, 90) ဖြစ်၏။
+App.set(tb, 1);
+print(App.get(tb));
+print(App.cell(tb, 1, 0));
+App.set_cell(tb, 1, 1, 26);
+print(App.cell(tb, 1, 1));
+print(App.items(tb));
+print(App.items(empty));
+
+App.set_items(lb, ["solo"]);
+print(App.items(lb));
+
+စမ်းရန်
+    App.set(tb, 5);
+E122 ကို ဖမ်းပါ။
+    print("E122 row ok");
+ပြီး။
+
+စမ်းရန်
+    App.cell(tb, 5, 0);
+E122 ကို ဖမ်းပါ။
+    print("E122 cell ok");
+ပြီး။
+
+စမ်းရန်
+    App.items(lbl);
+E122 ကို ဖမ်းပါ။
+    print("E122 item ok");
+ပြီး။
+
+စမ်းရန်
+    App.color(lbl, 5, "white");
+E126 ကို ဖမ်းပါ။
+    print("E126 ok");
+ပြီး။
+
+App.set_items(lb2, ["B", "C"]);
+print(App.items(lb2));
+App.set_items(lb2, ["mm"]);
+App.set(lb2, "mm");
+print(App.get(lb2));
+App.set(lb, "solo");
+print(App.get(lb));

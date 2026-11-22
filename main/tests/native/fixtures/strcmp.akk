@@ -1,0 +1,21 @@
+# strcmp.akk -- string comparison: lexicographic ordering and equality.
+a သည် "apple" ဖြစ်၏။
+b သည် "banana" ဖြစ်၏။
+lt သည် a < b ဖြစ်၏။
+lt ကို ဖော်ပြပါ။
+eq သည် a == b ဖြစ်၏။
+eq ကို ဖော်ပြပါ။
+ne သည် a != b ဖြစ်၏။
+ne ကို ဖော်ပြပါ။
+le သည် a <= a ဖြစ်၏။
+le ကို ဖော်ပြပါ။
+gt သည် b > a ဖြစ်၏။
+gt ကို ဖော်ပြပါ။
+eq2 သည် "abc" == "abc" ဖြစ်၏။
+eq2 ကို ဖော်ပြပါ။
+lt2 သည် "abc" < "abd" ဖြစ်၏။
+lt2 ကို ဖော်ပြပါ။
+pfx သည် "abc" < "abcd" ဖြစ်၏။
+pfx ကို ဖော်ပြပါ။
+ge သည် "abcd" >= "abc" ဖြစ်၏။
+ge ကို ဖော်ပြပါ။
