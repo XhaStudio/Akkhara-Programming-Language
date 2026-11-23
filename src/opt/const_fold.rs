@@ -86,12 +86,12 @@ fn fold_branches(function: &mut MirFn, known: &Known, folds: &mut Folds) -> bool
 /// The temporaries and bindings that hold a constant for the whole function:
 /// exactly one definition, and that definition is a constant.
 #[derive(Default)]
-struct Known {
+pub(crate) struct Known {
     temps: HashMap<Temp, Const>,
     vars: HashMap<VarId, Const>,
 }
 
-fn constants(function: &MirFn) -> Known {
+pub(crate) fn constants(function: &MirFn) -> Known {
     let mut temps: HashMap<Temp, (u32, Option<Const>)> = HashMap::new();
     let mut vars: HashMap<VarId, (u32, Option<Const>)> = HashMap::new();
     for block in &function.blocks {
@@ -155,7 +155,7 @@ fn single_constants<K: std::hash::Hash + Eq>(
         .collect()
 }
 
-fn resolve(operand: &Operand, known: &Known) -> Option<Const> {
+pub(crate) fn resolve(operand: &Operand, known: &Known) -> Option<Const> {
     match operand {
         Operand::Const(value) => Some(value.clone()),
         Operand::Temp(temp) => known.temps.get(temp).cloned(),

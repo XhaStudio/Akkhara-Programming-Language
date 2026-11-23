@@ -1,0 +1,63 @@
+# equality.akk -- `==` and `!=` over each collection kind.
+a မှာ [1, 2, 3] ဖြစ်၏။
+b မှာ [1, 2, 3] ဖြစ်၏။
+c မှာ [1, 2] ဖြစ်၏။
+print(a == b);
+print(a == c);
+print(a != c);
+print(a != b);
+
+# A tuple is its own kind: the same elements are not the same value.
+t မှာ (1, 2, 3) ဖြစ်၏။
+print(t == t);
+print(t == a);
+
+# A set keeps the order it was built in, and that order is what prints.
+s1 မှာ {1, 2} ဖြစ်၏။
+s2 မှာ {1, 2} ဖြစ်၏။
+s3 မှာ {2, 1} ဖြစ်၏။
+print(s1 == s2);
+print(s1 == s3);
+
+# A dict compares keys and values; a different insertion order prints
+# differently, so the two are not equal.
+d1 မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+d2 မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+d3 မှာ { "b" သည် 2 ဖြစ်၏။ "a" သည် 1 ဖြစ်၏။ } ဖြစ်၏။
+d4 မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 9 ဖြစ်၏။ } ဖြစ်၏။
+print(d1 == d2);
+print(d1 == d3);
+print(d1 == d4);
+
+# Elements compare by value: strings, floats and nested collections.
+w1 မှာ ["မြ", "န်"] ဖြစ်၏။
+w2 မှာ ["မြ", "န်"] ဖြစ်၏။
+print(w1 == w2);
+f1 မှာ [1.5, 2.0] ဖြစ်၏။
+f2 မှာ [1.5, 2.0] ဖြစ်၏။
+f3 မှာ [1.5, 2.5] ဖြစ်၏။
+print(f1 == f2);
+print(f1 == f3);
+n1 မှာ [[1], [2]] ဖြစ်၏။
+n2 မှာ [[1], [2]] ဖြစ်၏။
+n3 မှာ [[1], [3]] ဖြစ်၏။
+print(n1 == n2);
+print(n1 == n3);
+
+# Empty collections of one kind are equal; another kind is not.
+e1 မှာ [] ဖြစ်၏။
+e2 မှာ [] ဖြစ်၏။
+print(e1 == e2);
+print(e1 == c);
+
+# A collection never equals a value of another type.
+print(a == 3);
+print(a != 3);
+print(s1 == "1");
+
+if (a == b) {
+    print("same");
+}
+if (a != c) {
+    print("different");
+}

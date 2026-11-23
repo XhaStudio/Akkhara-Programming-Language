@@ -36,6 +36,7 @@ to your actual `github-username/akkhara`. It downloads whichever
 extracts it, and installs the binary to `~/.local/bin`.
 
 Test it locally first:
+
 ```sh
 chmod +x scripts/install.sh
 AKK_REPO=yourusername/akkhara ./scripts/install.sh
@@ -46,14 +47,18 @@ AKK_REPO=yourusername/akkhara ./scripts/install.sh
 You have two options, cheapest first:
 
 ### Option A -- no domain needed, works today
+
 GitHub serves raw file contents directly:
+
 ```
 curl -fsSL https://raw.githubusercontent.com/yourusername/akkhara/main/scripts/install.sh | sh
 ```
+
 This just works the moment the file is pushed to `main`. Good enough for
 most projects and many real tools ship exactly this.
 
 ### Option B -- branded domain (the `rux-lang.dev` look)
+
 1. Buy a domain (Namecheap, Cloudflare Registrar, etc).
 2. Enable **GitHub Pages** on the repo (Settings -> Pages), serving from a
    `docs/` folder or a `gh-pages` branch. Put `install.sh` in that folder's
@@ -91,22 +96,26 @@ $Repo = if ($env:AKK_REPO) { $env:AKK_REPO } else { "yourusername/akkhara" }
 ```
 
 Test locally first:
+
 ```powershell
 $env:AKK_REPO = "yourusername/akkhara"
 .\scripts\install.ps1
 ```
 
 Once hosted (raw GitHub URL or your custom domain, same as step 3), users run:
+
 ```powershell
 irm https://raw.githubusercontent.com/yourusername/akkhara/main/scripts/install.ps1 | iex
 ```
+
 or, with the branded domain:
+
 ```powershell
 irm https://akkhara-lang.dev/install.ps1 | iex
 ```
 
-**Important distinction:** the project's *existing* `install.ps1` /
+**Important distinction:** the project's _existing_ `install.ps1` /
 `command.ps1` at the repo root build Akkhara from source and are meant for
-people who cloned the repo to develop it. This *new* `scripts/install.ps1`
+people who cloned the repo to develop it. This _new_ `scripts/install.ps1`
 downloads a prebuilt binary and is meant for end users who just want to run
 `akk` -- keep both, but only advertise the new one as the one-liner.

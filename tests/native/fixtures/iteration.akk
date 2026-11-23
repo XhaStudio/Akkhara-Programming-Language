@@ -1,0 +1,32 @@
+# iteration.akk -- `for` over each collection kind the native slice emits.
+xs မှာ [10, 20, 30] ဖြစ်၏။
+x သည် xs ထဲမှ တစ်ခုစီ
+    x ကို ဖော်ပြပါ။
+ပြီး။
+
+t မှာ (1, 2, 3) ဖြစ်၏။
+v သည် t ထဲမှ တစ်ခုစီ
+    v ကို ဖော်ပြပါ။
+ပြီး။
+
+s မှာ {"a", "b"} ဖြစ်၏။
+w သည် s ထဲမှ တစ်ခုစီ
+    w ကို ဖော်ပြပါ။
+ပြီး။
+
+# A dict yields its keys, in the order they were first inserted.
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+k သည် d ထဲမှ တစ်ခုစီ
+    k ကို ဖော်ပြပါ။
+ပြီး။
+
+# `break` and `continue` leave the loop's index where they should.
+for x in xs {
+    if (x == 20) {
+        continue;
+    }
+    if (x > 20) {
+        break;
+    }
+    print(x);
+}

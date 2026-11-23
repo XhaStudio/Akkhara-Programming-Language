@@ -1,4 +1,4 @@
-//! `rt_cmp_str`: lexicographic comparison of two strings.
+//! `rt_cmp_str` and `rt_concat_str`: comparing and joining strings.
 //!
 //! A string value is the address of `{ length: u64, bytes... }`. Comparing
 //! two of them is the interpreter's `a < b` on Rust `String`s: byte-wise over
@@ -11,6 +11,57 @@
 //! not care about stack alignment.
 
 use crate::backend::x86_64::encode::*;
+
+/// `rt_concat_str`: `rax` is the first string's address and `rcx` the
+/// second's; the result in `rax` is a fresh string holding both byte ranges in
+/// order. The interpreter's `+` on two strings is exactly this join, so
+/// `"foo" + "bar"` prints `foobar` and a Myanmar syllable pair keeps its bytes
+/// intact.
+///
+/// The new string is `{ length, bytes... }` in the collection arena, so a long
+/// loop of joins reaches the documented `E177` exhaustion rather than growing
+/// without bound. Both ranges are copied with `rep movsb`, which is correct for
+/// any length, including zero.
+pub(crate) fn emit_cat(code: &mut Code) {
+    code.label("rt_concat_str");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    // Four slots, and `rsp` stays 16-byte aligned for the `rt_alloc` call.
+    code.sub_rsp(32);
+    code.store(-8, RAX);
+    code.store(-16, RCX);
+    // The byte length of each side, then the new header plus both ranges.
+    code.load_ptr(RDX, RAX);
+    code.load_ptr(R8, RCX);
+    code.store(-24, RDX);
+    code.mov_rr(RDI, RDX);
+    code.add_rr(RDI, R8);
+    code.add_imm8(RDI, 8);
+    code.call("rt_alloc");
+    code.store(-32, RAX);
+    // `length = la + lb`.
+    code.load(RDX, -24);
+    code.load(RCX, -16);
+    code.load_ptr(R8, RCX);
+    code.add_rr(RDX, R8);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    // First string: bytes at `a + 8` into `dst + 8`.
+    code.load(RSI, -8);
+    code.lea_disp8(RSI, RSI, 8);
+    code.load(RDI, -32);
+    code.lea_disp8(RDI, RDI, 8);
+    code.load(RCX, -24);
+    code.rep_movsb();
+    // `rep movsb` left `rdi` just past the first range, where the second goes.
+    code.load(RSI, -16);
+    code.lea_disp8(RSI, RSI, 8);
+    code.load(RCX, -16);
+    code.load_ptr(RCX, RCX);
+    code.rep_movsb();
+    code.load(RAX, -32);
+    code.leave();
+    code.ret();
+}
 
 pub(crate) fn emit_cmp(code: &mut Code) {
     code.label("rt_cmp_str");

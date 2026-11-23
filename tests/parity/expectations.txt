@@ -14,11 +14,20 @@
 # A refusal is recorded only when the native backend honestly says it cannot
 # compile the program yet; a silently dropped statement or a wrong answer is a
 # failure, not a refusal.
+#
+# Index-based mutation (`xs[i] = v`) does not flip any fixture here: no
+# fixture in tests/fixtures/ writes through an index (destructure_forms.akk
+# assigns a whole list to a pattern, not to an element), and the collection
+# fixtures stay refused for other constructs. The native-only fixture
+# tests/native/fixtures/mutation.akk covers the write forms and is compared
+# with the interpreter by tests/native/main.rs under both optimiser modes.
 hello	match
 eng_control	match
 eng_declare	match
 native_while	match
+native_concat	match
 native_range_for	match
+native_strings	match
 raise_uncaught	match
 
 app_errors	refuse	E176	a library import
@@ -27,12 +36,12 @@ app_lists	refuse	E176	a library import
 app_not_imported	refuse	E177	a library call
 app_run_closed	refuse	E176	a library import
 collections	refuse	E177	စာ
-control_flow	refuse	E177	iteration
-defaults	refuse	E177	arithmetic on a string
+control_flow	match
+defaults	refuse	E177	the run-time name "seen"
 destructure_forms	refuse	E176	destructuring into
 div_zero	refuse	E177	E036
 eng_break_error	refuse	E176	a break outside a loop
-eng_builtin	refuse	E177	len() of a string
+eng_builtin	refuse	E177	a function call to "sqrt"
 eng_catch	refuse	E177	a catch clause for `E104`
 eng_fn	refuse	E176	a string with {…} interpolation
 eng_input	refuse	E177	a function call to "input"
@@ -67,5 +76,5 @@ raise_catch	refuse	E177	a raise whose message is
 remaining_forms	refuse	E177	reverse
 request_not_imported	refuse	E176	an HTTP get through "request"
 runtime_uncaught	refuse	E177	a function call to "nosuchfunction"
-shorthand	refuse	E177	iteration
+shorthand	refuse	E177	a function call
 switch_forms	refuse	E176	switch

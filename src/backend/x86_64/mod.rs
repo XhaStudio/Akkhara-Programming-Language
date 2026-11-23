@@ -156,10 +156,12 @@ fn number_error(name: &str, kind: Kind) -> String {
 pub(crate) struct Typed {
     pub(crate) temps: HashMap<Temp, Kind>,
     pub(crate) vars: HashMap<VarId, Kind>,
-    /// The element kind of a list/tuple/set, or the value kind of a dict.
-    /// Absence means the collection is empty or its elements are not settled.
-    pub(crate) elems: HashMap<Temp, Kind>,
-    pub(crate) var_elems: HashMap<VarId, Kind>,
+    /// The element shape of a list/tuple/set (the value shape of a dict),
+    /// starting with the element itself: `[Int]` is a list of ints,
+    /// `[List, Int]` a list of int lists, `[Dict, Str]` a dict of string
+    /// values. Absence means the collection is empty or not settled yet.
+    pub(crate) elems: HashMap<Temp, Vec<Kind>>,
+    pub(crate) var_elems: HashMap<VarId, Vec<Kind>>,
     /// What callers have told each parameter, while the fixpoint runs.
     learned: Vec<Option<Kind>>,
     /// One settled kind per declared parameter, in order.
@@ -278,8 +280,6 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
                     MirInst::LibCall { .. }
                         | MirInst::Field { .. }
                         | MirInst::IsType { .. }
-                        | MirInst::Items { .. }
-                        | MirInst::StoreIndex { .. }
                         | MirInst::StoreField { .. }
                 ) {
                     return Err(unsupported(name_instruction(instruction)));
@@ -615,6 +615,17 @@ fn default_numbers(program: &MirProgram, typed: &mut TypedProgram) -> bool {
                         if !matches!(op, '/' | '%')
                             && !typed.functions[index].temps.contains_key(dest) =>
                     {
+                        // A string (or any other non-number) operand settles
+                        // the operator itself: `s + t` is concatenation, not
+                        // the int default. Skipping here lets the next round
+                        // learn the other side instead of contradicting it.
+                        let known = [
+                            kind_of(lhs, &typed.functions[index]),
+                            kind_of(rhs, &typed.functions[index]),
+                        ];
+                        if known.into_iter().flatten().any(|kind| !kind.is_number()) {
+                            continue;
+                        }
                         let typed_fn = &mut typed.functions[index];
                         let float = [kind_of(lhs, typed_fn), kind_of(rhs, typed_fn)]
                             .into_iter()
@@ -722,6 +733,23 @@ fn learn_instruction(
             }
             let left = kind_of(lhs, typed);
             let right = kind_of(rhs, typed);
+            // `+` of two strings is the interpreter's one string arithmetic:
+            // it concatenates. A string next to anything else is the `E040`
+            // the interpreter reports, refused here by name.
+            if *op == '+' && (left == Some(Kind::Str) || right == Some(Kind::Str)) {
+                for kind in [left, right].into_iter().flatten() {
+                    if kind != Kind::Str {
+                        return Err(unsupported(&format!(
+                            "arithmetic on a {} value",
+                            kind.name()
+                        )));
+                    }
+                }
+                changed |= learn_operand(lhs, Kind::Str, typed)?;
+                changed |= learn_operand(rhs, Kind::Str, typed)?;
+                changed |= learn_temp(&mut typed.temps, *dest, Kind::Str)?;
+                return Ok(changed);
+            }
             if let Some(kind) = left.or(right) {
                 if !kind.is_number() {
                     return Err(unsupported(&format!(
@@ -755,22 +783,22 @@ fn learn_instruction(
                 changed |= learn_temp(&mut typed.temps, *dest, Kind::Int)?;
             }
         }
-        MirInst::Compare { dest, op, lhs, rhs } => {
+        MirInst::Compare {
+            dest, op, lhs, rhs, ..
+        } => {
             if !matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") {
                 return Err(unsupported(&format!("the comparison \"{}\"", op)));
             }
             let ordered = !matches!(op.as_str(), "==" | "!=");
             let left = kind_of(lhs, typed);
             let right = kind_of(rhs, typed);
-            if let Some(kind) = left
-                .into_iter()
-                .chain(right)
-                .find(|kind| kind.is_collection())
-            {
-                // Structural equality and ordering of collections need the
-                // runtime's value comparison; this slice settles kinds
-                // statically and refuses rather than guessing.
-                return Err(unsupported(&format!("comparing a {}", kind.name())));
+            if left.into_iter().chain(right).any(Kind::is_collection) {
+                // `==`/`!=` compare the printed forms, which the runtime does
+                // structurally over the descriptors. Ordering a collection is
+                // the interpreter's `E042`; both operands are evaluated first
+                // and the runtime prints that line, so it compiles here.
+                changed |= learn_temp(&mut typed.temps, *dest, Kind::Bool)?;
+                return Ok(changed);
             }
             let string = left == Some(Kind::Str) || right == Some(Kind::Str);
             if string {
@@ -855,22 +883,21 @@ fn learn_instruction(
             if let Some(kind) = typed.vars.get(var).copied() {
                 changed |= learn_operand(value, kind, typed)?;
             }
-            // A collection's element kind travels with the binding, so
+            // A collection's element shape travels with the binding, so
             // `ys = xs` followed by `ys[0]` is typed like `xs[0]`.
-            if let Some(elem) = elems_of(value, typed) {
-                match typed.var_elems.get(var).copied() {
-                    Some(existing) if existing != elem => {
+            if let Some(shape) = elems_of(value, typed) {
+                match typed.var_elems.get(var) {
+                    Some(existing) if *existing != shape => {
                         return Err(unsupported(&format!(
-                            "the binding {} holding a {} of {} and of {}",
+                            "the binding {} holding {} and {} elements",
                             var,
-                            typed.vars.get(var).copied().unwrap_or(Kind::List).name(),
-                            existing.name(),
-                            elem.name()
+                            shape_name(existing),
+                            shape_name(&shape)
                         )))
                     }
                     Some(_) => {}
                     None => {
-                        typed.var_elems.insert(*var, elem);
+                        typed.var_elems.insert(*var, shape);
                         changed = true;
                     }
                 }
@@ -949,12 +976,12 @@ fn learn_instruction(
         MirInst::Eval(_) => {}
         MirInst::Print(_) => {}
         MirInst::List { dest, items } => {
-            let elem = items_kind("list", items, typed)?;
-            changed |= learn_collection(*dest, Kind::List, elem, typed)?;
+            let shape = items_shape("list", items, typed)?;
+            changed |= learn_collection(*dest, Kind::List, shape, typed)?;
         }
         MirInst::Tuple { dest, items } => {
-            let elem = items_kind("tuple", items, typed)?;
-            changed |= learn_collection(*dest, Kind::Tuple, elem, typed)?;
+            let shape = items_shape("tuple", items, typed)?;
+            changed |= learn_collection(*dest, Kind::Tuple, shape, typed)?;
         }
         MirInst::Set { dest, items } => {
             // A set drops duplicates, so its members have to be known here:
@@ -966,11 +993,11 @@ fn learn_instruction(
                     "a set built from run-time values (only literal members are in the slice)",
                 ));
             }
-            let elem = items_kind("set", items, typed)?;
-            changed |= learn_collection(*dest, Kind::Set, elem, typed)?;
+            let shape = items_shape("set", items, typed)?;
+            changed |= learn_collection(*dest, Kind::Set, shape, typed)?;
         }
         MirInst::Dict { dest, pairs } => {
-            let mut value_kind: Option<Kind> = None;
+            let mut value_shape: Option<Vec<Kind>> = None;
             for (key, value) in pairs {
                 // Only literal keys can be deduplicated at compile time; a
                 // run-time key needs the runtime's hash/equality, which is
@@ -992,20 +1019,23 @@ fn learn_instruction(
                         changed |= learn_operand(key, Kind::Str, typed)?;
                     }
                 }
-                if let Some(kind) = kind_of(value, typed) {
-                    match value_kind {
-                        Some(existing) if existing != kind => {
-                            return Err(unsupported(&format!(
-                                "a dict whose values are a {} and a {}",
-                                existing.name(),
-                                kind.name()
-                            )))
-                        }
-                        _ => value_kind = Some(kind),
+                if let Some(shape) = shape_of(value, typed) {
+                    match &value_shape {
+                        Some(existing) => match merge_shapes(existing, &shape) {
+                            Some(merged) => value_shape = Some(merged),
+                            None => {
+                                return Err(unsupported(&format!(
+                                    "a dict whose values are a {} and a {}",
+                                    shape_name(existing),
+                                    shape_name(&shape)
+                                )))
+                            }
+                        },
+                        None => value_shape = Some(shape),
                     }
                 }
             }
-            changed |= learn_collection(*dest, Kind::Dict, value_kind, typed)?;
+            changed |= learn_collection(*dest, Kind::Dict, value_shape, typed)?;
         }
         MirInst::Index {
             dest,
@@ -1022,15 +1052,11 @@ fn learn_instruction(
             match kind_of(base, typed) {
                 Some(Kind::List | Kind::Tuple | Kind::Set) => {
                     changed |= learn_operand(index, Kind::Int, typed)?;
-                    if let Some(elem) = elems_of(base, typed) {
-                        changed |= learn_temp(&mut typed.temps, *dest, elem)?;
-                    }
+                    changed |= learn_indexed(*dest, base, typed)?;
                 }
                 Some(Kind::Dict) => {
                     changed |= learn_operand(index, Kind::Str, typed)?;
-                    if let Some(elem) = elems_of(base, typed) {
-                        changed |= learn_temp(&mut typed.temps, *dest, elem)?;
-                    }
+                    changed |= learn_indexed(*dest, base, typed)?;
                 }
                 Some(Kind::Str) => return Err(unsupported("an index into a string")),
                 Some(other) => {
@@ -1047,14 +1073,70 @@ fn learn_instruction(
             Some(other) => return Err(unsupported(&format!("len() of a {}", other.name()))),
             None => {}
         },
+        MirInst::StoreIndex {
+            base,
+            indices,
+            value,
+            ..
+        } => {
+            if indices.len() != 1 {
+                return Err(unsupported(
+                    "a store into an element with more than one index (a `[row, column]` write)",
+                ));
+            }
+            // The runtime copies the descriptor with the one element changed
+            // and the copy replaces the binding -- the interpreter's value
+            // semantics. A temporary has no binding to replace, so only a
+            // variable base is in the slice.
+            if !matches!(base, Operand::Var(_)) {
+                return Err(unsupported(
+                    "a store into an element of a temporary (the collection has to be held in a variable)",
+                ));
+            }
+            let index = &indices[0];
+            match kind_of(base, typed) {
+                Some(Kind::List | Kind::Tuple | Kind::Set) => {
+                    changed |= learn_operand(index, Kind::Int, typed)?;
+                    changed |= learn_stored(base, value, typed)?;
+                }
+                Some(Kind::Dict) => {
+                    changed |= learn_operand(index, Kind::Str, typed)?;
+                    changed |= learn_stored(base, value, typed)?;
+                }
+                Some(Kind::Str) => return Err(unsupported("a write into a string")),
+                Some(other) => {
+                    return Err(unsupported(&format!("a store into a {}", other.name())))
+                }
+                None => {}
+            }
+        }
+        MirInst::Items { dest, value } => match kind_of(value, typed) {
+            // A list, tuple or set is already the sequence the loop's
+            // `Len`/`Index` read, so the loop walks the collection itself and
+            // its element kind travels with it.
+            Some(kind @ (Kind::List | Kind::Tuple | Kind::Set)) => {
+                changed |= learn_collection(*dest, kind, elems_of(value, typed), typed)?;
+            }
+            // A dict yields its keys, in the order they were first inserted;
+            // the native runtime copies them into a fresh list of strings.
+            Some(Kind::Dict) => {
+                changed |= learn_collection(*dest, Kind::List, Some(vec![Kind::Str]), typed)?;
+            }
+            Some(Kind::Str) => return Err(unsupported("iteration over a string")),
+            // The interpreter's auto-range: a numeric source walks the ints
+            // `0, 1, ...` below it, so the loop variable is always an int.
+            Some(Kind::Int | Kind::Float) => {
+                changed |= learn_collection(*dest, Kind::List, Some(vec![Kind::Int]), typed)?;
+            }
+            Some(other) => return Err(unsupported(&format!("iteration over a {}", other.name()))),
+            None => {}
+        },
         other => {
             if matches!(
                 other,
                 MirInst::LibCall { .. }
                     | MirInst::Field { .. }
                     | MirInst::IsType { .. }
-                    | MirInst::Items { .. }
-                    | MirInst::StoreIndex { .. }
                     | MirInst::StoreField { .. }
             ) {
                 return Err(unsupported(name_instruction(other)));
@@ -1216,51 +1298,222 @@ impl Kind {
             Kind::Bool => crate::shared::errors::KIND_BOOL_MM,
             Kind::Str => crate::shared::errors::KIND_STR_MM,
             Kind::List => "စာရင်း",
-            Kind::Tuple => "အစုအဖွဲ့",
-            Kind::Set => "အစု",
+            Kind::Tuple => "အစု",
+            Kind::Set => "အုပ်စု",
             Kind::Dict => "အဘိဓာန်",
         }
     }
 }
 
-/// The common element kind of a sequence literal, or `None` while an element's
-/// kind is still unknown. Two different known kinds are refused: the code
-/// generator writes one tag per collection and cannot emit a mixed one
-/// without the dynamic `Value` representation.
-fn items_kind(what: &str, items: &[Operand], typed: &Typed) -> Result<Option<Kind>, String> {
-    let mut kind: Option<Kind> = None;
-    for item in items {
-        let Some(item_kind) = kind_of(item, typed) else {
-            continue;
-        };
-        match kind {
-            Some(existing) if existing != item_kind => {
-                return Err(unsupported(&format!(
-                    "a {what} with a {} element and a {} element",
-                    existing.name(),
-                    item_kind.name()
-                )))
-            }
-            _ => kind = Some(item_kind),
+/// The shape of an operand: its kind followed by the element shape when it is
+/// a collection. A list of int lists is `[List, Int]`.
+fn shape_of(operand: &Operand, typed: &Typed) -> Option<Vec<Kind>> {
+    let kind = kind_of(operand, typed)?;
+    let mut shape = vec![kind];
+    if kind.is_collection() {
+        if let Some(rest) = elems_of(operand, typed) {
+            shape.extend(rest);
         }
     }
-    Ok(kind)
+    Some(shape)
 }
 
-/// The element kind recorded for a collection operand, if it is known.
-fn elems_of(operand: &Operand, typed: &Typed) -> Option<Kind> {
+/// Merge two shapes, allowing one to be a prefix of the other: an empty
+/// literal's elements are not known yet, so `[List]` and `[List, Int]` agree.
+/// A genuine disagreement (`[List, Int]` and `[List, Str]`) returns `None`.
+fn merge_shapes(a: &[Kind], b: &[Kind]) -> Option<Vec<Kind>> {
+    let common = a
+        .iter()
+        .zip(b)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common < a.len().min(b.len()) {
+        None
+    } else if a.len() >= b.len() {
+        Some(a.to_vec())
+    } else {
+        Some(b.to_vec())
+    }
+}
+
+/// A shape as words: `[List, Int]` is `"list of int"`.
+fn shape_name(shape: &[Kind]) -> String {
+    shape
+        .iter()
+        .map(|kind| kind.name())
+        .collect::<Vec<_>>()
+        .join(" of ")
+}
+
+/// The common element shape of a sequence literal, or `None` while every
+/// element's shape is still unknown. Two different known shapes are refused:
+/// the code generator writes one tag per collection and cannot emit a mixed
+/// one without the dynamic `Value` representation.
+fn items_shape(what: &str, items: &[Operand], typed: &Typed) -> Result<Option<Vec<Kind>>, String> {
+    let mut shape: Option<Vec<Kind>> = None;
+    for item in items {
+        let Some(item_shape) = shape_of(item, typed) else {
+            continue;
+        };
+        match &shape {
+            Some(existing) => match merge_shapes(existing, &item_shape) {
+                Some(merged) => shape = Some(merged),
+                None => {
+                    return Err(unsupported(&format!(
+                        "a {what} with a {} element and a {} element",
+                        shape_name(existing),
+                        shape_name(&item_shape)
+                    )))
+                }
+            },
+            None => shape = Some(item_shape),
+        }
+    }
+    Ok(shape)
+}
+
+/// Record that a collection operand holds elements of `shape`, without
+/// contradicting a shape some other instruction already settled.
+fn learn_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) {
     match operand {
-        Operand::Temp(temp) => typed.elems.get(temp).copied(),
-        Operand::Var(var) => typed.var_elems.get(var).copied(),
+        Operand::Temp(temp) => {
+            typed.elems.entry(*temp).or_insert(shape);
+        }
+        Operand::Var(var) => {
+            typed.var_elems.entry(*var).or_insert(shape);
+        }
+        _ => {}
+    }
+}
+
+/// The element shape recorded for a collection operand, if it is known.
+fn elems_of(operand: &Operand, typed: &Typed) -> Option<Vec<Kind>> {
+    match operand {
+        Operand::Temp(temp) => typed.elems.get(temp).cloned(),
+        Operand::Var(var) => typed.var_elems.get(var).cloned(),
         _ => None,
     }
 }
 
-/// Record that `dest` is a collection of `kind` whose elements are `elem`.
+/// Learn the shape of an operand that is read from: `Option` says whether
+/// anything new was settled, and a contradiction is refused by name.
+fn learn_shape(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> Result<bool, String> {
+    match operand {
+        Operand::Temp(temp) => match typed.elems.get(temp) {
+            Some(existing) if *existing != shape => Err(unsupported(&format!(
+                "the collection in t{} holding {} and {} elements",
+                temp,
+                shape_name(existing),
+                shape_name(&shape)
+            ))),
+            Some(_) => Ok(false),
+            None => {
+                typed.elems.insert(*temp, shape);
+                Ok(true)
+            }
+        },
+        Operand::Var(var) => match typed.var_elems.get(var) {
+            Some(existing) if *existing != shape => Err(unsupported(&format!(
+                "the collection in {} holding {} and {} elements",
+                var,
+                shape_name(existing),
+                shape_name(&shape)
+            ))),
+            Some(_) => Ok(false),
+            None => {
+                typed.var_elems.insert(*var, shape);
+                Ok(true)
+            }
+        },
+        _ => Ok(false),
+    }
+}
+
+/// One indexing step: the destination gets the first kind of the base's
+/// element shape, and the rest of the shape travels with it, so
+/// `grid[0][1]` reads an int out of a list of lists.
+fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, String> {
+    let Some(shape) = elems_of(base, typed) else {
+        return Ok(false);
+    };
+    let Some((first, rest)) = shape.split_first() else {
+        return Ok(false);
+    };
+    let mut changed = learn_temp(&mut typed.temps, dest, *first)?;
+    if !rest.is_empty() {
+        changed |= learn_shape(&Operand::Temp(dest), rest.to_vec(), typed)?;
+    }
+    Ok(changed)
+}
+
+/// Type a value written into an element. When the target's element shape is
+/// known the value must match the whole shape (a list of ints cannot take a
+/// list of strings at the second level); an empty collection adopts the shape
+/// of the value being written, so later reads are typed from it.
+fn learn_stored(base: &Operand, value: &Operand, typed: &mut Typed) -> Result<bool, String> {
+    let Some(mut target) = elems_of(base, typed) else {
+        if let Some(shape) = shape_of(value, typed) {
+            learn_element(base, shape, typed);
+            return Ok(true);
+        }
+        return Ok(false);
+    };
+    if target.len() > 1 {
+        if let Some(value_shape) = shape_of(value, typed) {
+            match merge_shapes(&target, &value_shape) {
+                // A value whose inner shape is known refines a target that
+                // only knows the first level (`[]` then `[1]`).
+                Some(merged) => target = merged,
+                None => {
+                    return Err(unsupported(&format!(
+                        "a store of a {} into a collection of {}",
+                        shape_name(&value_shape),
+                        shape_name(&target)
+                    )))
+                }
+            }
+        }
+    }
+    let mut changed = learn_operand(value, target[0], typed)?;
+    changed |= refine_element(base, target, typed);
+    Ok(changed)
+}
+
+/// Tighten a recorded element shape to a longer, compatible one (`[List]`
+/// becomes `[List, Int]` once a non-empty inner list is seen).
+fn refine_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> bool {
+    match operand {
+        Operand::Temp(temp) => match typed.elems.get(temp) {
+            Some(existing) if existing != &shape && shape.starts_with(existing) => {
+                typed.elems.insert(*temp, shape);
+                true
+            }
+            Some(_) => false,
+            None => {
+                typed.elems.insert(*temp, shape);
+                true
+            }
+        },
+        Operand::Var(var) => match typed.var_elems.get(var) {
+            Some(existing) if existing != &shape && shape.starts_with(existing) => {
+                typed.var_elems.insert(*var, shape);
+                true
+            }
+            Some(_) => false,
+            None => {
+                typed.var_elems.insert(*var, shape);
+                true
+            }
+        },
+        _ => false,
+    }
+}
+
+/// Record that `dest` is a collection of `kind` whose elements are `shape`.
 fn learn_collection(
     dest: Temp,
     kind: Kind,
-    elem: Option<Kind>,
+    shape: Option<Vec<Kind>>,
     typed: &mut Typed,
 ) -> Result<bool, String> {
     if let Some(existing) = typed.temps.get(&dest) {
@@ -1274,20 +1527,20 @@ fn learn_collection(
         }
     }
     let mut changed = learn_temp(&mut typed.temps, dest, kind)?;
-    if let Some(elem) = elem {
-        match typed.elems.get(&dest).copied() {
-            Some(existing) if existing != elem => {
+    if let Some(shape) = shape {
+        match typed.elems.get(&dest) {
+            Some(existing) if *existing != shape => {
                 return Err(unsupported(&format!(
                     "the {} in t{} holding {} and {} elements",
                     kind.name(),
                     dest,
-                    existing.name(),
-                    elem.name()
+                    shape_name(existing),
+                    shape_name(&shape)
                 )))
             }
             Some(_) => {}
             None => {
-                typed.elems.insert(dest, elem);
+                typed.elems.insert(dest, shape);
                 changed = true;
             }
         }
@@ -1392,6 +1645,15 @@ fn read_operands(instruction: &MirInst) -> Vec<&Operand> {
             std::iter::once(base).chain(indices.iter()).collect()
         }
         MirInst::Len { value, .. } | MirInst::Items { value, .. } => vec![value],
+        MirInst::StoreIndex {
+            base,
+            indices,
+            value,
+            ..
+        } => std::iter::once(base)
+            .chain(indices.iter())
+            .chain(std::iter::once(value))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1498,6 +1760,7 @@ mod tests {
                 op: "==".to_string(),
                 lhs: Operand::Const(Const::Str("a".to_string())),
                 rhs: Operand::Const(Const::Str("b".to_string())),
+                line: 1,
             });
             builder.terminate(Terminator::Exit);
         });
@@ -1734,8 +1997,309 @@ mod tests {
         let typed = analyze(&program_of(vec![function])).expect("collections are in the slice");
         let main = &typed.functions[0];
         assert_eq!(main.temps.get(&list_id.expect("a list")), Some(&Kind::List));
-        assert_eq!(main.elems.get(&list_id.expect("a list")), Some(&Kind::Int));
+        assert_eq!(
+            main.elems.get(&list_id.expect("a list")),
+            Some(&vec![Kind::Int])
+        );
         assert_eq!(main.temps.get(&item_id.expect("an item")), Some(&Kind::Int));
+    }
+
+    #[test]
+    fn a_nested_index_is_typed_from_the_inner_elements() {
+        let mut row_id = None;
+        let mut cell_id = None;
+        let function = function(|builder| {
+            let inner = builder.temp();
+            builder.emit(MirInst::List {
+                dest: inner,
+                items: vec![Operand::Const(Const::Int(1)), Operand::Const(Const::Int(2))],
+            });
+            let grid = builder.temp();
+            builder.emit(MirInst::List {
+                dest: grid,
+                items: vec![Operand::Temp(inner)],
+            });
+            // `grid[0]` is a list of ints; `grid[0][1]` is an int.
+            let row = builder.temp();
+            row_id = Some(row);
+            builder.emit(MirInst::Index {
+                dest: row,
+                base: Operand::Temp(grid),
+                indices: vec![Operand::Const(Const::Int(0))],
+                line: 3,
+            });
+            let cell = builder.temp();
+            cell_id = Some(cell);
+            builder.emit(MirInst::Index {
+                dest: cell,
+                base: Operand::Temp(row),
+                indices: vec![Operand::Const(Const::Int(1))],
+                line: 3,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(cell)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("nested indexing is in the slice");
+        let main = &typed.functions[0];
+        let row = row_id.expect("a row");
+        assert_eq!(main.temps.get(&row).copied(), Some(Kind::List));
+        assert_eq!(main.elems.get(&row), Some(&vec![Kind::Int]));
+        assert_eq!(
+            main.temps.get(&cell_id.expect("a cell")).copied(),
+            Some(Kind::Int)
+        );
+    }
+
+    #[test]
+    fn a_dict_loop_walks_its_keys_as_strings() {
+        let mut items_id = None;
+        let function = function(|builder| {
+            let dict = builder.temp();
+            builder.emit(MirInst::Dict {
+                dest: dict,
+                pairs: vec![(
+                    Operand::Const(Const::Str("a".to_string())),
+                    Operand::Const(Const::Int(1)),
+                )],
+            });
+            let items = builder.temp();
+            items_id = Some(items);
+            builder.emit(MirInst::Items {
+                dest: items,
+                value: Operand::Temp(dict),
+            });
+            let key = builder.temp();
+            builder.emit(MirInst::Index {
+                dest: key,
+                base: Operand::Temp(items),
+                indices: vec![Operand::Const(Const::Int(0))],
+                line: 1,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(key)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("iteration is in the slice");
+        let main = &typed.functions[0];
+        let items = items_id.expect("the items temporary");
+        assert_eq!(main.temps.get(&items).copied(), Some(Kind::List));
+        assert_eq!(main.elems.get(&items).cloned(), Some(vec![Kind::Str]));
+    }
+
+    /// `+` of two strings is the interpreter's one string arithmetic and
+    /// gives a string; a string beside a number stays refused.
+    #[test]
+    fn string_concatenation_types_as_a_string() {
+        let mut dest_id = None;
+        let function = function(|builder| {
+            let dest = builder.temp();
+            dest_id = Some(dest);
+            builder.emit(MirInst::Binary {
+                dest,
+                op: '+',
+                lhs: Operand::Const(Const::Str("မြ".to_string())),
+                rhs: Operand::Const(Const::Str("န်မာ".to_string())),
+            });
+            builder.emit(MirInst::Print(Operand::Temp(dest)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("string `+` is in the slice");
+        assert_eq!(
+            typed.functions[0]
+                .temps
+                .get(&dest_id.expect("the join"))
+                .copied(),
+            Some(Kind::Str)
+        );
+    }
+
+    /// Mixing a string with a number has no arithmetic in the language; the
+    /// slice refuses it instead of joining their printed forms.
+    #[test]
+    fn joining_a_string_with_a_number_is_refused() {
+        let function = function(|builder| {
+            let dest = builder.temp();
+            builder.emit(MirInst::Binary {
+                dest,
+                op: '+',
+                lhs: Operand::Const(Const::Str("a".to_string())),
+                rhs: Operand::Const(Const::Int(1)),
+            });
+            builder.emit(MirInst::Print(Operand::Temp(dest)));
+            builder.terminate(Terminator::Exit);
+        });
+        let error = analyze(&program_of(vec![function])).expect_err("a string and a number");
+        assert!(error.contains("E177"), "{error}");
+        assert!(error.contains("arithmetic on a"), "{error}");
+    }
+
+    /// The interpreter's auto-range binds an `int` counter whatever the
+    /// source's kind is, so both an int and a float bound walk `[Int]`.
+    #[test]
+    fn a_number_loop_walks_ints_from_zero() {
+        for (kind, value) in [
+            (Kind::Int, Operand::Const(Const::Int(5))),
+            (Kind::Float, Operand::Const(Const::Float(2.5))),
+        ] {
+            let mut items_id = None;
+            let function = function(|builder| {
+                let items = builder.temp();
+                items_id = Some(items);
+                builder.emit(MirInst::Items { dest: items, value });
+                let item = builder.temp();
+                builder.emit(MirInst::Index {
+                    dest: item,
+                    base: Operand::Temp(items),
+                    indices: vec![Operand::Const(Const::Int(0))],
+                    line: 1,
+                });
+                builder.emit(MirInst::Print(Operand::Temp(item)));
+                builder.terminate(Terminator::Exit);
+            });
+            let typed = analyze(&program_of(vec![function]))
+                .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+            let main = &typed.functions[0];
+            let items = items_id.expect("the items temporary");
+            assert_eq!(
+                main.temps.get(&items).copied(),
+                Some(Kind::List),
+                "{kind:?}"
+            );
+            assert_eq!(
+                main.elems.get(&items).cloned(),
+                Some(vec![Kind::Int]),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_store_into_a_list_is_typed_from_its_elements() {
+        let function = function(|builder| {
+            let var = VarId(0);
+            let list = builder.temp();
+            builder.emit(MirInst::List {
+                dest: list,
+                items: vec![Operand::Const(Const::Int(1))],
+            });
+            builder.emit(MirInst::StoreVar {
+                var,
+                op: None,
+                value: Operand::Temp(list),
+            });
+            builder.emit(MirInst::StoreIndex {
+                base: Operand::Var(var),
+                indices: vec![Operand::Const(Const::Int(0))],
+                value: Operand::Const(Const::Int(9)),
+                line: 3,
+            });
+            let read = builder.temp();
+            builder.emit(MirInst::Index {
+                dest: read,
+                base: Operand::Var(var),
+                indices: vec![Operand::Const(Const::Int(0))],
+                line: 4,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(read)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("a store is in the slice");
+        let main = &typed.functions[0];
+        assert_eq!(main.vars.get(&VarId(0)), Some(&Kind::List));
+        assert_eq!(main.var_elems.get(&VarId(0)), Some(&vec![Kind::Int]));
+    }
+
+    #[test]
+    fn a_store_into_a_string_is_refused_by_name() {
+        let function = function(|builder| {
+            let var = VarId(0);
+            builder.emit(MirInst::StoreVar {
+                var,
+                op: None,
+                value: Operand::Const(Const::Str("text".to_string())),
+            });
+            builder.emit(MirInst::StoreIndex {
+                base: Operand::Var(var),
+                indices: vec![Operand::Const(Const::Int(0))],
+                value: Operand::Const(Const::Str("x".to_string())),
+                line: 2,
+            });
+            builder.terminate(Terminator::Exit);
+        });
+        let error = analyze(&program_of(vec![function])).expect_err("text is fixed");
+        assert!(error.contains("E177"), "{}", error);
+        assert!(error.contains("write into a string"), "{}", error);
+    }
+
+    #[test]
+    fn comparing_two_lists_is_typed_as_a_bool() {
+        let mut flag_id = None;
+        let function = function(|builder| {
+            let left = builder.temp();
+            let right = builder.temp();
+            builder.emit(MirInst::List {
+                dest: left,
+                items: vec![Operand::Const(Const::Int(1))],
+            });
+            builder.emit(MirInst::List {
+                dest: right,
+                items: vec![Operand::Const(Const::Int(1))],
+            });
+            let flag = builder.temp();
+            flag_id = Some(flag);
+            builder.emit(MirInst::Compare {
+                dest: flag,
+                op: "==".to_string(),
+                lhs: Operand::Temp(left),
+                rhs: Operand::Temp(right),
+                line: 3,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(flag)));
+            builder.terminate(Terminator::Exit);
+        });
+        let typed = analyze(&program_of(vec![function])).expect("equality is in the slice");
+        let flag = flag_id.expect("the comparison's temporary");
+        assert_eq!(
+            typed.functions[0].temps.get(&flag).copied(),
+            Some(Kind::Bool)
+        );
+    }
+
+    #[test]
+    fn ordering_two_lists_compiles_to_the_interpreters_error() {
+        let function = function(|builder| {
+            let left = builder.temp();
+            let right = builder.temp();
+            builder.emit(MirInst::List {
+                dest: left,
+                items: vec![Operand::Const(Const::Int(1))],
+            });
+            builder.emit(MirInst::List {
+                dest: right,
+                items: vec![Operand::Const(Const::Int(2))],
+            });
+            let flag = builder.temp();
+            builder.emit(MirInst::Compare {
+                dest: flag,
+                op: "<".to_string(),
+                lhs: Operand::Temp(left),
+                rhs: Operand::Temp(right),
+                line: 3,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(flag)));
+            builder.terminate(Terminator::Exit);
+        });
+        // Ordering collections is E042 at run time, not a construct outside
+        // the slice, so the analyzer types the comparison and codegen emits
+        // the interpreter's panic with this line.
+        let typed = analyze(&program_of(vec![function])).expect("E042 is the interpreter's rule");
+        assert_eq!(
+            typed.functions[0]
+                .temps
+                .values()
+                .filter(|kind| **kind == Kind::Bool)
+                .count(),
+            1
+        );
     }
 
     #[test]

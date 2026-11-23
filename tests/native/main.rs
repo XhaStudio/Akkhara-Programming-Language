@@ -72,6 +72,98 @@ const CASES: &[Case] = &[
             "[\"a\", \"b\"]",
         ],
     },
+    // Collection equality: the same elements compare equal, a different
+    // length/order/kind or one different element does not, and a collection
+    // never equals a value of another type.
+    Case {
+        name: "equality",
+        stdout: &[
+            "True",
+            "False",
+            "True",
+            "False",
+            "True",
+            "False",
+            "True",
+            "False",
+            "True",
+            "False",
+            "False",
+            "True",
+            "True",
+            "False",
+            "True",
+            "False",
+            "True",
+            "False",
+            "False",
+            "True",
+            "False",
+            "same",
+            "different",
+        ],
+    },
+    // Writing through an index: list/tuple replacement and append, set
+    // replacement and its duplicate rule, dict update and new key, and the
+    // value semantics of a second binding.
+    Case {
+        name: "mutation",
+        stdout: &[
+            "[10, 99, 30]",
+            "[10, 99, 30, 40]",
+            "4",
+            "40",
+            "(7, 2, 3)",
+            "(7, 2, 3, 4)",
+            "{1, 9, 3}",
+            "{9, 3}",
+            "{9, 3}",
+            "{\"a\": 1, \"b\": 20, \"c\": 3}",
+            "3",
+            "[10, 99, 30, 40]",
+            "[1, 99, 30, 40]",
+        ],
+    },
+    // Strings whose text is known at compile time: `len` of a literal, an
+    // ASCII and a Myanmar syllable count, `for` over the grapheme clusters, an
+    // index read (literal and computed), and an empty string, whose loop runs
+    // no iterations at all.
+    Case {
+        name: "strings_ops",
+        stdout: &[
+            "5", "3", "0", "3", "မြ", "န်", "မာ", "မြ", "မာ", "န်", "e", "5",
+        ],
+    },
+    // `+` joins two strings: constant pairs, a run-time pair from bindings, a
+    // nested join, a parameter pair, a binding growing through `+`, and the
+    // empty string (which prints as an empty line).
+    Case {
+        name: "concat",
+        stdout: &[
+            "foobar",
+            "မြန်မာ",
+            "",
+            "abc",
+            "abcd",
+            "cdab",
+            "True",
+            "hello world!",
+            "xyz",
+        ],
+    },
+    // The interpreter's auto-range: a numeric source walks the ints below it,
+    // from a binding, a float bound (rounded up, so 2.5 runs three times), a
+    // zero and a negative bound (no iterations), and a parameter.
+    Case {
+        name: "number_for",
+        stdout: &["0", "10", "20", "0", "1", "2", "100", "101", "done"],
+    },
+    // `for` over a list, a tuple, a set and a dict (whose iteration yields its
+    // keys), then `continue` and `break` inside a collection loop.
+    Case {
+        name: "iteration",
+        stdout: &["10", "20", "30", "1", "2", "3", "a", "b", "a", "b", "10"],
+    },
     // `floor`, `ceil` and `round`: positive, negative, exact half, an int
     // argument, an int beyond 2^53 (the interpreter converts to a double
     // first), and one reached through a function's parameter.
@@ -524,17 +616,45 @@ const REFUSED: &[Refused] = &[
         mentions: "dict",
         source: "k သည် \"a\" ဖြစ်၏။\nd မှာ { k သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd ကို ဖော်ပြပါ။\n",
     },
-    // Iterating a collection and writing into an element are the next part of
-    // Step 3; both are still refused by name.
+    // A string known at compile time is lowered to a list of grapheme
+    // clusters, but one that arrives at run time cannot be: the native
+    // runtime carries no Unicode tables, so iteration, `len` and indexing
+    // over a parameter are refused by name instead of counting bytes.
     Refused {
-        name: "iteration",
-        mentions: "iteration",
-        source: "xs မှာ [1, 2] ဖြစ်၏။\nx သည် xs ထဲမှ တစ်ခုစီ\n    x ကို ဖော်ပြပါ။\nပြီး။\n",
+        name: "string_iteration",
+        mentions: "iteration over a string",
+        source: "fn show(s) {\n    for ch in s {\n        print(ch);\n    }\n}\nshow(\"abc\");\n",
     },
     Refused {
-        name: "store_index",
-        mentions: "store into an element",
-        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] = 9;\nxs ကို ဖော်ပြပါ။\n",
+        name: "string_len",
+        mentions: "len() of a string",
+        source: "fn size(s) {\n    return len(s);\n}\nprint(size(\"abc\"));\n",
+    },
+    Refused {
+        name: "string_index",
+        mentions: "an index into a string",
+        source: "fn second(s) {\n    return s[1];\n}\nprint(second(\"abc\"));\n",
+    },
+    // A write must match the collection's element kind: the interpreter
+    // allows a heterogeneous list, the native layout writes one element kind.
+    // A nested element has a shape too: a list of int lists cannot take a
+    // list of strings, because the inner reads are typed statically.
+    Refused {
+        name: "nested_store_kind",
+        mentions: "a store of a list of string",
+        source: "grid မှာ [[1], [2]] ဖြစ်၏။\ngrid[0] က [\"nine\"]။\n",
+    },
+    // An empty inner list has no element kind, so reading through it again is
+    // not typed; the interpreter would answer at run time instead.
+    Refused {
+        name: "nested_unknown_inner",
+        mentions: "could not be worked out",
+        source: "xs မှာ [[]] ဖြစ်၏။\nxs[0] က [7]။\nprint(xs[0][0]);\n",
+    },
+    Refused {
+        name: "mixed_store",
+        mentions: "where a int is needed",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] က \"a\"။\nxs ကို ဖော်ပြပါ။\n",
     },
     // `min`/`max` take one numeric kind in the slice: the interpreter would
     // compare across int and float, but then the result's kind depends on the
@@ -732,6 +852,21 @@ fn collection_diagnostics_match_the_interpreter() {
             "dict_missing",
             "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd[\"z\"] ကို ဖော်ပြပါ။\n",
         ),
+        (
+            "order_collections",
+            "a မှာ [1] ဖြစ်၏။\nb မှာ [2] ဖြစ်၏။\nprint(a < b);\n",
+        ),
+        ("order_mixed", "print(\"before\");\nprint([1] <= 2);\n"),
+        (
+            "order_kinds",
+            "t မှာ (1, 2) ဖြစ်၏။\ns မှာ {1} ဖြစ်၏။\nprint(t > s);\n",
+        ),
+        ("store_range", "xs မှာ [1, 2] ဖြစ်၏။\nxs[5] က 9။\n"),
+        ("store_negative", "xs မှာ [1, 2] ဖြစ်၏။\nxs[-1] က 9။\n"),
+        ("set_store_range", "s မှာ {1, 2} ဖြစ်၏။\ns[5] က 9။\n"),
+        // A string index past its clusters: the lowered cluster list makes the
+        // runtime check the same bounds and report the same `E049` line.
+        ("string_index_range", "print(\"မြန်မာ\"[4]);\n"),
     ];
     let mut failures = Vec::new();
     for (name, program) in cases {
@@ -777,6 +912,114 @@ fn collection_diagnostics_match_the_interpreter() {
     assert!(
         failures.is_empty(),
         "{} collection diagnostic check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Nested collections: a list of lists, a deeper list, a tuple of tuples and
+/// a dict of lists are indexed twice, printed whole, looped, compared and
+/// replaced through their outer element. Each program runs on the interpreter
+/// and on the built executable in both optimiser modes, and stdout, stderr and
+/// the exit code must all agree.
+#[test]
+fn nested_collections_match_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let cases = [
+        (
+            "nested",
+            "grid မှာ [[1, 2], [3, 4]] ဖြစ်၏။\n\
+             print(grid[0][1]);\n\
+             print(grid);\n\
+             grid[0] က [9, 8]။\n\
+             print(grid[0][0] + grid[1][1]);\n\
+             deep မှာ [[[1, 2], [3]], [[4]]] ဖြစ်၏။\n\
+             print(deep[0][1][0]);\n\
+             print(deep[0][0][1 - 1]);\n\
+             print(deep == [[[1, 2], [3]], [[4]]]);\n\
+             pairs မှာ ((1, 2), (3, 4)) ဖြစ်၏။\n\
+             print(pairs[1][0]);\n\
+             d မှာ { \"a\" က [1, 2]။ \"b\" က [3]။ } ဖြစ်၏။\n\
+             print(d[\"b\"][0]);\n\
+             print(d[\"a\"] == [1, 2]);\n\
+             k သည် d ထဲမှ တစ်ခုစီ\n\
+                 print(d[k]);\n\
+             ပြီး။\n\
+             row သည် grid ထဲမှ တစ်ခုစီ\n\
+                 cell သည် row ထဲမှ တစ်ခုစီ\n\
+                     cell ကို ဖော်ပြပါ။\n\
+                 ပြီး။\n\
+             ပြီး။\n",
+        ),
+        // The second level reports the same `E049` line as the interpreter.
+        (
+            "nested_index_range",
+            "grid မှာ [[1, 2]] ဖြစ်၏။\nprint(grid[0][5]);\n",
+        ),
+        // Ordering a list of lists is the interpreter's `E042` for `list`.
+        (
+            "nested_order",
+            "grid မှာ [[1], [2]] ဖြစ်၏။\nprint(grid < [[3]]);\n",
+        ),
+        // An empty inner literal leaves the inner shape open; the second
+        // element settles it, and reading the empty one is the same `E049`.
+        (
+            "nested_prefix_shape",
+            "xs မှာ [[], [1]] ဖြစ်၏။\nprint(xs[1][0]);\nprint(xs);\nprint(xs[0][0]);\n",
+        ),
+        // A failed replacement leaves the binding as the interpreter has it:
+        // the copy-on-write store only assigns after the bounds check.
+        (
+            "nested_store_range",
+            "grid မှာ [[1]] ဖြစ်၏။\ngrid[0] က [2, 3]။\nprint(grid);\ngrid[4] က [5]။\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, program) in cases {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let dir = work_dir(name, label);
+            let source = dir.join(format!("{name}.akk"));
+            fs::write(&source, program).expect("the source");
+
+            let reference = interpret(&source);
+            let built = build(&source, optimize);
+            if !built.status.success() {
+                failures.push(format!(
+                    "{name} ({label}): `akk build` failed: {}",
+                    text(&built.stderr).trim()
+                ));
+                continue;
+            }
+            let native = execute(&executable_for(&source));
+            if native.status.code() != reference.status.code() {
+                failures.push(format!(
+                    "{name} ({label}): exit {:?}, interpreter exited {:?}",
+                    native.status.code(),
+                    reference.status.code()
+                ));
+            }
+            if program_output(text(&native.stdout)) != program_output(text(&reference.stdout)) {
+                failures.push(format!(
+                    "{name} ({label}): stdout {:?}, interpreter {:?}",
+                    program_output(text(&native.stdout)),
+                    program_output(text(&reference.stdout))
+                ));
+            }
+            if text(&native.stderr) != text(&reference.stderr) {
+                failures.push(format!(
+                    "{name} ({label}): stderr {:?}, interpreter {:?}",
+                    text(&native.stderr),
+                    text(&reference.stderr)
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} nested collection check(s) failed:\n\n{}",
         failures.len(),
         failures.join("\n\n")
     );

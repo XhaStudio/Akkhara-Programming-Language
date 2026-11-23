@@ -11,6 +11,7 @@
 
 pub(crate) mod const_fold;
 pub(crate) mod dce;
+pub(crate) mod strings;
 
 use crate::ir::mir::MirProgram;
 

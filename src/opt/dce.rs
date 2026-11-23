@@ -180,6 +180,7 @@ fn operands(instruction: &MirInst) -> Vec<&Operand> {
             base,
             indices,
             value,
+            ..
         } => std::iter::once(base)
             .chain(indices.iter())
             .chain(std::iter::once(value))

@@ -1,0 +1,11 @@
+# native_strings.akk -- len/index/iteration over compile-time string text.
+print(len("hello"));
+print(len("မြန်မာ"));
+s သည် "မြန်မာ" ဖြစ်၏။
+for ch in s {
+    print(ch);
+}
+print(s[2]);
+i သည် 1 ဖြစ်၏။
+print(s[i]);
+print(len("abc") + len("de"));

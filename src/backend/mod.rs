@@ -81,6 +81,11 @@ pub(crate) fn build_source(source: &str, out: &Path, optimize: bool) -> Result<(
         }
         Err(reason) => return Err(reason),
     };
+    // Lower the string operations whose text is known at compile time. This
+    // runs before the analyzer and in both optimiser modes: the native
+    // runtime has no clustering tables, so `len(s)`, `s[i]` and `for ch in s`
+    // are answered here or refused, never emitted as byte arithmetic.
+    crate::opt::strings::run(&mut program);
     // Decide the slice before anything is optimised: folding is not allowed to
     // hide a construct the backend cannot emit (constant folding can turn a
     // refused expression into a value, but it is still outside the slice and

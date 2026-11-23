@@ -113,6 +113,9 @@ pub(crate) enum MirInst {
         op: String,
         lhs: Operand,
         rhs: Operand,
+        /// The source line, so ordering a collection reports the
+        /// interpreter's `E042` with the same line.
+        line: usize,
     },
     Not {
         dest: Temp,
@@ -198,6 +201,9 @@ pub(crate) enum MirInst {
         base: Operand,
         indices: Vec<Operand>,
         value: Operand,
+        /// The source line, so the native runtime's `E049` text matches the
+        /// interpreter's for a write out of range.
+        line: usize,
     },
     StoreField {
         base: Operand,

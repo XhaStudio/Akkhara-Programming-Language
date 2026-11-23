@@ -369,6 +369,15 @@ fn operands_of(instruction: &MirInst) -> Vec<&Operand> {
             std::iter::once(base).chain(indices.iter()).collect()
         }
         MirInst::Len { value, .. } | MirInst::Items { value, .. } => vec![value],
+        MirInst::StoreIndex {
+            base,
+            indices,
+            value,
+            ..
+        } => std::iter::once(base)
+            .chain(indices.iter())
+            .chain(std::iter::once(value))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -589,6 +598,20 @@ impl Gen {
                         dest
                     ))
                 })?;
+                // Two strings join with `+`: the runtime copies both byte
+                // ranges into a fresh arena string. Constant pairs are folded
+                // when the optimiser runs, so this is the `--no-opt` path too,
+                // and a run-time operand always comes here.
+                if *op == '+' && result == Kind::Str {
+                    self.load(code, data, lhs);
+                    code.push(RAX);
+                    self.load(code, data, rhs);
+                    code.mov_rr(RCX, RAX);
+                    code.pop(RAX);
+                    code.call("rt_concat_str");
+                    self.store(code, &Operand::Temp(*dest));
+                    return Ok(());
+                }
                 if *op == '/' || result == Kind::Float {
                     self.load_number(code, data, lhs, XMM0)?;
                     self.load_number(code, data, rhs, XMM1)?;
@@ -649,13 +672,61 @@ impl Gen {
                 self.store(code, &Operand::Temp(*dest));
             }
             MirInst::Compare {
-                dest, op, lhs, rhs, ..
+                dest,
+                op,
+                lhs,
+                rhs,
+                line,
             } => {
                 let cc = compare_cc(op)
                     .ok_or_else(|| unsupported(&format!("the comparison \"{}\"", op)))?;
                 let left = self.kind(lhs)?;
                 let right = self.kind(rhs)?;
                 let ordered = !matches!(op.as_str(), "==" | "!=");
+                if left.is_collection() || right.is_collection() {
+                    // Equality compares the printed forms: two collections are
+                    // equal when they have the same kind, length and elements
+                    // (in order). A collection against any other kind prints
+                    // differently every time, so it is simply unequal.
+                    if ordered {
+                        // The interpreter evaluates both operands and then
+                        // reports E042. Do the same, with its exact text (the
+                        // kinds are settled here, and the line traveled in the
+                        // instruction), then exit 1.
+                        self.load(code, data, lhs);
+                        code.push(RAX);
+                        self.load(code, data, rhs);
+                        code.pop(RAX);
+                        let message = format!(
+                            "E042 လိုင်း {} တွင် {} နှင့် {} ကို \"{}\" ဖြင့် နှိုင်းယှဉ်၍မရပါ။",
+                            line,
+                            left.mm_name(),
+                            right.mm_name(),
+                            op
+                        );
+                        let offset = data.intern(&message);
+                        code.mov_data_address(RAX, offset);
+                        code.call("rt_panic_message");
+                        code.ud2();
+                        return Ok(());
+                    }
+                    if left.is_collection() && right.is_collection() {
+                        self.load(code, data, lhs);
+                        code.push(RAX);
+                        self.load(code, data, rhs);
+                        code.mov_rr(RDX, RAX);
+                        code.pop(RAX);
+                        code.call("rt_collection_eq");
+                        if op == "!=" {
+                            code.mov_imm32(RCX, 1);
+                            code.xor_rr(RAX, RCX);
+                        }
+                    } else {
+                        code.mov_imm32_zero(RAX, u32::from(op == "!="));
+                    }
+                    self.store(code, &Operand::Temp(*dest));
+                    return Ok(());
+                }
                 if left == Kind::Str && right == Kind::Str {
                     // Two strings compare byte-wise; `rt_cmp_str` answers -1,
                     // 0 or 1, which the comparison's condition code reads
@@ -898,6 +969,72 @@ impl Gen {
                 // A collection descriptor keeps its length in the second word.
                 self.load(code, data, value);
                 code.load_ptr_disp32(RAX, RAX, 8);
+                self.store(code, &Operand::Temp(*dest));
+            }
+            MirInst::StoreIndex {
+                base,
+                indices,
+                value,
+                line,
+            } => {
+                let base_kind = self.kind(base)?;
+                // The write replaces the binding's descriptor with a copy
+                // carrying the change, which is the interpreter's value
+                // semantics: a second binding of the same collection keeps its
+                // own contents. That needs a variable to write the copy back
+                // into; the analyzer refused anything else.
+                let Operand::Var(var) = base else {
+                    return Err(unsupported(
+                        "a store into an element of a temporary (the collection has to be held in a variable)",
+                    ));
+                };
+                let index = indices
+                    .first()
+                    .ok_or_else(|| unsupported("an index with no part"))?;
+                let value_kind = self.kind(value)?;
+                // `rax` base, `rcx` index/key, `rdx` value word, `rdi` value
+                // tag, `r8` source line (for the E049 text).
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, index);
+                code.mov_rr(RCX, RAX);
+                self.load(code, data, value);
+                code.mov_rr(RDX, RAX);
+                code.mov_imm32(RDI, value_kind.tag() as i32);
+                code.mov_imm32(R8, *line as i32);
+                code.mov_rr(RAX, R11);
+                match base_kind {
+                    Kind::List | Kind::Tuple => code.call("rt_store_seq"),
+                    Kind::Set => code.call("rt_store_set"),
+                    Kind::Dict => code.call("rt_store_dict"),
+                    other => return Err(unsupported(&format!("a store into a {}", other.name()))),
+                }
+                // The copy is now what the name holds.
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
+            }
+            MirInst::Items { dest, value } => {
+                // What a `for` loop walks has to be a sequence `Len`/`Index`
+                // can read. A list, tuple or set already is one; a dict's keys
+                // are copied into a fresh list by the runtime, which is the
+                // order the interpreter's dict iteration yields.
+                let kind = self.kind(value)?;
+                self.load(code, data, value);
+                match kind {
+                    Kind::Dict => code.call("rt_items_dict"),
+                    Kind::List | Kind::Tuple | Kind::Set => {}
+                    // A numeric source is the interpreter's auto-range: the
+                    // loop walks the ints below it. A float bound is rounded
+                    // up, so `for i in 2.5` runs for 0, 1 and 2.
+                    Kind::Int => code.call("rt_items_range_int"),
+                    Kind::Float => {
+                        self.round_call(code, data, value, Builtin::Ceil)?;
+                        code.call("rt_items_range_int");
+                    }
+                    other => {
+                        return Err(unsupported(&format!("iteration over a {}", other.name())))
+                    }
+                }
                 self.store(code, &Operand::Temp(*dest));
             }
             other => return Err(unsupported(&format!("{:?}", other))),

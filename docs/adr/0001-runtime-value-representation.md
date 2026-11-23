@@ -268,11 +268,98 @@ reaches the same `Kind` the interpreter's value would.
   strings inside collections, and `1.0` float spelling. Set members and dict
   keys are deduplicated at compile time: a run-time set member or dict key is
   refused rather than silently keeping a duplicate.
-- `len(collection)` and `MirInst::Len` read the descriptor's length; the
-  `for`-loop `Len`/`Index` shape is emitted, but `MirInst::Items` (iteration)
-  is still refused, so no parity fixture flips: the split remains 6 match /
-  48 refuse, with the refusal for each collection fixture now naming the next
-  construct instead of "a list".
+- `len(collection)` and `MirInst::Len` read the descriptor's length.
+
+### Step 3, iteration slice (landed)
+
+`MirInst::Items` is now emitted for the collections the slice carries, so a
+`for` loop over one compiles:
+
+- A list, tuple or set loop walks the collection itself: `Items` copies the
+descriptor and the existing `Len`/`Index` shape reads it. The analyzer carries
+the element kind through `Items` into the loop variable, so the body is typed
+exactly like an `xs[i]` read.
+- A dict loop yields its keys in insertion order, which is what the
+  interpreter's `Value::Dict` arm does. The runtime helper `rt_items_dict`
+  copies the key words into a fresh list descriptor (every key in the slice is
+  a string literal), and the same `Len`/`Index` shape then walks that list.
+- Iterating a string (grapheme clusters) and a number (interpreter auto-range)
+  are still refused by name, as is a loop whose element kind does not settle
+  (an empty literal, or a collection that reached the loop through a
+  parameter, whose element kind does not cross calls yet).
+- Parity moved to 7 match / 47 refuse because `control_flow` -- a range loop,
+a collection loop and a `while` -- now compiles and matches the interpreter
+byte for byte; that is the measured effect of the slice, not a fixture being
+relaxed. `collections` still refuses on the `စာ` conversion and `shorthand` on
+the `map` callback, with their refusal keywords naming the remaining
+constructs.
+
+### Step 3, index-mutation slice (landed)
+
+`MirInst::StoreIndex` (`xs[i] = v`) is now emitted for every collection kind
+the interpreter allows:
+
+- The analyzer learns the index kind (`Int` for a list/tuple/set position,
+`Str` for a dict key) and the value kind from the base collection's
+  element/value descriptor tag, writes it back when the collection was empty,
+  and refuses a string base, a mismatched value kind and a base that is not a
+  variable with `E177` naming the case.
+- **Value semantics are preserved by copying.** The interpreter's `List` and
+  `Tuple` hold their elements inline and `assign_index` writes a fresh value
+  back into the name, so `ys = xs; ys[0] = 9` leaves `xs` unchanged. A native
+descriptor is a pointer both bindings would share, so the runtime helpers
+  (`rt_store_seq`, `rt_store_dict`, `rt_store_set`, with `rt_value_eq`) build
+  a **new** descriptor and codegen rebinds the variable's slot to it. The old
+  descriptor stays in the arena (no collector yet) and the interpreter's
+  observable behaviour -- including dict/float/string set dedup rules -- is
+  reproduced.
+- Sequence writes take `0..=len`: a position inside the collection is
+  replaced, the position just past the end appends. `rt_store_seq` reports the
+  interpreter's `E049` (line included) before 0 or past the end. A dict write
+  updates the key where it sits or appends a new key last; a set write follows
+  the interpreter exactly: the member already at the slot changes nothing, a
+  member that lives elsewhere drops the written position, the position just
+  past the end appends, anything else is replaced.
+- The write's source line travels in `r8` (new `StoreIndex::line`), so the
+  `E049` text is byte-identical to the interpreter's.
+- Parity stays 7 match / 47 refuse: no fixture in `tests/fixtures/` writes
+  through an index. The native-only fixture `mutation.akk` covers the landed
+  forms and is compared with the interpreter under both optimiser modes; the
+  `collection_diagnostics_match_the_interpreter` test adds the write
+  out-of-range cases, including the negative index.
+
+Still deferred for this slice: heterogeneous collections (a write must match
+  the element kind, as a mixed literal already does), writing a character of a
+  string, and a nested write such as `grid[0][1] = v` (the parser rejects it).
+
+### Step 3, collection-equality slice (landed)
+
+`==` and `!=` between two collections now compile:
+
+- The analyzer types the result as `Bool` and leaves the operand kinds alone.
+  Equality is the interpreter's `repr(a) == repr(b)` rule, so two collections
+  of different kinds (a list and a tuple, or a list and a dict) are unequal
+  rather than a type error. Ordering a collection is the interpreter's `E042`:
+  `Compare` now carries its source line, codegen evaluates both operands (their
+  calls may print) and then calls `rt_panic_message` with the fully built
+  `E042 လိုင်း <n> တွင် <kind> နှင့် <kind> ကို "<op>" ဖြင့် နှိုင်းယှဉ်၍မရပါ။`
+  text, so stderr and the exit status are byte-identical. The same slice fixed
+  `Kind::mm_name` for tuple (`အစု`) and set (`အုပ်စု`) to match the
+  interpreter's `type_name_mm`.
+- `rt_collection_eq` compares kind, length and then every element in stored
+  order -- for a dict, each key and its value -- through `rt_value_eq`, which
+  now recurses into the nested collection tags. Order sensitivity is exactly
+  what the printed form has, so two dicts with the same pairs inserted in a
+  different order are not equal, as in the interpreter.
+- A collection against a value of another kind is unequal without a runtime
+  call (`!=` is its negation), the printed-form rule again.
+- `tests/native/fixtures/equality.akk` covers lists, tuples, sets, dicts,
+  nested collections, strings, floats, empty collections and the mixed-type
+  cases, and is compared with the interpreter under both optimiser modes. Two
+  unit tests type equality and ordering as `Bool`, and
+  `collection_diagnostics_match_the_interpreter` adds the ordering cases
+  (list/list, list/int, tuple/set) and compares stdout, stderr and exit code.
+  Parity stays 7 match / 47 refuse because no fixture compares collections.
 - New native fixture `tests/native/fixtures/collections.akk` is compared with
   the interpreter through `akk build` in both optimiser modes. Two native
   tests cover the rest: `collection_diagnostics_match_the_interpreter` asserts
@@ -281,12 +368,99 @@ reaches the same `Kind` the interpreter's value would.
   documented exhaustion path. Three unit tests cover index typing and the
   heterogeneous-list / run-time-set refusals.
 
+### Step 3, nested-collection slice (landed)
+
+A collection whose elements are themselves collections now compiles at any
+depth:
+
+- The analyzer's one-level element kind became an element **shape**:
+  `[Int]` for a list of ints, `[List, Int]` for a list of int lists,
+  `[Dict, Str]` for a dict of strings. `shape_of` prefixes an operand's kind,
+  `items_shape` merges the element shapes of a literal, and `merge_shapes`
+  allows a prefix (an empty literal's contents are unknown) while refusing a
+  genuine disagreement such as `[[1], ["a"]]`.
+- One indexing step (`learn_indexed`) gives the destination the first kind of
+  the base's shape and carries the rest of the shape with the result, so
+  `grid[0][1]` is typed as an int and `deep[0][1][0]` as an int through three
+  levels. The same shape travels through `StoreVar` (`ys = xs`), `Items`
+  (`for row in grid`) and dict values.
+- A store compares the written value's shape with the target's
+  (`learn_stored`), so a list of int lists refuses a list of strings instead
+  of miscompiling the inner tag, and an empty collection adopts the shape of
+  the value written into it. The runtime needed no new helpers: a nested
+  element is already a descriptor pointer, so the existing index, print,
+  equality and copy-on-write store paths read it unchanged.
+- Refused (documented, never silent): an inner collection whose element kind
+  is still unknown because it started empty (`[[]]` then `xs[0][0]`); a nested
+  write, which the language's own parser rejects (`E001`); and a mixed nested
+  literal (`[[1], ["a"]]`), which already fails the one-element-kind rule.
+- `nested_collections_match_the_interpreter` writes four programs -- nested
+  reads/prints/equality/stores over lists, three levels, a tuple of tuples and
+  a dict of lists with iteration, plus a second-level `E049`, nested `E042`
+  ordering and a failed nested store -- and compares stdout, stderr and exit
+  code with the interpreter in both optimiser modes. A unit test
+  (`a_nested_index_is_typed_from_the_inner_elements`) pins the shape typing.
+  Parity stays 7 match / 47 refuse because no corpus fixture is nested.
+
+### Step 4, compile-time string slice (landed)
+
+`len(s)`, `for ch in s` and `s[i]` now compile when the text is known before
+the program runs:
+
+- The native runtime carries no Unicode tables -- `crate::text` lives in the
+  compiler -- so the new `src/opt/strings.rs` pass asks it at compile time.
+  For a literal, or a binding assigned one exactly once, `len(s)` becomes an
+  int constant, `for ch in s` becomes a `List` literal of the string's
+  grapheme clusters, and `s[i]` becomes an index into such a list. The pass
+  runs before the analyzer and in both optimiser modes: it is lowering, not
+  an optimisation.
+- The rewritten forms reuse the collection slice unchanged, which is what
+  keeps parity: iteration walks `[Str]`, and an out-of-range `s[i]` reaches
+  the same `rt_index_seq` panic and the same `E049` text and line.
+- A string that only exists at run time -- a parameter, a call result -- has
+  no compile-time clusters. `len`, indexing and iteration over one stay
+  refused with the `E177` messages they already had, covered by the
+  `string_len`, `string_index` and `string_iteration` cases in
+  `tests/native/main.rs`.
+- `tests/native/fixtures/strings_ops.akk` covers ASCII and Myanmar `len`,
+  empty text, a loop over a literal and over a binding, a literal, computed
+  and empty-string index/loop, and `len` in arithmetic, under both optimiser
+  modes. `collection_diagnostics_match_the_interpreter` adds `"မြန်မာ"[4]`,
+  whose `E049` is byte-identical. The corpus fixture `native_strings` is the
+  first string fixture to match, so parity moves to 8 match / 47 refuse;
+  `eng_builtin` still refuses, now at `sqrt` because its `len("abc")`
+  compiles.
+
+### Step 5, numeric iteration slice (landed)
+
+`for i in n` with a number now compiles, as the interpreter's auto-range:
+
+- The analyzer types the loop source as a fresh `[Int]` list whatever the
+  number's kind is, because the interpreter's counter is always an `int`
+  (`0, 1, ...` while it is below the bound).
+- `gen` calls `rt_items_range_int` with the bound. Its int arm passes the
+  value straight through; its float arm runs the same saturating `ceil`
+  conversion the `ceil` builtin uses, so `for i in 2.5` runs for 0, 1 and 2
+  and a NaN bound runs no iterations. The runtime helper allocates a list
+  descriptor of ints `0..n-1` (a bound at or below zero is an empty list) and
+  the existing `Len`/`Index` loop walks it.
+- An oversized bound (16384 elements already exceed the 256 KiB arena) is
+  capped so `rt_alloc` takes its documented `E177` exhaustion path instead of
+  the size arithmetic wrapping. The interpreter has no arena and would keep
+  looping; the honest-exit rule is the same one the existing list-literal
+  arena test documents.
+- `tests/native/fixtures/number_for.akk` covers an int binding, a float
+  bound, zero, a negative bound and a float reached through a parameter, in
+  both optimiser modes. Parity stays 8 match / 47 refuse: no corpus fixture
+  loops over a bare number.
+
 Still deferred (and to which step):
 
-- **Step 3:** `Items`/`for`-over-collection, `StoreIndex`/`StoreField`,
-  collection equality/ordering, indexing a nested collection more than one
-  level deep or a collection parameter (element kinds do not cross calls yet),
-  `len(string)` (grapheme clusters), run-time set members and dict keys,
+- **Step 3:** `StoreField`, a string that is only
+  known at run time (`len`/index/iteration over one),
+  heterogeneous collections (a mixed literal or a write of another element
+  kind), a collection parameter (element shapes do not cross calls yet),
+  run-time set members and dict keys,
   mark-sweep traversal/collection, the shadow stack/root table, hash indexes
   for dict/set, and the full move from static `Kind` slots to one NaN-boxed
   `Value` per slot. The current bridge stores `int`/`float`/`bool` inline in

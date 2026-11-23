@@ -313,10 +313,35 @@ error.
   exactly as it does when interpreted. A `break`, `continue` or `return` that
   would leave a `finally` without running it is refused with `E177` rather than
   skipping the block.
-- `akk build` supports list/tuple/set/dict literals, indexing, `len` and
-  collection printing. Iterating a collection, storing into an element and
-  comparing two collections are still refused with `E177`. Collections use a
-  fixed runtime arena; exhausting it reports `E177` on stderr and exits 1.
+- `akk build` supports list/tuple/set/dict literals, indexing, `len`,
+  collection printing, `for` over a list, tuple or set (a dict yields its
+  keys, in insertion order) or over a number (the interpreter's auto-range:
+  `for i in 5` walks 0 to 4, a float bound is rounded up, and zero or a
+  negative bound runs no iterations), and writing through an index (`xs[i] = v`: replace
+  at a position, append just past the end, update or add a dict key, and the
+  interpreter's set duplicate rule). A write builds a fresh collection and
+  rebinds the name, so another binding keeps its own contents, exactly as the
+  interpreter's value semantics do. Equality (`==`/`!=`) is structural and
+  order-sensitive, like the printed form: same kind, length and elements, and
+  a dict compares its keys and values in insertion order. A collection of
+  collections works at any depth: `grid[0][1]`, `deep[0][1][0]`, a list inside
+  a dict, a `for` over rows and then over cells, and printing or comparing the
+  nested value all type from a per-binding element shape. Ordering two
+  collections is the interpreter's `E042`. A string whose text is known at
+  compile time (a literal, or a binding assigned one once) also supports
+  `len(s)`, `for ch in s` and `s[i]`, counted in grapheme clusters by the
+  interpreter's own rules: these are lowered to an int constant or a list of
+  clusters, so an out-of-range read is still the interpreter's `E049`.
+  `+` joins two strings (the interpreter's only string arithmetic): a
+  constant pair is folded, and a run-time join copies both into a new string
+  in the runtime arena. Writing into a string, mixing element kinds and indexing through an inner
+  collection that started empty (its element kind is unknown) are still
+  refused with `E177`, and so are `len`, indexing and iteration over a string
+  that only arrives at run time (a parameter, a call result), because the
+  native runtime carries no Unicode tables; a nested write such as
+  `grid[0][1] = v` stays a parse error in the language itself. Collections
+  use a fixed runtime arena; exhausting it reports `E177` on stderr and exits
+  1.
 
 ### Type keywords
 `စာသား`(str) `ကိန်းပြည့်`(int) `ဒဿမ`/`ဒဿမကိန်း`(float) `မှန်/မှား`(bool) `စာရင်း`(list) `အစု`(tuple) `အုပ်စု`(set) `အဘိဓာန်`(dict) `ဇယား`(table)

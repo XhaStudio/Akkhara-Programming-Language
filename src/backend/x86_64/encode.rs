@@ -160,6 +160,13 @@ impl Code {
         self.byte(disp);
     }
 
+    /// `rep movsb`: copy `rcx` bytes from `[rsi]` to `[rdi]`, advancing both
+    /// pointers. Used to join two strings into a fresh arena buffer.
+    pub(crate) fn rep_movsb(&mut self) {
+        self.byte(0xF3);
+        self.byte(0xA4);
+    }
+
     /// `lea dst, [base + disp8]`
     pub(crate) fn lea_disp8(&mut self, dst: u8, base: u8, disp: i8) {
         self.rex(true, dst, base);

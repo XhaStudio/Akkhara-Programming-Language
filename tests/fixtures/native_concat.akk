@@ -1,0 +1,11 @@
+# native_concat.akk -- `+` joins two strings, constant and at run time.
+print("foo" + "bar");
+print("မြ" + "န်မာ");
+s သည် "ab" ဖြစ်၏။
+t သည် "cd" ဖြစ်၏။
+print(s + t);
+print((s + t) == "abcd");
+fn join(a, b) {
+    return a + b;
+}
+print(join("hello ", "world"));

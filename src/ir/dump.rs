@@ -429,7 +429,9 @@ fn functions(out: &mut String, program: &MirProgram) {
 fn inst_text(inst: &MirInst) -> String {
     match inst {
         MirInst::Binary { dest, op, lhs, rhs } => format!("t{} = {} {} {}", dest, lhs, op, rhs),
-        MirInst::Compare { dest, op, lhs, rhs } => format!("t{} = ({} {} {})", dest, lhs, op, rhs),
+        MirInst::Compare {
+            dest, op, lhs, rhs, ..
+        } => format!("t{} = ({} {} {})", dest, lhs, op, rhs),
         MirInst::Not { dest, value } => format!("t{} = !{}", dest, value),
         MirInst::Neg { dest, value } => format!("t{} = -{}", dest, value),
         MirInst::Move { dest, value } => format!("t{} = {}", dest, value),
@@ -472,6 +474,7 @@ fn inst_text(inst: &MirInst) -> String {
             base,
             indices,
             value,
+            ..
         } => format!("{}[{}] = {}", base, operands(indices), value),
         MirInst::StoreField { base, field, value } => {
             format!("{}.{} = {}", base, field, value)

@@ -61,6 +61,7 @@ pub(crate) fn emit(
     print::emit_bool(code, data);
     print::emit_str(code, data);
     string::emit_cmp(code);
+    string::emit_cat(code);
     panic::emit_zero(code, data);
     panic::emit_div(code, data);
     raise::emit_report(code, data, error_prefix, error_payload);

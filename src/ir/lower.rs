@@ -800,6 +800,7 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
                 base,
                 indices,
                 value,
+                line: *line,
             });
         }
         HirStmt::SetField {
@@ -940,6 +941,7 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
                 op: comparison.to_string(),
                 lhs: Operand::Var(*var),
                 rhs: end,
+                line: *line,
             });
             builder.terminate(Terminator::Branch {
                 cond: Operand::Temp(dest),
@@ -994,6 +996,7 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
                 op: "<".to_string(),
                 lhs: Operand::Temp(index),
                 rhs: Operand::Temp(length),
+                line: *line,
             });
             builder.terminate(Terminator::Branch {
                 cond: Operand::Temp(dest),
@@ -1222,6 +1225,7 @@ fn operand(
                 op: op.clone(),
                 lhs,
                 rhs,
+                line,
             });
             Operand::Temp(dest)
         }

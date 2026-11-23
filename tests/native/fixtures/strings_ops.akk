@@ -1,0 +1,17 @@
+print(len("hello"));
+print(len("မြန်မာ"));
+print(len(""));
+s သည် "abc" ဖြစ်၏။
+print(len(s));
+for ch in "မြန်မာ" {
+    print(ch);
+}
+print("မြန်မာ"[0]);
+print("မြန်မာ"[2]);
+i သည် 1 ဖြစ်၏။
+print("မြန်မာ"[i]);
+print("hello"[1]);
+for ch in "" {
+    print(ch);
+}
+print(len("abc") + len("de"));

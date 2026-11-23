@@ -1,0 +1,17 @@
+print("foo" + "bar");
+print("မြ" + "န်မာ");
+print("" + "");
+print("a" + "b" + "c");
+s သည် "ab" ဖြစ်၏။
+t သည် "cd" ဖြစ်၏။
+print(s + t);
+print(t + s);
+print((s + t) == "abcd");
+fn join(a, b) {
+    return a + b + "!";
+}
+print(join("hello ", "world"));
+u သည် "x" ဖြစ်၏။
+u သည် u + "y" ဖြစ်၏။
+u သည် u + "z" ဖြစ်၏။
+print(u);

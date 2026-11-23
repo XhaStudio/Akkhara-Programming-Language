@@ -1,0 +1,38 @@
+# mutation.akk -- writing through an index, for each collection kind.
+xs မှာ [10, 20, 30] ဖြစ်၏။
+xs[1] က 99။
+xs ကို ဖော်ပြပါ။
+xs[3] က 40။
+xs ကို ဖော်ပြပါ။
+print(len(xs));
+print(xs[3]);
+
+# A tuple takes the same ordered write: replace, or append at the end.
+t မှာ (1, 2, 3) ဖြစ်၏။
+t[0] က 7။
+t ကို ဖော်ပြပါ။
+t[3] က 4။
+t ကို ဖော်ပြပါ။
+
+# A set replaces a position, appends at the end, and never holds a member
+# twice: writing a member that already lives elsewhere drops that position.
+s မှာ {1, 2, 3} ဖြစ်၏။
+s[1] က 9။
+s ကို ဖော်ပြပါ။
+s[0] က 9။
+s ကို ဖော်ပြပါ။
+s[0] က 9။
+s ကို ဖော်ပြပါ။
+
+# A dict updates a key where it sits and appends a new key at the end.
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+d["b"] က 20။
+d["c"] က 3။
+d ကို ဖော်ပြပါ။
+print(len(d));
+
+# Another binding keeps its own contents: collections have value semantics.
+ys မှာ xs ဖြစ်၏။
+ys[0] က 1။
+print(xs);
+print(ys);

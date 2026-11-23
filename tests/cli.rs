@@ -42,6 +42,23 @@ const CASES: &[Case] = &[
         stderr_code: None,
         stdin: &[],
     },
+    // `+` joins two strings, at compile time and from run-time bindings.
+    Case {
+        name: "native_concat",
+        exit: 0,
+        stdout: &["foobar", "မြန်မာ", "abcd", "True", "hello world"],
+        stderr_code: None,
+        stdin: &[],
+    },
+    // Strings known at compile time: `len`, grapheme-cluster iteration and
+    // indexing, counted the way the interpreter counts Myanmar syllables.
+    Case {
+        name: "native_strings",
+        exit: 0,
+        stdout: &["5", "3", "မြ", "န်", "မာ", "မာ", "န်", "5"],
+        stderr_code: None,
+        stdin: &[],
+    },
     Case {
         name: "shorthand",
         exit: 0,
