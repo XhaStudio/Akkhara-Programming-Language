@@ -1,0 +1,6 @@
+# float_rem_zero.akk -- a float remainder with a zero divisor panics with E039
+# and exits 1, the way the interpreter does.
+"before" ကို ဖော်ပြပါ။
+n သည် 7.5 ဖြစ်၏။
+m သည် n % 0.0 ဖြစ်၏။
+m ကို ဖော်ပြပါ။

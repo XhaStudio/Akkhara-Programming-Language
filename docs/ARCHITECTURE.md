@@ -79,7 +79,7 @@ matching feature is used.
 | `stdlib` | The seven libraries compiled into the binary: `app`, `file`, `json`, `random`, `request`, `server`, `time`. Each is a plain Rust module that does the work; `interp` owns the language-facing surface and converts at the boundary. |
 | `diagnostics::codes` | The single registry of every `E###` / `W###` code, with a test that scans `src/` so a message cannot carry an unregistered code. |
 | `text` | Grapheme-cluster `len`, indexing and slicing, so one Myanmar syllable counts as one character. |
-| `backend` | The native code generator for one slice of the language: `x86_64/` has the instruction encoder (`encode.rs`), the refusal rules and type analysis (`mod.rs`) and MIR-to-machine-code (`gen.rs`); `object/elf.rs` and `object/pe.rs` write a static Linux or Windows executable byte by byte; `link/` writes the file and, on Linux, marks it executable. No assembler or linker is used, and a construct outside the slice is refused with `E177` before a byte is emitted. Every top-level `fn` becomes its own routine with its own frame, and calls between them follow the convention described below. Two strings compare with `==`/`!=` byte-wise and with an ordering lexicographically, through `rt_cmp_str`, `+` joins two strings into a fresh arena string through `rt_concat_str` (`rep movsb` over both byte ranges), and the numeric builtins `abs`, `min`, `max`, `floor`, `ceil` and `round` are emitted in line (an int `min`/`max` cannot mix with a float, because the result's kind would depend on the values; the rounding builtins convert their number to a double, round it and cast with the interpreter's saturating `as i64`). A builtin misused with the wrong kind or arity is refused with the interpreter's `E110`, not `E177`. Collection literals (`list`/`tuple`/`set`/`dict`) are emitted with indexing (at any nesting depth), `len`, collection printing, iteration, element stores and collection equality/ordering (ordering is the interpreter's `E042`) through the runtime value layer. Iterating a number is the interpreter's auto-range, built by `rt_items_range_int` (a float bound is rounded up first), so `for i in n` walks the ints below `n`. A string whose text is known at compile time also supports `len`, indexing and iteration: `opt::strings` lowers them, using the interpreter's grapheme clusters, to an int constant or a list of clusters. A string that only exists at run time, and heterogeneous collections, are still refused. |
+| `backend` | The native code generator for one slice of the language: `x86_64/` has the instruction encoder (`encode.rs`), the refusal rules and type analysis (`mod.rs`) and MIR-to-machine-code (`gen.rs`); `object/elf.rs` and `object/pe.rs` write a static Linux or Windows executable byte by byte; `link/` writes the file and, on Linux, marks it executable. No assembler or linker is used, and a construct outside the slice is refused with `E177` before a byte is emitted. Every top-level `fn` becomes its own routine with its own frame, and calls between them follow the convention described below. Two strings compare with `==`/`!=` byte-wise and with an ordering lexicographically, through `rt_cmp_str`, `+` joins two strings into a fresh arena string through `rt_concat_str` (`rep movsb` over both byte ranges), and the numeric builtins `abs`, `min`, `max`, `floor`, `ceil` and `round` are emitted in line (an int `min`/`max` cannot mix with a float, because the result's kind would depend on the values; the rounding builtins convert their number to a double, round it and cast with the interpreter's saturating `as i64`). A builtin misused with the wrong kind or arity is refused with the interpreter's `E110`, not `E177`. Collection literals (`list`/`tuple`/`set`/`dict`) are emitted with indexing (at any nesting depth), `len`, collection printing, iteration, element stores and collection equality/ordering (ordering is the interpreter's `E042`) through the runtime value layer. A collection's element shape crosses calls: a parameter is typed from its call sites and its body, and a returned collection's shape reaches the caller, so an index into a call's result is typed; one parameter must settle to one shape and disagreeing call sites are refused. Iterating a number is the interpreter's auto-range, built by `rt_items_range_int` (a float bound is rounded up first), so `for i in n` walks the ints below `n`. A string whose text is known at compile time also supports `len`, indexing and iteration: `opt::strings` lowers them, using the interpreter's grapheme clusters, to an int constant or a list of clusters. A string that only exists at run time, and heterogeneous collections, are still refused. |
 | `runtime` | The code linked into that executable: `write`/`exit` shims (`print.rs`, syscalls on Linux and `kernel32` on Windows), `rt_print_int` / `rt_print_bool` / `rt_print_str`, `rt_cmp_str` for lexicographic string comparison, `rt_concat_str` for joining two strings in the collection arena, `rt_panic_zero` for `%` by zero, which reports `E038` on stderr and exits 1 like the interpreter, and the collection runtime (`collections.rs`): a 256 KiB bump arena, descriptor indexing/printing, `E049`/`E053` with the lowered line, and an honest `E177` exit when the arena is exhausted. Values are one 64-bit word; a string is the address of `{ length, bytes }` in the constant pool, and a collection is a descriptor with explicit element tags. |
 | `cli` | Every command, plus the terminal `ui` and `progress` helpers. |
 
@@ -115,8 +115,13 @@ never equal, and `-0.0 != 0.0` -- while ordering promotes a mixed pair.
 At run time a division checks its divisor: `/` of two ints whose divisor is
 zero jumps to the `E036` panic and a float division whose divisor is zero to
 `E037`, matching the interpreter instead of letting the hardware trap or
-produce an infinity. `%` stays integer-only and a float remainder is refused
-with `E177`. Float parameters, returns and locals are one word like any other,
+produce an infinity. `%` of two ints is the interpreter's Euclidean int
+remainder; a `%` with a float on either side promotes both operands and calls
+the runtime's `rt_rem_float`, which computes the same `rem_euclid` with the x87
+`fprem` (repeating while C2 reports an incomplete reduction, then adding
+`|divisor|` to a negative result), because SSE has no remainder instruction. A
+zero divisor is `E038` for two ints and `E039` with a float in it. Float
+parameters, returns and locals are one word like any other,
 and a float result comes back in `rax` as its bits.
 
 A raise (`ပစ်ပါ` / `throw`) and its `try/catch` clause are part of the slice.
@@ -202,14 +207,15 @@ rows above are what is still missing inside them.
   argument, an int beyond 2^53 and a call through a parameter, and raising and
   catching (an identity clause, `E178`, `E`, and a raise from inside a function
   that crosses a clause which does not match it). It also checks
-  that `%` by zero and a float division by zero panic with the interpreter's
-  `E038` and `E037`, that an uncaught raise writes the interpreter's exact
+  that `%` by zero, a float remainder by zero and a float division by zero
+  panic with the interpreter's `E038`, `E039` and `E037`, that an uncaught
+  raise writes the interpreter's exact
   `E178` line (line number, identity and message) and exits 1, that a builtin
   misused with the wrong kind or arity is
-  refused with the interpreter's `E110` (four cases), and that nine
+  refused with the interpreter's `E110` (four cases), and that eight
   constructs outside the slice
-  (a float remainder, `min` mixing an int and a float, list, tuple, dict, set,
-  a closure, a class and a catch clause for an interpreter error code) are
+  (`min` mixing an int and a float, list, tuple, dict, set, a closure, a class
+  and a catch clause for an interpreter error code) are
   refused by `E177` in both build modes without
   leaving a file behind, while the interpreter runs each of them. It needs an x86-64 host to mean anything, and skips elsewhere.
 

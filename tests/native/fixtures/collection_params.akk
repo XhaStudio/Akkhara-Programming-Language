@@ -1,0 +1,49 @@
+# collection_params.akk -- a collection's element shape crossing a call.
+fn first(xs) {
+    return xs[0];
+}
+fn second(xs) {
+    return xs[1];
+}
+fn first_name(names) {
+    return names[0];
+}
+fn cell(grid, row, col) {
+    return grid[row][col];
+}
+fn replace_first(xs, value) {
+    xs[0] က value။
+    return xs;
+}
+fn value_at(d, key) {
+    return d[key];
+}
+fn show_all(xs) {
+    for x in xs {
+        print(x);
+    }
+}
+fn make_pair() {
+    return [11, 22];
+}
+fn identity(xs) {
+    return xs;
+}
+
+# A list, a tuple, a nested list and a dict passed as parameters: the callee
+# reads through the element shape its callers describe.
+print(first([10, 20, 30]));
+print(second((4, 5, 6)));
+print(cell([[1, 2], [3, 4]], 1, 0));
+print(replace_first([7, 8], 9));
+print(value_at({ "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ }, "b"));
+names မှာ ["a", "b"] ဖြစ်၏။
+print(first_name(names));
+
+# The shape of a returned collection reaches its caller, directly and through
+# a function that only passes its parameter back.
+print(first(make_pair()));
+print(first(identity([5, 6])));
+
+# Iterating a collection parameter is typed from the caller's shape too.
+show_all([4, 5]);

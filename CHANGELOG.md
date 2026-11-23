@@ -4,6 +4,17 @@
 
 ### Added
 
+- Float remainder in compiled programs: `%` with a float on either side
+  promotes both operands and computes the interpreter's `f64::rem_euclid` -- the
+  truncated remainder made non-negative -- so `-7.5 % 2.0` is `0.5` and
+  `7.5 % -2.0` is `1.5`. SSE has no remainder instruction, so the runtime's
+  `rt_rem_float` uses the x87 `fprem` (repeated while C2 reports an incomplete
+  reduction) and then adds `|divisor|` to a negative result; `-0.0`, NaN and a
+  positive result pass through. A zero divisor writes the interpreter's `E039`
+  and exits 1, a NaN divisor returns NaN, and `%=` works on float and int
+  bindings alike. `tests/native/fixtures/remainder.akk` covers int, float and
+  mixed remainders, the sign rules, a zero result, a call and both `%=` forms
+  with and without `--no-opt`; `float_rem_zero` pins the panic.
 - `floor`, `ceil` and `round` in compiled programs: each takes one number and
   returns an `int` exactly as the interpreter's `as i64` cast does, so a NaN is
   `0`, a value at or past `2^63` is `i64::MAX`, one below `-2^63` is `i64::MIN`,
@@ -52,7 +63,7 @@
   interpreter's structural rule (an int never equals a float, `-0.0` is not
   `0.0`) while ordering promotes a mixed pair. A zero divisor panics with the
   interpreter's code (`E036` for two ints, `E037` with a float) instead of
-  trapping, and a float remainder is refused with `E177`. Printing is
+  trapping. Printing is
   byte-identical to the interpreter: the runtime renders the exact decimal
   digits from the bits in a base-10 bignum and picks the shortest string that
   round-trips, so `0.1 + 0.2` prints `0.30000000000000004`. The kind analysis

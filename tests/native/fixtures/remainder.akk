@@ -1,0 +1,23 @@
+# remainder.akk -- `%` on ints and on floats: the interpreter's `rem_euclid`,
+# promoted to a float whenever either side is one.
+print(7 % 3);
+print(-7 % 3);
+print(7 % -3);
+print(7.5 % 2.0);
+print(-7.5 % 2.0);
+print(7.5 % -2.0);
+print(-7.5 % -2.0);
+print(7 % 2.5);
+print(7.5 % 2);
+print(4.0 % 2.0);
+fn rem(a) {
+    return a % 4.0;
+}
+print(rem(9.25));
+print(rem(-9.25));
+x သည် 10.5 ဖြစ်၏။
+x %= 3.0;
+x ကို ဖော်ပြပါ။
+y သည် 10 ဖြစ်၏။
+y %= 3;
+y ကို ဖော်ပြပါ။

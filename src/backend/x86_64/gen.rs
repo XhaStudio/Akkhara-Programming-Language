@@ -619,6 +619,17 @@ impl Gen {
                         '+' => code.addsd(XMM0, XMM1),
                         '-' => code.subsd(XMM0, XMM1),
                         '*' => code.mulsd(XMM0, XMM1),
+                        '%' => {
+                            // No SSE remainder: the runtime's x87 `fprem`
+                            // routine computes the interpreter's `rem_euclid`
+                            // over the two promoted doubles, and reports its
+                            // E039 for a zero divisor.
+                            code.movq_gpr_xmm(RAX, XMM0);
+                            code.movq_gpr_xmm(RCX, XMM1);
+                            code.call("rt_rem_float");
+                            self.store(code, &Operand::Temp(*dest));
+                            return Ok(());
+                        }
                         '/' => {
                             // The interpreter reports E037 for a zero float
                             // divisor. A NaN divisor is not zero (parity is
@@ -827,6 +838,13 @@ impl Gen {
                         '+' => code.addsd(XMM0, XMM1),
                         '-' => code.subsd(XMM0, XMM1),
                         '*' => code.mulsd(XMM0, XMM1),
+                        '%' => {
+                            code.movq_gpr_xmm(RAX, XMM0);
+                            code.movq_gpr_xmm(RCX, XMM1);
+                            code.call("rt_rem_float");
+                            self.store(code, &Operand::Var(*var));
+                            return Ok(());
+                        }
                         other => return Err(unsupported(&format!("the operator '{}='", other))),
                     }
                     code.movq_gpr_xmm(RAX, XMM0);
@@ -840,6 +858,7 @@ impl Gen {
                     '+' => code.add_rr(RAX, RCX),
                     '-' => code.sub_rr(RAX, RCX),
                     '*' => code.imul_rr(RAX, RCX),
+                    '%' => self.remainder(code),
                     other => return Err(unsupported(&format!("the operator '{}='", other))),
                 }
                 self.store(code, &Operand::Var(*var));

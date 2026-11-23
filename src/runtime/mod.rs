@@ -1,7 +1,8 @@
 //! The code linked into a native executable: `write`/`exit` shims for the
-//! platform, `print` for int/bool/string, the collection runtime (arena,
-//! indexing and collection printing), and the panics a compiled program can
-//! reach (division by zero, a bad index or key, and arena exhaustion).
+//! platform, `print` for int/bool/string, the float remainder, the collection
+//! runtime (arena, indexing and collection printing), and the panics a compiled
+//! program can reach (division by zero, a remainder by zero, a bad index or
+//! key, and arena exhaustion).
 //!
 //! These are machine-code routines, emitted once per executable by [`emit`]
 //! and reached by `call` from the generated `main`. Nothing here depends on
@@ -14,6 +15,7 @@ pub(crate) mod float;
 pub(crate) mod panic;
 pub(crate) mod print;
 pub(crate) mod raise;
+pub(crate) mod rem;
 pub(crate) mod string;
 pub(crate) mod value;
 
@@ -64,6 +66,7 @@ pub(crate) fn emit(
     string::emit_cat(code);
     panic::emit_zero(code, data);
     panic::emit_div(code, data);
+    rem::emit(code, data);
     raise::emit_report(code, data, error_prefix, error_payload);
     collections::emit(code, data, arena_used, arena_start, arena_size);
 }

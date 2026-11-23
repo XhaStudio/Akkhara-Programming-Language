@@ -326,7 +326,12 @@ error.
   a dict compares its keys and values in insertion order. A collection of
   collections works at any depth: `grid[0][1]`, `deep[0][1][0]`, a list inside
   a dict, a `for` over rows and then over cells, and printing or comparing the
-  nested value all type from a per-binding element shape. Ordering two
+  nested value all type from a per-binding element shape. That shape crosses
+  a call too: a list, tuple, set or dict parameter is typed from what its
+  call sites pass and from what its body does with it, and a returned
+  collection's shape reaches the caller, so indexing a call's result works.
+  One function's parameter has one element shape; two call sites that pass
+  different shapes are refused with `E177`. Ordering two
   collections is the interpreter's `E042`. A string whose text is known at
   compile time (a literal, or a binding assigned one once) also supports
   `len(s)`, `for ch in s` and `s[i]`, counted in grapheme clusters by the

@@ -29,6 +29,15 @@ const CASES: &[Case] = &[
         stdout: &["42", "40", "120", "0", "4"],
     },
     // A comparison decides which print runs, twice, then a bool is printed.
+    // `%` on ints and on floats: the interpreter's `rem_euclid`, promoted to
+    // a float when either side is one, and through a function and `%=`.
+    Case {
+        name: "remainder",
+        stdout: &[
+            "1", "2", "1", "1.5", "0.5", "1.5", "0.5", "2.0", "1.5", "0.0", "1.25", "2.75", "1.5",
+            "1",
+        ],
+    },
     Case {
         name: "branch",
         stdout: &["big", "seven", "False"],
@@ -157,6 +166,13 @@ const CASES: &[Case] = &[
     Case {
         name: "number_for",
         stdout: &["0", "10", "20", "0", "1", "2", "100", "101", "done"],
+    },
+    // A collection's element shape crosses a call: a list, tuple, nested list
+    // and dict passed as parameters, a collection returned from a function,
+    // the result of one call indexed by the next, and iteration in the callee.
+    Case {
+        name: "collection_params",
+        stdout: &["10", "5", "3", "[9, 8]", "2", "a", "11", "5", "4", "5"],
     },
     // `for` over a list, a tuple, a set and a dict (whose iteration yields its
     // keys), then `continue` and `break` inside a collection loop.
@@ -524,6 +540,51 @@ fn a_float_division_by_zero_panics_like_the_interpreter() {
     assert_eq!(native.status.code(), reference.status.code());
 }
 
+/// A float remainder by zero is the interpreter's `E039`: the executable writes
+/// the same message (without the line number compiled code has no span for) to
+/// stderr and exits 1.
+#[test]
+fn a_float_remainder_by_zero_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let dir = work_dir("float_rem_zero", "opt");
+    let source = dir.join("float_rem_zero.akk");
+    fs::copy(fixtures().join("float_rem_zero.akk"), &source).expect("the fixture");
+
+    let reference = interpret(&source);
+    let built = build(&source, true);
+    assert!(
+        built.status.success(),
+        "`akk build` failed: {}",
+        text(&built.stderr).trim()
+    );
+    let native = execute(&executable_for(&source));
+
+    assert_eq!(
+        program_output(text(&reference.stdout)),
+        "before\n",
+        "the interpreter prints the statement before the panic"
+    );
+    assert_eq!(
+        text(&native.stdout),
+        "before\n",
+        "the executable prints the statement before the panic"
+    );
+    let reference_stderr = text(&reference.stderr);
+    let native_stderr = text(&native.stderr);
+    assert!(
+        reference_stderr.contains("E039"),
+        "the interpreter should report E039, got {reference_stderr:?}"
+    );
+    assert!(
+        native_stderr.starts_with("E039"),
+        "the executable should reach the panic, got {native_stderr:?}"
+    );
+    assert_eq!(native.status.code(), Some(1));
+    assert_eq!(native.status.code(), reference.status.code());
+}
+
 /// A raise that reaches the top level terminates the built program the way it
 /// terminates the interpreter: the `E178` line -- with its line number and its
 /// identity -- on stderr, and exit 1.
@@ -588,13 +649,6 @@ struct Refused {
 }
 
 const REFUSED: &[Refused] = &[
-    // `%` needs integer operands; the interpreter has float remainders, the
-    // slice does not.
-    Refused {
-        name: "float_rem",
-        mentions: "float",
-        source: "x သည် 5.5 % 2.0 ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
-    },
     // A collection with two element kinds needs the dynamic value word; this
     // slice writes one tag per collection and refuses a mixed literal.
     Refused {
@@ -655,6 +709,14 @@ const REFUSED: &[Refused] = &[
         name: "mixed_store",
         mentions: "where a int is needed",
         source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] က \"a\"။\nxs ကို ဖော်ပြပါ။\n",
+    },
+    // One function's parameter sees one element shape: a caller passing a
+    // list of strings and another passing a list of ints cannot both describe
+    // the same statically typed parameter.
+    Refused {
+        name: "collection_param_mismatch",
+        mentions: "where its parameter #1 is a",
+        source: "fn pick(xs) {\n    return xs[0];\n}\nprint(pick([\"a\", \"b\"]));\nprint(pick([1, 2]));\n",
     },
     // `min`/`max` take one numeric kind in the slice: the interpreter would
     // compare across int and float, but then the result's kind depends on the

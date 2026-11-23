@@ -17,7 +17,8 @@
 //! passing it to a parameter that is used as an int means int), and the
 //! answer is settled for the whole program at once so a call can teach its
 //! callee's parameters. A value whose kind cannot be worked out is refused
-//! rather than guessed. An int and a float mix in arithmetic and in ordering
+//! rather than guessed. `%` of two ints is the int remainder and a `%` with a
+//! float in it is the float one. An int and a float mix in arithmetic and in ordering
 //! comparisons the way the interpreter does it -- the int is converted to a
 //! float and the result is a float -- while `==` stays the interpreter's
 //! structural comparison, where `1` and `1.0` are not equal.
@@ -41,10 +42,10 @@
 //! render into a diagnostic. A collection literal (`list`/`tuple`/`set`/`dict`)
 //! is in the slice, with indexing, `len` and printing through the native
 //! collection runtime; iterating one, writing into an element and comparing
-//! two of them are still refused. Anything else -- a closure, a class, a float
-//! remainder -- is refused with `E177`, naming the item. Refusing is what
-//! keeps the backend honest: a construct it cannot emit must never become
-//! silently different code.
+//! two of them are still refused. Anything else -- a closure, a class -- is
+//! refused with `E177`, naming the item. Refusing is what keeps the backend
+//! honest: a construct it cannot emit must never become silently different
+//! code.
 //!
 //! A raise (`ပစ်ပါ` / `throw`) and the try/catch clause that handles it are in
 //! the slice. The message has to be a string (it is what a catch clause binds
@@ -164,10 +165,21 @@ pub(crate) struct Typed {
     pub(crate) var_elems: HashMap<VarId, Vec<Kind>>,
     /// What callers have told each parameter, while the fixpoint runs.
     learned: Vec<Option<Kind>>,
+    /// The element shape callers have told each parameter, while the fixpoint
+    /// runs.
+    learned_elems: Vec<Option<Vec<Kind>>>,
+    /// The binding of each declared parameter, in order.
+    pub(crate) param_vars: Vec<VarId>,
     /// One settled kind per declared parameter, in order.
     pub(crate) params: Vec<Kind>,
+    /// One settled element shape per declared parameter, in order. `None` when
+    /// the parameter is not a collection or its elements are unknown.
+    pub(crate) param_elems: Vec<Option<Vec<Kind>>>,
     /// `Some` when the function returns a value, `None` for unit.
     pub(crate) result: Option<Kind>,
+    /// The element shape of the returned collection, when the function returns
+    /// a collection whose elements are known.
+    pub(crate) result_elems: Option<Vec<Kind>>,
 }
 
 /// Every function of a program, typed, plus the name of each.
@@ -254,6 +266,8 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
         .iter()
         .map(|function| Typed {
             learned: vec![None; function.params.len()],
+            learned_elems: vec![None; function.params.len()],
+            param_vars: function.params.clone(),
             ..Typed::default()
         })
         .collect();
@@ -333,6 +347,33 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
                                 changed = true;
                             }
                         }
+                        // A returned collection's element shape is what a
+                        // caller reads through the result, so it settles here
+                        // the same way a parameter's shape does.
+                        if let Some(shape) = elems_of(value, &typed.functions[index]) {
+                            let result = &mut typed.functions[index];
+                            match result.result_elems.clone() {
+                                Some(existing) => match merge_shapes(&existing, &shape) {
+                                    Some(merged) if merged.len() > existing.len() => {
+                                        result.result_elems = Some(merged);
+                                        changed = true;
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        return Err(unsupported(&format!(
+                                            "the function `{}` returning a {} on one path and a {} on another",
+                                            program.functions[index].name,
+                                            shape_name(&existing),
+                                            shape_name(&shape)
+                                        )))
+                                    }
+                                },
+                                None => {
+                                    result.result_elems = Some(shape);
+                                    changed = true;
+                                }
+                            }
+                        }
                     }
                     // A branch condition is the interpreter's `bool` rule:
                     // a collection pointer or a number is E043, not truthy.
@@ -401,6 +442,34 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
         }
         typed_fn.params = params;
         typed_fn.learned.clear();
+        // The element shape of a collection parameter comes from both sides:
+        // what the body reads or writes through it, and what its call sites
+        // pass. They have to agree, and the settled shape is recorded on the
+        // binding so the reads below and the slot allocator see it.
+        typed_fn.param_elems.clear();
+        for (position, param) in function.params.iter().enumerate() {
+            let from_body = typed_fn.var_elems.get(param).cloned();
+            let from_callers = typed_fn.learned_elems.get(position).cloned().flatten();
+            let shape = match (from_body, from_callers) {
+                (Some(body), Some(callers)) => match merge_shapes(&body, &callers) {
+                    Some(merged) => Some(merged),
+                    None => {
+                        return Err(unsupported(&format!(
+                        "parameter #{} of `{}` being a {} in its body and a {} at its call sites",
+                        position + 1,
+                        function.name,
+                        shape_name(&body),
+                        shape_name(&callers)
+                    )))
+                    }
+                },
+                (body, callers) => body.or(callers),
+            };
+            if let Some(shape) = &shape {
+                typed_fn.var_elems.insert(*param, shape.clone());
+            }
+            typed_fn.param_elems.push(shape);
+        }
         let mut returns_value = false;
         let mut returns_nothing = false;
         for block in &function.blocks {
@@ -580,6 +649,110 @@ fn set_callee_result(
     }
 }
 
+/// The element shape a callee's parameter already has, from its body or from
+/// an earlier call site.
+fn callee_param_elems(
+    program: &TypedProgram,
+    typed: &Typed,
+    callee: usize,
+    index: usize,
+    position: usize,
+) -> Option<Vec<Kind>> {
+    let function = if callee == index {
+        Some(typed)
+    } else {
+        program.functions.get(callee)
+    }?;
+    let param = function.param_vars.get(position)?;
+    function
+        .var_elems
+        .get(param)
+        .cloned()
+        .or_else(|| function.learned_elems.get(position).cloned().flatten())
+}
+
+fn set_callee_param_elems(
+    program: &mut TypedProgram,
+    typed: &mut Typed,
+    callee: usize,
+    index: usize,
+    position: usize,
+    shape: Vec<Kind>,
+    name: &str,
+) -> Result<bool, String> {
+    let slot = if callee == index {
+        &mut typed.learned_elems[position]
+    } else {
+        &mut program.functions[callee].learned_elems[position]
+    };
+    if let Some(existing) = slot.clone() {
+        match merge_shapes(&existing, &shape) {
+            Some(merged) if merged.len() > existing.len() => {
+                *slot = Some(merged);
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            None => Err(unsupported(&format!(
+                "calling `{}` with a {} where its parameter #{} is a {}",
+                name,
+                shape_name(&shape),
+                position + 1,
+                shape_name(&existing)
+            ))),
+        }
+    } else {
+        *slot = Some(shape);
+        Ok(true)
+    }
+}
+
+/// The element shape a callee's result already has.
+fn callee_result_elems(
+    program: &TypedProgram,
+    typed: &Typed,
+    callee: usize,
+    index: usize,
+) -> Option<Vec<Kind>> {
+    if callee == index {
+        typed.result_elems.clone()
+    } else {
+        program.functions[callee].result_elems.clone()
+    }
+}
+
+fn set_callee_result_elems(
+    program: &mut TypedProgram,
+    typed: &mut Typed,
+    callee: usize,
+    index: usize,
+    shape: Vec<Kind>,
+    name: &str,
+) -> Result<bool, String> {
+    let slot = if callee == index {
+        &mut typed.result_elems
+    } else {
+        &mut program.functions[callee].result_elems
+    };
+    if let Some(existing) = slot.clone() {
+        match merge_shapes(&existing, &shape) {
+            Some(merged) if merged.len() > existing.len() => {
+                *slot = Some(merged);
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            None => Err(unsupported(&format!(
+                "`{}` returning a {} on one path and a {} on another",
+                name,
+                shape_name(&existing),
+                shape_name(&shape)
+            ))),
+        }
+    } else {
+        *slot = Some(shape);
+        Ok(true)
+    }
+}
+
 /// Label what is still unconstrained with `Kind::Int`.
 ///
 /// Only reached once the fixpoint has settled, and it never contradicts a kind
@@ -602,6 +775,30 @@ fn default_numbers(program: &MirProgram, typed: &mut TypedProgram) -> bool {
                 if !typed.functions[index].vars.contains_key(param) {
                     typed.functions[index].vars.insert(*param, kind);
                     changed = true;
+                }
+            }
+            // A collection's element shape travels the same way as its kind:
+            // what a caller passes describes the parameter's elements, so the
+            // body's reads through them are typed on the next round.
+            if let Some(shape) = typed.functions[index]
+                .learned_elems
+                .get(position)
+                .cloned()
+                .flatten()
+            {
+                match typed.functions[index].var_elems.get(param).cloned() {
+                    Some(existing) => {
+                        if let Some(merged) = merge_shapes(&existing, &shape) {
+                            if merged.len() > existing.len() {
+                                typed.functions[index].var_elems.insert(*param, merged);
+                                changed = true;
+                            }
+                        }
+                    }
+                    None => {
+                        typed.functions[index].var_elems.insert(*param, shape);
+                        changed = true;
+                    }
                 }
             }
         }
@@ -759,11 +956,12 @@ fn learn_instruction(
                 }
             }
             if *op == '%' {
-                // The interpreter has a float remainder too; the slice keeps
-                // only the int one, so the refusal names it instead of
-                // quietly becoming an int operation.
+                // The interpreter's remainder follows the promoted kind: two
+                // ints stay the Euclidean int one, and anything with a float
+                // in it is the float one (its own runtime routine).
                 if left == Some(Kind::Float) || right == Some(Kind::Float) {
-                    return Err(unsupported("a remainder (`%`) on a float"));
+                    changed |= learn_temp(&mut typed.temps, *dest, Kind::Float)?;
+                    return Ok(changed);
                 }
                 changed |= learn_operand(lhs, Kind::Int, typed)?;
                 changed |= learn_operand(rhs, Kind::Int, typed)?;
@@ -947,6 +1145,28 @@ fn learn_instruction(
                 // What the caller does with the result tells the callee what
                 // it returns.
                 changed |= set_callee_result(program, typed, callee, index, kind, name)?;
+            }
+            // A collection's element shape travels across the call in both
+            // directions: a caller that passes a list of ints tells the
+            // callee's parameter what its elements are, and a callee that
+            // returns one tells the caller what it can read through it.
+            for (position, arg) in args.iter().enumerate() {
+                if position >= arity {
+                    continue;
+                }
+                if let Some(shape) = elems_of(arg, typed) {
+                    changed |= set_callee_param_elems(
+                        program, typed, callee, index, position, shape, name,
+                    )?;
+                }
+                if let Some(shape) = callee_param_elems(program, typed, callee, index, position) {
+                    changed |= refine_element(arg, shape, typed);
+                }
+            }
+            if let Some(shape) = callee_result_elems(program, typed, callee, index) {
+                changed |= refine_element(&Operand::Temp(*dest), shape, typed);
+            } else if let Some(shape) = elems_of(&Operand::Temp(*dest), typed) {
+                changed |= set_callee_result_elems(program, typed, callee, index, shape, name)?;
             }
         }
         // A raise's message is what a catch clause binds and what an uncaught
@@ -1733,20 +1953,40 @@ mod tests {
     }
 
     #[test]
-    fn a_remainder_on_a_float_is_refused_with_its_reason() {
+    fn a_remainder_follows_the_promoted_kind() {
+        let mut mixed = None;
+        let mut ints = None;
         let function = function(|builder| {
             let dest = builder.temp();
+            mixed = Some(dest);
             builder.emit(MirInst::Binary {
                 dest,
                 op: '%',
                 lhs: Operand::Const(Const::Float(5.5)),
                 rhs: Operand::Const(Const::Int(2)),
             });
+            let dest = builder.temp();
+            ints = Some(dest);
+            builder.emit(MirInst::Binary {
+                dest,
+                op: '%',
+                lhs: Operand::Const(Const::Int(7)),
+                rhs: Operand::Const(Const::Int(2)),
+            });
             builder.terminate(Terminator::Exit);
         });
-        let error = analyze(&program_of(vec![function])).expect_err("float % is out of the slice");
-        assert!(error.contains("E177"), "{}", error);
-        assert!(error.contains("float"), "{}", error);
+        let typed = analyze(&program_of(vec![function])).expect("remainders are in the slice");
+        let temps = &typed.functions[0].temps;
+        assert_eq!(
+            temps.get(&mixed.expect("a temporary")),
+            Some(&Kind::Float),
+            "a remainder with a float operand is a float"
+        );
+        assert_eq!(
+            temps.get(&ints.expect("a temporary")),
+            Some(&Kind::Int),
+            "two ints keep the int remainder"
+        );
     }
 
     #[test]
@@ -2344,5 +2584,45 @@ mod tests {
             "{}",
             error
         );
+    }
+
+    #[test]
+    fn a_collection_shape_crosses_a_call_in_both_directions() {
+        // fn first(xs) { return xs[0] }  called as first([1, 2]) from main.
+        let param = VarId(9);
+        let mut callee = Builder::new();
+        let first = callee.temp();
+        callee.emit(MirInst::Index {
+            dest: first,
+            base: Operand::Var(param),
+            indices: vec![Operand::Const(Const::Int(0))],
+            line: 1,
+        });
+        callee.terminate(Terminator::Return(Some(Operand::Temp(first))));
+        let callee = callee.finish("first".to_string(), vec![param], Vec::new());
+
+        let mut main = Builder::new();
+        let list = main.temp();
+        main.emit(MirInst::List {
+            dest: list,
+            items: vec![Operand::Const(Const::Int(1)), Operand::Const(Const::Int(2))],
+        });
+        let dest = main.temp();
+        main.emit(MirInst::Call {
+            dest,
+            name: "first".to_string(),
+            args: vec![Operand::Temp(list)],
+        });
+        main.emit(MirInst::Print(Operand::Temp(dest)));
+        main.terminate(Terminator::Exit);
+        let main = main.finish("<main>".to_string(), Vec::new(), Vec::new());
+
+        let typed = analyze(&program_of(vec![main, callee])).expect("shapes cross calls");
+        // The caller's list describes the parameter, and the read through it
+        // types both the scalar result and the call's destination.
+        assert_eq!(typed.functions[1].param_elems, vec![Some(vec![Kind::Int])]);
+        assert_eq!(typed.functions[1].result, Some(Kind::Int));
+        assert_eq!(typed.functions[1].result_elems, None);
+        assert_eq!(typed.functions[0].temps.get(&dest), Some(&Kind::Int));
     }
 }

@@ -516,6 +516,49 @@ impl Code {
         self.modrm(3, lhs, rhs);
     }
 
+    /// `fld qword [rsp + disp8]` -- push a double onto the x87 stack.
+    pub(crate) fn fld_rsp(&mut self, disp: u8) {
+        self.byte(0xDD);
+        self.byte(0x44);
+        self.byte(0x24);
+        self.byte(disp);
+    }
+
+    /// `fstp qword [rsp + disp8]` -- store ST(0) as a double and pop it.
+    pub(crate) fn fstp_rsp(&mut self, disp: u8) {
+        self.byte(0xDD);
+        self.byte(0x5C);
+        self.byte(0x24);
+        self.byte(disp);
+    }
+
+    /// `fstp st(0)` -- discard ST(0).
+    pub(crate) fn fstp_st0(&mut self) {
+        self.byte(0xDD);
+        self.byte(0xD8);
+    }
+
+    /// `fprem` -- ST(0) becomes the truncated remainder of ST(0) by ST(1),
+    /// stopping early with C2 set when the reduction needs another step. This
+    /// is the `fmod` Rust's float `%` is built on.
+    pub(crate) fn fprem(&mut self) {
+        self.byte(0xD9);
+        self.byte(0xF8);
+    }
+
+    /// `fnstsw ax` -- the x87 status word, where `fprem` leaves C2.
+    pub(crate) fn fnstsw_ax(&mut self) {
+        self.byte(0xDF);
+        self.byte(0xE0);
+    }
+
+    /// `test ah, imm8` -- C2 is bit 10 of the status word, i.e. bit 2 of `ah`.
+    pub(crate) fn test_ah_imm8(&mut self, value: u8) {
+        self.byte(0xF6);
+        self.byte(0xC4);
+        self.byte(value);
+    }
+
     /// `cvtsi2sd xmm, reg` -- a signed 64-bit integer as a double.
     pub(crate) fn cvtsi2sd(&mut self, xmm: u8, reg: u8) {
         self.byte(0xF2);
@@ -723,6 +766,31 @@ mod tests {
         let mut code = Code::new();
         code.call("nowhere");
         assert!(code.finish().is_err());
+    }
+
+    #[test]
+    fn the_x87_remainder_opcodes_are_the_documented_bytes() {
+        let mut code = Code::new();
+        code.fld_rsp(0);
+        code.fld_rsp(8);
+        code.fprem();
+        code.fnstsw_ax();
+        code.test_ah_imm8(4);
+        code.fstp_rsp(0);
+        code.fstp_st0();
+        let (bytes, _) = code.finish().expect("labels");
+        assert_eq!(
+            bytes,
+            vec![
+                0xDD, 0x44, 0x24, 0x00, // fld qword [rsp]
+                0xDD, 0x44, 0x24, 0x08, // fld qword [rsp + 8]
+                0xD9, 0xF8, // fprem
+                0xDF, 0xE0, // fnstsw ax
+                0xF6, 0xC4, 0x04, // test ah, 4
+                0xDD, 0x5C, 0x24, 0x00, // fstp qword [rsp]
+                0xDD, 0xD8, // fstp st(0)
+            ]
+        );
     }
 
     #[test]

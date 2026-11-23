@@ -454,13 +454,96 @@ the program runs:
   both optimiser modes. Parity stays 8 match / 47 refuse: no corpus fixture
   loops over a bare number.
 
+### Step 6, string concatenation slice (landed)
+
+`+` of two strings now compiles, the interpreter's one string arithmetic:
+
+- The analyzer types the result as `str` and learns both operands as strings;
+  a string beside a number stays refused (the interpreter reports `E040`),
+  and a compound assignment on a string was already refused.
+- `gen` pushes the left string, loads the right and calls `rt_concat_str`,
+  which allocates `{ length, bytes }` for both ranges in the collection arena
+  and copies them with `rep movsb`. Constant pairs are folded by
+  `const_fold` when the optimiser runs; `--no-opt` reaches the runtime call.
+- The new string lives in the arena like a collection, so a long chain of
+  joins reaches the documented `E177` exhaustion instead of growing without
+  bound; the interpreter has a heap and would keep going.
+- One analyzer fix came with it: `default_numbers` no longer labels a `Binary`
+  destination as `int` when an operand is already a non-number. Before, a `+`
+  whose parameters were still unsettled was defaulted to int, and the call
+  sites' `str` then contradicted it ("used as a int and as a string").
+- `tests/native/fixtures/concat.akk` covers constant pairs (ASCII, Myanmar,
+  empty), a left-associative chain, bindings and a binding growing through
+  `+`, equality of a joined value, and a join through parameters, in both
+  optimiser modes. The corpus fixture `native_concat` matches, so parity
+  moves to 9 match / 47 refuse, and `defaults` now refuses later -- at the
+  dynamic-scope name `seen` -- because its `name + punct` compiles.
+
+### Step 7, element shapes across calls (landed)
+
+A collection parameter and a returned collection now carry their element
+shape across the call:
+
+- A call site that passes a collection whose element shape is known records
+  that shape on the callee's parameter, and a callee whose parameter shape is
+  already known types the argument it receives. A read through the parameter
+  (`xs[0]`, `grid[row][col]`, a store or a `for`) is then typed inside the
+  callee, and its result kind is known at the call site.
+- The result travels the same way in the other direction: a returned
+  collection records its shape on the function, and a caller indexing the
+  call's result learns its element kind -- including through a function that
+  only returns its parameter, and through two calls in a row.
+- The shape has to settle to one value, the way a kind does. A body that
+  reads or writes one element kind while its call sites pass another is
+  refused by name, and so are two call sites with different element shapes.
+  That is the static slice's price; the interpreter answers from the value at
+  run time.
+- `tests/native/fixtures/collection_params.akk` covers a list, tuple, nested
+  list and dict passed as parameters, a write and an iteration through a
+  parameter, a returned literal indexed by the caller, and a shape crossing
+  two calls (`identity`). `collection_param_mismatch` pins the two-call-site
+  refusal, and the analyzer unit test
+  `a_collection_shape_crosses_a_call_in_both_directions` pins the settled
+  parameter and result shapes. Parity stays 9 match / 47 refuse: no corpus
+  fixture passes a collection to a function before refusing for another
+  construct.
+
+### Step 8, float remainder slice (landed)
+
+`%` with a float on either side now compiles:
+
+- The interpreter promotes an int operand and computes `f64::rem_euclid`: the
+truncated remainder (`fmod`) made non-negative. The analyzer types the result
+from the promoted kind -- two ints keep the int remainder, anything with a
+float in it is a float -- so a mixed pair is the float operation the
+interpreter performs.
+- SSE has no remainder instruction, so `src/runtime/rem.rs` emits
+`rt_rem_float`: it checks the divisor for zero (a zero divisor is the
+interpreter's `E039`; a NaN divisor merely returns NaN), pushes both doubles on
+the x87 stack and runs `fprem` until C2 says the reduction is complete. The
+true remainder is exactly representable as a double, so the store back to the
+frame loses nothing. The result is then made non-negative by adding
+`|divisor|` when it is below zero, which is `rem_euclid`'s rule and leaves
+`-0.0`, NaN and the positive case alone.
+- `%=` uses the same routine for a float binding and the existing int
+`idiv`-based remainder for an int one; the encoder grew the six x87 opcodes
+this needs (`fld`, `fstp`, `fstp st(0)`, `fprem`, `fnstsw ax`, `test ah, imm8`)
+with a unit test pinning their bytes.
+- `tests/native/fixtures/remainder.akk` covers int, float and mixed remainders,
+the sign rules, a zero result, a call through a function and both `%=`
+forms; `float_rem_zero` pins the `E039` panic (its message, minus the line
+number compiled code has no span for, and exit 1). Parity stays 9 match / 47
+refuse: the corpus fixture `mod_zero` now refuses later -- at its `E038` catch
+clause, because compiled code can only catch a raise it makes itself -- so its
+expectation keyword moved rather than the count.
+
 Still deferred (and to which step):
 
 - **Step 3:** `StoreField`, a string that is only
   known at run time (`len`/index/iteration over one),
   heterogeneous collections (a mixed literal or a write of another element
-  kind), a collection parameter (element shapes do not cross calls yet),
-  run-time set members and dict keys,
+  kind), a collection whose parameter is given two different element shapes
+  at different call sites, run-time set members and dict keys,
   mark-sweep traversal/collection, the shadow stack/root table, hash indexes
   for dict/set, and the full move from static `Kind` slots to one NaN-boxed
   `Value` per slot. The current bridge stores `int`/`float`/`bool` inline in
