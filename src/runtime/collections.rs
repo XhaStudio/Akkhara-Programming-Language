@@ -78,6 +78,7 @@ pub(crate) fn emit(
     emit_items_dict(code);
     emit_items_range(code);
     emit_store(code);
+    emit_reverse(code);
     emit_panic_message(code, newline);
     emit_panics(
         code,
@@ -537,6 +538,66 @@ fn emit_collection_eq(code: &mut Code) {
     code.ret();
     code.label("ceq_no");
     code.mov_imm32_zero(RAX, 0);
+    code.leave();
+    code.ret();
+}
+
+/// `rt_reverse_seq`: `rax` is a list/tuple descriptor and the result is a
+/// fresh descriptor of the same kind and length with the elements in the
+/// opposite order. The source descriptor is never written, so a second binding
+/// that still points at it keeps its own contents -- the interpreter's value
+/// semantics, where only the reversed binding takes the new list.
+fn emit_reverse(code: &mut Code) {
+    code.label("rt_reverse_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(48);
+    code.store(-8, RAX);
+    code.load_ptr_disp32(RCX, RAX, 8);
+    code.store(-16, RCX);
+    // `16 + 16 * len`: the header and one tag/word pair per element.
+    code.mov_rr(RDI, RCX);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-24, RAX);
+    // Header: the source's kind tag, then its length.
+    code.load(RCX, -8);
+    code.load_ptr(RDX, RCX);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    code.load(RDX, -16);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-32, RCX);
+    code.label("reverse_loop");
+    code.load(RCX, -32);
+    code.load(RDX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "reverse_done");
+    // Source element `i` sits at `source + 16 + 16 * i`.
+    code.load(RAX, -8);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.add_rr(R8, RAX);
+    // It lands at `dest + 16 + 16 * (len - 1 - i)`.
+    code.load(R9, -16);
+    code.sub_rr(R9, RCX);
+    code.dec(R9);
+    code.shl_imm(R9, 4);
+    code.add_imm8(R9, 16);
+    code.load(R10, -24);
+    code.add_rr(R9, R10);
+    code.load_ptr(R10, R8);
+    code.store_ptr_disp32(R9, 0, R10);
+    code.load_ptr_disp32(R10, R8, 8);
+    code.store_ptr_disp32(R9, 8, R10);
+    code.load(RCX, -32);
+    code.inc(RCX);
+    code.store(-32, RCX);
+    code.jmp("reverse_loop");
+    code.label("reverse_done");
+    code.load(RAX, -24);
     code.leave();
     code.ret();
 }

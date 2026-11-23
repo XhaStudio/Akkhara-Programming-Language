@@ -319,7 +319,11 @@ error.
   `for i in 5` walks 0 to 4, a float bound is rounded up, and zero or a
   negative bound runs no iterations), and writing through an index (`xs[i] = v`: replace
   at a position, append just past the end, update or add a dict key, and the
-  interpreter's set duplicate rule). A write builds a fresh collection and
+  interpreter's set duplicate rule). `push`/`append` appends one value to the
+  list a variable names and answers the new length, and `reverse` answers the
+  elements in the opposite order: a list variable is reversed in place, while a
+  tuple or a list literal is reversed as a value (text reverse needs the
+  Unicode tables and is still refused). A write builds a fresh collection and
   rebinds the name, so another binding keeps its own contents, exactly as the
   interpreter's value semantics do. Equality (`==`/`!=`) is structural and
   order-sensitive, like the printed form: same kind, length and elements, and

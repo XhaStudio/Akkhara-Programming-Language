@@ -1208,6 +1208,60 @@ impl Gen {
                 self.load(code, data, arg);
                 code.load_ptr_disp32(RAX, RAX, 8);
             }
+            // `push`/`append`: the runtime's indexed write with the index set
+            // to the current length is exactly "append at the end", and it
+            // answers a fresh descriptor. That descriptor replaces what the
+            // variable holds -- the interpreter's value semantics, where a
+            // second binding keeps its own contents -- and the new length is
+            // what the builtin returns.
+            Builtin::Push => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`push` with no argument"))?;
+                let value = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`push` with no value"))?;
+                // `analyze` refuses anything else before this runs.
+                let Operand::Var(var) = base else {
+                    return Err(unsupported("a push whose list is not a variable"));
+                };
+                let value_kind = self.kind(value)?;
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                // `rcx` is the index: the descriptor's length word, so the
+                // write lands just past the last element.
+                code.load_ptr_disp32(RCX, RAX, 8);
+                self.load(code, data, value);
+                code.mov_rr(RDX, RAX);
+                code.mov_imm32(RDI, value_kind.tag() as i32);
+                // The index is never out of range, so no `E049` line is read.
+                code.mov_imm32_zero(R8, 0);
+                code.mov_rr(RAX, R11);
+                code.call("rt_store_seq");
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
+                code.load_ptr_disp32(RAX, RAX, 8);
+            }
+            // `reverse` answers a fresh descriptor with the elements in the
+            // opposite order, through the runtime's `rt_reverse_seq`. A list
+            // held in a variable is reversed in place (the binding takes the
+            // fresh descriptor), while a tuple or any other expression is
+            // reversed as a value and its binding is left alone -- which is
+            // exactly what the interpreter's `call_reverse` does.
+            Builtin::Reverse => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`reverse` with no argument"))?;
+                let kind = self.kind(arg)?;
+                self.load(code, data, arg);
+                code.call("rt_reverse_seq");
+                if kind == Kind::List {
+                    if let Operand::Var(var) = arg {
+                        let slot = self.var_slots[var];
+                        code.store(slot, RAX);
+                    }
+                }
+            }
             Builtin::Min | Builtin::Max => {
                 let keep = match builtin {
                     Builtin::Min => false,

@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.1.0-alpha.3
+
+### Added
+
+- `push`/`append` in compiled programs. The first argument has to be the
+  variable that names a list, as in the interpreter (a value is a copy, so
+  appending to a literal could not write anything back). The append itself is
+  the collection runtime's indexed write with the index set to the descriptor's
+  length word, so it grows the list by allocating a descriptor of one more
+  element, copying the old elements and adding the value -- the same code an
+  `xs[len(xs)] = v` store uses. The binding takes the fresh descriptor, which
+  keeps the interpreter's value semantics (a second binding of the same list
+  still prints its own contents), and the builtin answers the new length.
+  `push` joins the list's element shape, so a value of another kind is refused
+  with `E177` and the same wording an element write of it gets; a wrong arity,
+  a first argument that is not a variable and a non-list value reproduce the
+  interpreter's `E110`, minus the line number compiled code cannot carry.
+  `tests/native/fixtures/list_builtins.akk` covers the returned length, a list
+  growing inside a `while` loop, a mixed float list, a nested list, value
+  semantics across a second binding, and both build modes.
+- `reverse` in compiled programs. A list or tuple becomes a fresh descriptor
+  with its elements in the opposite order, built by the new `rt_reverse_seq`
+  (allocate, copy the header, place each element at `len - 1 - i`; the source
+  is never written). A list held in a variable is reversed in place -- the
+  binding takes the fresh descriptor -- while any other list or a tuple is
+  reversed as a value and its binding stays as it was, exactly as the
+  interpreter's `call_reverse` does. Reversing text is still refused with
+  `E177` because it goes by grapheme cluster and needs the Unicode tables; a
+  wrong arity or a value that is neither a list nor a tuple keeps the
+  interpreter's `E110`. `list_builtins` also covers a tuple and a list literal,
+  and `push_arity`/`reverse_arity` pin the two `E110` cases.
+
+### Changed
+
+- The `E177` slice summary in a refusal now names `push`/`append` and
+  `reverse`. Parity stays 9 match / 47 refuse: the corpus fixture `mutating`
+  now refuses at its `pop` (its expectation keyword moved) and
+  `remaining_forms` still refuses at `reverse("abc")`.
+- Version bumped to `3.1.0-alpha.3`.
+
 ## 3.0.0-alpha.3
 
 ### Added

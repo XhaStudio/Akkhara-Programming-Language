@@ -394,5 +394,5 @@ shape မတူလျှင် `E177` ဖြင့် ငြင်းသည်�
 w မှာ "မြ" ဖြစ်၏။
 w[0] က "က"။
 # အမှား:
-# E177 native backend တွင် a write into a string ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
+# E177 native backend တွင် a write into a string ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
 ```

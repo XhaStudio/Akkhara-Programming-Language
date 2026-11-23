@@ -40,10 +40,17 @@
 //! construct outside the slice. `sqrt` is still outside the slice: its error
 //! message quotes the offending value, which compiled code has no way to
 //! render into a diagnostic. A collection literal (`list`/`tuple`/`set`/`dict`)
-//! is in the slice, with indexing, `len` and printing through the native
-//! collection runtime; iterating one, writing into an element and comparing
-//! two of them are still refused. Anything else -- a closure, a class -- is
-//! refused with `E177`, naming the item. Refusing is what keeps the backend
+//! is in the slice, with indexing, `len`, printing, writing into an element and
+//! iterating, all through the native collection runtime. `push`/`append` and
+//! `reverse` are in too: `push` appends one value to the list a variable names
+//! (its descriptor is replaced by the runtime's copy, so a second binding keeps
+//! its own contents) and answers the new length, while `reverse` answers a
+//! fresh list or tuple in the opposite order -- writing it back when the
+//! argument is a list variable, exactly as the interpreter's in-place reversal
+//! does, and leaving a tuple binding alone. Text reverse, and a `push` whose
+//! value does not fit the list's element shape, are refused rather than
+//! guessed. Anything else -- a closure, a class -- is refused with `E177`,
+//! naming the item. Refusing is what keeps the backend
 //! honest: a construct it cannot emit must never become silently different
 //! code.
 //!
@@ -66,6 +73,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::mir::*;
 use crate::scope::symbol::VarId;
+use crate::shared::errors::{
+    list_needed_detail, push_value_needed_detail, reverse_arg_needed_detail,
+    reverse_value_needed_detail, PUSH_NEEDS_LIST_VARIABLE,
+};
 
 /// The type of one value in the slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +118,11 @@ pub(crate) enum Builtin {
     Ceil,
     Round,
     Len,
+    /// `push`/`append`: append one value to a list variable's descriptor and
+    /// answer the new length.
+    Push,
+    /// `reverse`: a fresh descriptor with the elements in the opposite order.
+    Reverse,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -120,6 +136,8 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "ceil" => Some(Builtin::Ceil),
         "round" => Some(Builtin::Round),
         "len" => Some(Builtin::Len),
+        "push" | "append" => Some(Builtin::Push),
+        "reverse" => Some(Builtin::Reverse),
         _ => None,
     }
 }
@@ -1416,6 +1434,61 @@ fn learn_builtin(
                 Some(kind) if kind.is_collection() => learn_temp(&mut typed.temps, dest, Kind::Int),
                 Some(Kind::Str) => Err(unsupported("len() of a string")),
                 Some(other) => Err(unsupported(&format!("len() of a {}", other.name()))),
+                None => Ok(false),
+            }
+        }
+        // `push`/`append` appends one value to the list the first argument
+        // names and answers the new length, exactly as the interpreter does.
+        // The argument has to be that variable (a value is a copy, so writing
+        // back to it would be invisible), and the appended value has to fit
+        // the element shape the list already has.
+        Builtin::Push => {
+            if args.is_empty() {
+                return Err(builtin_error(name, &push_value_needed_detail(0)));
+            }
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &push_value_needed_detail(args.len() - 1),
+                ));
+            }
+            if !matches!(args[0], Operand::Var(_)) {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::List) => {
+                    // The value joins the element shape, and a value of
+                    // another kind is refused by `learn_stored` with the same
+                    // wording a store of it would use.
+                    let mut changed = learn_stored(&args[0], &args[1], typed)?;
+                    changed |= learn_temp(&mut typed.temps, dest, Kind::Int)?;
+                    Ok(changed)
+                }
+                Some(other) => Err(builtin_error(name, &list_needed_detail(other.mm_name()))),
+                None => Ok(false),
+            }
+        }
+        // `reverse` answers a list or tuple with its elements in the opposite
+        // order. The interpreter reverses a list *variable* in place and any
+        // other value as a copy; the code generator writes the fresh
+        // descriptor back for the first case and leaves the binding alone for
+        // the second, so both match. Text is reversed by character, which
+        // needs the Unicode tables the native runtime does not carry.
+        Builtin::Reverse => {
+            if args.len() != 1 {
+                return Err(builtin_error(name, &reverse_arg_needed_detail(args.len())));
+            }
+            match kind_of(&args[0], typed) {
+                Some(kind @ (Kind::List | Kind::Tuple)) => {
+                    learn_collection(dest, kind, elems_of(&args[0], typed), typed)
+                }
+                Some(Kind::Str) => Err(unsupported(
+                    "reverse of a string (its characters need the Unicode tables)",
+                )),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &reverse_value_needed_detail(other.mm_name()),
+                )),
                 None => Ok(false),
             }
         }

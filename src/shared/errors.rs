@@ -72,6 +72,37 @@ pub(crate) fn number_needed_detail(kind: &str) -> String {
     format!("ကိန်း လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
 }
 
+/// The interpreter's wording for `push`/`append` when the value count is
+/// wrong: the first argument is the list, so `count` is the number of extra
+/// arguments it was given.
+pub(crate) fn push_value_needed_detail(count: usize) -> String {
+    format!("စာရင်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ တန်ဖိုး {} ခု ရပါသည်", count)
+}
+
+/// The interpreter's wording for `push`/`append` when the first argument is
+/// not a variable that names the list. It is one fixed sentence, written for
+/// both names, and it is what compiled code has to say too.
+pub(crate) const PUSH_NEEDS_LIST_VARIABLE: &str =
+    "ပထမ အချက်သည် စာရင်း ကိန်းရှင် ဖြစ်ရပါမည်၊ ဥပမာ — push(xs, 4)";
+
+/// The interpreter's wording for `push`/`append` over a value that is not a
+/// list.
+pub(crate) fn list_needed_detail(kind: &str) -> String {
+    format!("စာရင်း လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
+}
+
+/// The interpreter's wording for `reverse` when it is not given exactly one
+/// argument.
+pub(crate) fn reverse_arg_needed_detail(count: usize) -> String {
+    format!("စာရင်း သို့မဟုတ် စာသား တစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်", count)
+}
+
+/// The interpreter's wording for `reverse` over a value that is neither a
+/// list nor text.
+pub(crate) fn reverse_value_needed_detail(kind: &str) -> String {
+    format!("စာရင်း သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
+}
+
 /// The wording `min`/`max` use when called with no candidates.
 pub(crate) const MIN_MAX_NEEDS_VALUE: &str = "အနည်းဆုံး တန်ဖိုး တစ်ခု လိုအပ်ပါသည်";
 
@@ -89,7 +120,7 @@ pub(crate) const KIND_STR_MM: &str = "စာသား";
 /// diagnostic always says what was not supported.
 pub(crate) fn native_unsupported(what: &str) -> String {
     format!(
-        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
+        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
         what
     )
 }

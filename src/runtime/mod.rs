@@ -1,6 +1,6 @@
 //! The code linked into a native executable: `write`/`exit` shims for the
 //! platform, `print` for int/bool/string, the float remainder, the collection
-//! runtime (arena, indexing and collection printing), and the panics a compiled
+//! runtime (arena, indexing, writing, reversing and collection printing), and the panics a compiled
 //! program can reach (division by zero, a remainder by zero, a bad index or
 //! key, and arena exhaustion).
 //!

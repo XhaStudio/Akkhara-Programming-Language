@@ -66,7 +66,7 @@ lambda_value	refuse	E177	a function call to "twice"
 lib_alias	refuse	E176	a library import
 lib_call_forms	refuse	E176	a library import
 mod_zero	refuse	E177	a catch clause for `E038`
-mutating	refuse	E177	push
+mutating	refuse	E177	pop
 native_import	refuse	E176	a library import
 native_interpolation	refuse	E176	a string with {…} interpolation
 parse_alias_missing	refuse	E093

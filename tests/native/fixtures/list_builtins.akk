@@ -1,0 +1,33 @@
+# list_builtins.akk -- push/append and reverse over lists and tuples.
+xs မှာ [3, 1, 2] ဖြစ်၏။
+print(push(xs, 4));
+print(xs);
+print(append(xs, 5));
+print(xs);
+print(len(xs));
+
+# A second binding keeps its own contents (value semantics).
+ys မှာ xs ဖြစ်၏။
+print(push(xs, 6));
+print(ys);
+print(xs);
+
+# A list variable is reversed in place and returned.
+print(reverse(xs));
+print(xs);
+
+# A tuple is reversed as a value, so its binding stays as it was.
+t မှာ (1, 2, 3) ဖြစ်၏။
+print(reverse(t));
+print(t);
+
+# A fresh list literal reversed into a new binding.
+r မှာ reverse([7, 8, 9]) ဖြစ်၏။
+print(r);
+print(len(r));
+print(r[0]);
+
+# The return value of an in-place reverse.
+rr မှာ reverse(xs) ဖြစ်၏။
+print(rr);
+print(xs);

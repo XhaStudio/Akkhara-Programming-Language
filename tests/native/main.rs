@@ -174,6 +174,32 @@ const CASES: &[Case] = &[
         name: "collection_params",
         stdout: &["10", "5", "3", "[9, 8]", "2", "a", "11", "5", "4", "5"],
     },
+    // `push`/`append` and `reverse`: the returned length, the growth of the
+    // list, a second binding keeping its own contents (value semantics), a
+    // list variable reversed in place and returned, a tuple reversed as a
+    // value, and a fresh literal reversed into a new binding.
+    Case {
+        name: "list_builtins",
+        stdout: &[
+            "4",
+            "[3, 1, 2, 4]",
+            "5",
+            "[3, 1, 2, 4, 5]",
+            "5",
+            "6",
+            "[3, 1, 2, 4, 5]",
+            "[3, 1, 2, 4, 5, 6]",
+            "[6, 5, 4, 2, 1, 3]",
+            "[6, 5, 4, 2, 1, 3]",
+            "(3, 2, 1)",
+            "(1, 2, 3)",
+            "[9, 8, 7]",
+            "3",
+            "9",
+            "[3, 1, 2, 4, 5, 6]",
+            "[3, 1, 2, 4, 5, 6]",
+        ],
+    },
     // `for` over a list, a tuple, a set and a dict (whose iteration yields its
     // keys), then `continue` and `break` inside a collection loop.
     Case {
@@ -710,6 +736,14 @@ const REFUSED: &[Refused] = &[
         mentions: "where a int is needed",
         source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] က \"a\"။\nxs ကို ဖော်ပြပါ။\n",
     },
+    // `push` joins the element shape the list already has, so a value of
+    // another kind is refused the same way an element write of it is: the
+    // interpreter's heterogeneous list needs the dynamic value word.
+    Refused {
+        name: "push_mixed",
+        mentions: "where a int is needed",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\npush(xs, \"a\");\nxs ကို ဖော်ပြပါ။\n",
+    },
     // One function's parameter sees one element shape: a caller passing a
     // list of strings and another passing a list of ints cannot both describe
     // the same statically typed parameter.
@@ -777,6 +811,16 @@ const MISUSE: &[Misuse] = &[
         name: "min_arity",
         mentions: "min",
         source: "x သည် min() ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "push_arity",
+        mentions: "push",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\npush(xs, 1, 2);\nxs ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "reverse_arity",
+        mentions: "reverse",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(reverse());\n",
     },
 ];
 

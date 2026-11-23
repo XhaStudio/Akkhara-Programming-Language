@@ -555,5 +555,41 @@ Still deferred (and to which step):
 - **Step 4:** closure capture cells in `HeapFunction`, interpolation as a
   runtime string helper, and function values.
 
+### Step 9, list builtins slice (landed)
+
+`push`/`append` and `reverse` now compile:
+
+- `push(xs, v)` requires its first argument to be the variable that names a
+  list, as the interpreter does (a value is a copy, so `push([1, 2], 3)` could
+  not write anything back). It appends by calling the runtime's indexed write
+  with the index set to the descriptor's length word, so it reuses the same
+  allocation, copy and `E049` code an element store does; the index is never
+  out of range. The fresh descriptor the write returns replaces the binding --
+  the interpreter's value semantics, so a second binding keeps its own
+  contents -- and the builtin answers the new length. `append` is the same
+  builtin, as in the interpreter.
+- `reverse(x)` answers a fresh list/tuple descriptor with the elements in the
+  opposite order, through the new `rt_reverse_seq`: it allocates the same size,
+  copies the header and places each element at `len - 1 - i`. The source is
+  never written. A list held in a variable is reversed in place -- the binding
+  takes the fresh descriptor -- while any other list or a tuple is reversed as
+  a value and its binding stays as it was, which is exactly the interpreter's
+  `call_reverse` (only a `Value::List` in a variable is reversed in place).
+  Text reverse is still refused: reversing a string goes by grapheme cluster
+  and needs the Unicode tables.
+- A `push` whose value does not fit the list's element shape is refused with
+  the wording an element write of that value gets (`E177`), and the
+  interpreter's `E110` is kept for a wrong arity, a first argument that is not
+  a variable and a `reverse` over something that is not a list or tuple.
+- `tests/native/fixtures/list_builtins.akk` covers the returned length, a list
+  growing inside a `while` loop, value semantics across a second binding, a
+  list variable reversed in place and returned, a tuple reversed as a value and
+  a literal reversed into a new binding, with and without `--no-opt`.
+  `push_mixed` pins the element-shape refusal, and `push_arity` and
+  `reverse_arity` pin `E110`. Parity stays 9 match / 47 refuse: the corpus
+  fixture `mutating` now refuses at its later `pop` -- so its expectation
+  keyword moved rather than the count -- and `remaining_forms` still refuses at
+  `reverse("abc")`.
+
 The interpreter and VM still produce byte-for-byte identical output and error
 text, which the parity harness enforces.
