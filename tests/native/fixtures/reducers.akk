@@ -1,0 +1,33 @@
+# reducers.akk -- `sum()` over a list, a tuple, a set and through a parameter,
+# with int and float elements (the interpreter accumulates in a double and
+# answers an int through its saturating cast), and `keys()` over a dict --
+# printed, indexed and iterated.
+xs မှာ [1, 2, 3] ဖြစ်၏။
+print(sum(xs));
+ys မှာ [1.5, 2.25] ဖြစ်၏။
+print(sum(ys));
+zs မှာ (4, 5) ဖြစ်၏။
+print(sum(zs));
+ss မှာ {7, 8} ဖြစ်၏။
+print(sum(ss));
+print(sum([10, 20, 30]));
+print(sum([9223372036854775807, 1]));
+
+fn total_int(values) {
+    return sum(values);
+}
+fn total_float(values) {
+    return sum(values);
+}
+print(total_int([4, 6]));
+print(total_float([0.5, 0.25]));
+
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+ks မှာ keys(d) ဖြစ်၏။
+print(ks);
+print(len(ks));
+print(ks[1]);
+for k in keys(d) {
+    print(k);
+}
+print(keys(d));

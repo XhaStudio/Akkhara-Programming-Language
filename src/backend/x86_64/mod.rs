@@ -97,6 +97,15 @@ pub(crate) enum Kind {
     Tuple,
     Set,
     Dict,
+    /// An element whose kind is not the same from one position to the next.
+    ///
+    /// The runtime descriptor already carries a tag beside every element word,
+    /// so a collection can hold a mixture of kinds; this marker is the
+    /// *element* shape of such a collection, never the kind of a value. A
+    /// collection whose element shape is `Dynamic` can be built, printed,
+    /// compared, copied, lengthened and written into, but an element read out
+    /// of it has no static kind and is refused where it is read.
+    Dynamic,
 }
 
 impl Kind {
@@ -141,6 +150,15 @@ pub(crate) enum Builtin {
     Sort,
     /// `str`/`စာ`/`စာသား`: an int, float, bool or string as its display text.
     Str,
+    /// `keys`: a dict's keys, in insertion order, as a list.
+    Keys,
+    /// `values`: a dict's values, in insertion order, as a list.
+    Values,
+    /// `entries`: a dict's `(key, value)` pairs, in insertion order, as a
+    /// list of tuples.
+    Entries,
+    /// `sum`: the total of a list, tuple or set of numbers.
+    Sum,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -161,6 +179,10 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "remove" => Some(Builtin::Remove),
         "sort" => Some(Builtin::Sort),
         "str" | "စာ" | "စာသား" => Some(Builtin::Str),
+        "keys" => Some(Builtin::Keys),
+        "values" => Some(Builtin::Values),
+        "entries" => Some(Builtin::Entries),
+        "sum" => Some(Builtin::Sum),
         _ => None,
     }
 }
@@ -1144,16 +1166,18 @@ fn learn_instruction(
             // A collection's element shape travels with the binding, so
             // `ys = xs` followed by `ys[0]` is typed like `xs[0]`.
             if let Some(shape) = elems_of(value, typed) {
+                // A binding that takes a collection of another element shape
+                // widens to `Dynamic` rather than refusing: the runtime tags
+                // each element, so the collection stays sound, and a read of
+                // one of its elements is refused where it happens.
                 match typed.var_elems.get(var) {
-                    Some(existing) if *existing != shape => {
-                        return Err(unsupported(&format!(
-                            "the binding {} holding {} and {} elements",
-                            var,
-                            shape_name(existing),
-                            shape_name(&shape)
-                        )))
+                    Some(existing) => {
+                        let merged = widen_shape(existing, &shape);
+                        if merged != *existing {
+                            typed.var_elems.insert(*var, merged);
+                            changed = true;
+                        }
                     }
-                    Some(_) => {}
                     None => {
                         typed.var_elems.insert(*var, shape);
                         changed = true;
@@ -1256,37 +1280,28 @@ fn learn_instruction(
         MirInst::Eval(_) => {}
         MirInst::Print(_) => {}
         MirInst::List { dest, items } => {
-            let shape = items_shape("list", items, typed)?;
+            let shape = items_shape(items, typed);
             changed |= learn_collection(*dest, Kind::List, shape, typed)?;
         }
         MirInst::Tuple { dest, items } => {
-            let shape = items_shape("tuple", items, typed)?;
+            let shape = items_shape(items, typed);
             changed |= learn_collection(*dest, Kind::Tuple, shape, typed)?;
         }
         MirInst::Set { dest, items } => {
-            // A set drops duplicates, so its members have to be known here:
-            // the code generator deduplicates literal members exactly as the
-            // interpreter's insertion-ordered set does. A member computed at
-            // run time would need the runtime's equality and is refused.
-            if !items.iter().all(|item| matches!(item, Operand::Const(_))) {
-                return Err(unsupported(
-                    "a set built from run-time values (only literal members are in the slice)",
-                ));
-            }
-            let shape = items_shape("set", items, typed)?;
+            // A set drops duplicates. Literal members are deduplicated here,
+            // exactly as the interpreter's insertion-ordered set does; a
+            // run-time member is deduplicated by `rt_store_set`, which the
+            // code generator appends it through.
+            let shape = items_shape(items, typed);
             changed |= learn_collection(*dest, Kind::Set, shape, typed)?;
         }
         MirInst::Dict { dest, pairs } => {
             let mut value_shape: Option<Vec<Kind>> = None;
             for (key, value) in pairs {
-                // Only literal keys can be deduplicated at compile time; a
-                // run-time key needs the runtime's hash/equality, which is
-                // later Step 3 work.
-                if !matches!(key, Operand::Const(Const::Str(_))) {
-                    return Err(unsupported(
-                        "a dict with a key computed at run time (only string literals are in the slice)",
-                    ));
-                }
+                // A key is a string: the descriptor stores string keys and the
+                // runtime looks a key up by content. A literal key is
+                // deduplicated here; a run-time key is deduplicated by
+                // `rt_store_dict` as the literal is built.
                 match kind_of(key, typed) {
                     Some(Kind::Str) => {}
                     Some(other) => {
@@ -1300,19 +1315,10 @@ fn learn_instruction(
                     }
                 }
                 if let Some(shape) = shape_of(value, typed) {
-                    match &value_shape {
-                        Some(existing) => match merge_shapes(existing, &shape) {
-                            Some(merged) => value_shape = Some(merged),
-                            None => {
-                                return Err(unsupported(&format!(
-                                    "a dict whose values are a {} and a {}",
-                                    shape_name(existing),
-                                    shape_name(&shape)
-                                )))
-                            }
-                        },
-                        None => value_shape = Some(shape),
-                    }
+                    value_shape = Some(match &value_shape {
+                        Some(existing) => widen_shape(existing, &shape),
+                        None => shape,
+                    });
                 }
             }
             changed |= learn_collection(*dest, Kind::Dict, value_shape, typed)?;
@@ -1406,6 +1412,13 @@ fn learn_instruction(
             // `Len`/`Index` read, so the loop walks the collection itself and
             // its element kind travels with it.
             Some(kind @ (Kind::List | Kind::Tuple | Kind::Set)) => {
+                if elems_of(value, typed).and_then(|shape| shape.first().copied())
+                    == Some(Kind::Dynamic)
+                {
+                    return Err(unsupported(
+                        "iteration over a collection whose elements have more than one kind",
+                    ));
+                }
                 changed |= learn_collection(*dest, kind, elems_of(value, typed), typed)?;
             }
             // A dict yields its keys, in the order they were first inserted;
@@ -1445,6 +1458,22 @@ fn learn_builtin(
     dest: Temp,
     typed: &mut Typed,
 ) -> Result<bool, String> {
+    // A collection whose elements have more than one kind has no static
+    // element kind, so a builtin that answers one element (or orders them all)
+    // is refused by name: the interpreter's answer would depend on the values.
+    if matches!(
+        builtin,
+        Builtin::Pop | Builtin::Remove | Builtin::Sort | Builtin::Sum
+    ) && args
+        .first()
+        .and_then(|arg| elems_of(arg, typed))
+        .and_then(|shape| shape.first().copied())
+        == Some(Kind::Dynamic)
+    {
+        return Err(unsupported(
+            "a builtin over a collection whose elements have more than one kind",
+        ));
+    }
     match builtin {
         Builtin::Abs => {
             if args.len() != 1 {
@@ -1503,6 +1532,99 @@ fn learn_builtin(
                 Some(kind) if kind.is_collection() => learn_temp(&mut typed.temps, dest, Kind::Int),
                 Some(Kind::Str) => Err(unsupported("len() of a string")),
                 Some(other) => Err(unsupported(&format!("len() of a {}", other.name()))),
+                None => Ok(false),
+            }
+        }
+        // `keys(d)` is the dict's keys in insertion order -- the same list a
+        // `for` loop over the dict walks, which the runtime already builds.
+        Builtin::Keys => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Dict) => {
+                    learn_collection(dest, Kind::List, Some(vec![Kind::Str]), typed)
+                }
+                // The interpreter reports `E110` for anything else; the build
+                // refuses with the same code and wording (no line).
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("အဘိဓာန် လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `values(d)` is the dict's values in insertion order, as a list: the
+        // runtime copies each pair's value word with its own tag. The dict's
+        // value shape settles the list's element shape, so a dict of lists
+        // stays readable at the second level.
+        Builtin::Values => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Dict) => {
+                    learn_collection(dest, Kind::List, elems_of(&args[0], typed), typed)
+                }
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("အဘိဓာန် လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `entries(d)` is one `(key, value)` tuple per pair, in insertion
+        // order. A tuple's shape is homogeneous in this slice, so a string key
+        // beside a value of another kind widens it to `Dynamic`: the entries
+        // print, compare and iterate, while a read inside one is refused the
+        // way any dynamic read is.
+        Builtin::Entries => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Dict) => {
+                    let shape = elems_of(&args[0], typed).map(|values| {
+                        let mut shape = vec![Kind::Tuple];
+                        shape.extend(widen_shape(&[Kind::Str], &values));
+                        shape
+                    });
+                    learn_collection(dest, Kind::List, shape, typed)
+                }
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("အဘိဓာန် လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `sum(xs)` totals a list, tuple or set of numbers. The interpreter
+        // accumulates in a double and answers an int -- its `as i64` cast --
+        // unless a float appeared, so the element shape settles the result
+        // kind; an unknown shape is refused rather than guessed.
+        Builtin::Sum => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(kind) if kind.is_collection() => {
+                    let shape = elems_of(&args[0], typed).unwrap_or_default();
+                    match shape.first() {
+                        Some(Kind::Int) => learn_temp(&mut typed.temps, dest, Kind::Int),
+                        Some(Kind::Float) => learn_temp(&mut typed.temps, dest, Kind::Float),
+                        // The interpreter's per-item `E110`, word for word.
+                        Some(other) => Err(builtin_error(
+                            name,
+                            &format!("ကိန်းများ လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                        )),
+                        // Nothing to add: the interpreter answers the int 0.
+                        None => learn_temp(&mut typed.temps, dest, Kind::Int),
+                    }
+                }
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("ကိန်းများ ပါသော စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
                 None => Ok(false),
             }
         }
@@ -1744,6 +1866,7 @@ impl Kind {
             Kind::Tuple => "tuple",
             Kind::Set => "set",
             Kind::Dict => "dict",
+            Kind::Dynamic => "dynamic",
         }
     }
 
@@ -1763,6 +1886,10 @@ impl Kind {
             Kind::Tuple => TAG_TUPLE,
             Kind::Set => TAG_SET,
             Kind::Dict => TAG_DICT,
+            // A dynamic element is never written with one tag: every element
+            // keeps its own kind's tag, and the analyzer refuses a value whose
+            // kind varies before this can be asked.
+            Kind::Dynamic => 0,
         }
     }
 
@@ -1778,6 +1905,7 @@ impl Kind {
             Kind::Tuple => "အစု",
             Kind::Set => "အုပ်စု",
             Kind::Dict => "အဘိဓာန်",
+            Kind::Dynamic => "အမျိုးမျိုးသော တန်ဖိုး",
         }
     }
 }
@@ -1823,30 +1951,43 @@ fn shape_name(shape: &[Kind]) -> String {
 }
 
 /// The common element shape of a sequence literal, or `None` while every
-/// element's shape is still unknown. Two different known shapes are refused:
-/// the code generator writes one tag per collection and cannot emit a mixed
-/// one without the dynamic `Value` representation.
-fn items_shape(what: &str, items: &[Operand], typed: &Typed) -> Result<Option<Vec<Kind>>, String> {
+/// element's shape is still unknown. Two different element kinds make the
+/// shape `Dynamic`: the runtime stores a tag beside every element, so a
+/// heterogeneous literal is one ordinary descriptor.
+fn items_shape(items: &[Operand], typed: &Typed) -> Option<Vec<Kind>> {
     let mut shape: Option<Vec<Kind>> = None;
     for item in items {
         let Some(item_shape) = shape_of(item, typed) else {
             continue;
         };
-        match &shape {
-            Some(existing) => match merge_shapes(existing, &item_shape) {
-                Some(merged) => shape = Some(merged),
-                None => {
-                    return Err(unsupported(&format!(
-                        "a {what} with a {} element and a {} element",
-                        shape_name(existing),
-                        shape_name(&item_shape)
-                    )))
-                }
-            },
-            None => shape = Some(item_shape),
-        }
+        shape = Some(match &shape {
+            Some(existing) => widen_shape(existing, &item_shape),
+            None => item_shape,
+        });
     }
-    Ok(shape)
+    shape
+}
+
+/// Merge two shapes into one that describes both, marking a disagreement
+/// `Dynamic` from the first differing position on. A shorter shape that is a
+/// prefix of the other (`[]` beside `[1]`) keeps the longer one, because a
+/// collection that started empty simply has not settled its elements yet.
+fn widen_shape(a: &[Kind], b: &[Kind]) -> Vec<Kind> {
+    let common = a
+        .iter()
+        .zip(b)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == a.len().min(b.len()) {
+        return if a.len() >= b.len() {
+            a.to_vec()
+        } else {
+            b.to_vec()
+        };
+    }
+    let mut merged = a[..common].to_vec();
+    merged.push(Kind::Dynamic);
+    merged
 }
 
 /// Record that a collection operand holds elements of `shape`, without
@@ -1916,6 +2057,11 @@ fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, 
     let Some((first, rest)) = shape.split_first() else {
         return Ok(false);
     };
+    if *first == Kind::Dynamic {
+        return Err(unsupported(
+            "a read of an element whose kind varies (the collection holds more than one kind)",
+        ));
+    }
     let mut changed = learn_temp(&mut typed.temps, dest, *first)?;
     if !rest.is_empty() {
         changed |= learn_shape(&Operand::Temp(dest), rest.to_vec(), typed)?;
@@ -1928,32 +2074,58 @@ fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, 
 /// list of strings at the second level); an empty collection adopts the shape
 /// of the value being written, so later reads are typed from it.
 fn learn_stored(base: &Operand, value: &Operand, typed: &mut Typed) -> Result<bool, String> {
-    let Some(mut target) = elems_of(base, typed) else {
+    if kind_of(value, typed) == Some(Kind::Dynamic) {
+        return Err(unsupported(
+            "a store of an element whose kind varies (the collection holds more than one kind)",
+        ));
+    }
+    let Some(target) = elems_of(base, typed) else {
         if let Some(shape) = shape_of(value, typed) {
             learn_element(base, shape, typed);
             return Ok(true);
         }
         return Ok(false);
     };
-    if target.len() > 1 {
-        if let Some(value_shape) = shape_of(value, typed) {
-            match merge_shapes(&target, &value_shape) {
-                // A value whose inner shape is known refines a target that
-                // only knows the first level (`[]` then `[1]`).
-                Some(merged) => target = merged,
-                None => {
-                    return Err(unsupported(&format!(
-                        "a store of a {} into a collection of {}",
-                        shape_name(&value_shape),
-                        shape_name(&target)
-                    )))
-                }
-            }
+    // A collection that already holds more than one kind takes any value: the
+    // runtime writes the value's own tag beside its word.
+    if target.first() == Some(&Kind::Dynamic) {
+        return Ok(false);
+    }
+    if let Some(value_shape) = shape_of(value, typed) {
+        let merged = widen_shape(&target, &value_shape);
+        if merged != target {
+            // A value of another kind makes the collection heterogeneous, so
+            // its element shape becomes `Dynamic` from that position on; the
+            // value's own kind is not the element kind, so it is not learned
+            // as one.
+            set_element(base, merged, typed);
+            return Ok(true);
         }
     }
     let mut changed = learn_operand(value, target[0], typed)?;
     changed |= refine_element(base, target, typed);
     Ok(changed)
+}
+
+/// Replace a collection operand's element shape with a wider one.
+fn set_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> bool {
+    match operand {
+        Operand::Temp(temp) => {
+            if typed.elems.get(temp) == Some(&shape) {
+                return false;
+            }
+            typed.elems.insert(*temp, shape);
+            true
+        }
+        Operand::Var(var) => {
+            if typed.var_elems.get(var) == Some(&shape) {
+                return false;
+            }
+            typed.var_elems.insert(*var, shape);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Tighten a recorded element shape to a longer, compatible one (`[List]`
@@ -2801,10 +2973,15 @@ mod tests {
         );
     }
 
+    /// A literal with two element kinds is one descriptor whose elements keep
+    /// their own tags; printing it needs no static element kind, so the shape
+    /// is `Dynamic` and the literal compiles.
     #[test]
-    fn a_list_with_two_element_kinds_is_refused() {
+    fn a_list_with_two_element_kinds_has_a_dynamic_element() {
+        let mut list_id = None;
         let function = function(|builder| {
             let list = builder.temp();
+            list_id = Some(list);
             builder.emit(MirInst::List {
                 dest: list,
                 items: vec![
@@ -2815,13 +2992,48 @@ mod tests {
             builder.emit(MirInst::Print(Operand::Temp(list)));
             builder.terminate(Terminator::Exit);
         });
-        let error = analyze(&program_of(vec![function])).expect_err("mixed elements");
-        assert!(error.contains("E177"), "{}", error);
-        assert!(error.contains("list"), "{}", error);
+        let typed = analyze(&program_of(vec![function])).expect("a mixed literal");
+        let list = list_id.expect("the literal");
+        assert_eq!(typed.functions[0].temps.get(&list), Some(&Kind::List));
+        assert_eq!(
+            typed.functions[0].elems.get(&list),
+            Some(&vec![Kind::Dynamic])
+        );
     }
 
+    /// A read of an element whose kind varies has no static kind, so it is
+    /// refused by name instead of printing whatever the analyzer saw first.
     #[test]
-    fn a_set_built_from_a_run_time_member_is_refused() {
+    fn a_read_of_a_dynamic_element_is_refused() {
+        let function = function(|builder| {
+            let list = builder.temp();
+            builder.emit(MirInst::List {
+                dest: list,
+                items: vec![
+                    Operand::Const(Const::Int(1)),
+                    Operand::Const(Const::Str("two".to_string())),
+                ],
+            });
+            let first = builder.temp();
+            builder.emit(MirInst::Index {
+                dest: first,
+                base: Operand::Temp(list),
+                indices: vec![Operand::Const(Const::Int(0))],
+                line: 2,
+            });
+            builder.emit(MirInst::Print(Operand::Temp(first)));
+            builder.terminate(Terminator::Exit);
+        });
+        let error = analyze(&program_of(vec![function])).expect_err("a dynamic element");
+        assert!(error.contains("E177"), "{}", error);
+        assert!(error.contains("element whose kind varies"), "{}", error);
+    }
+
+    /// A member computed at run time is deduplicated by the runtime's set
+    /// write, so the literal compiles with the element shape its members say.
+    #[test]
+    fn a_set_built_from_a_run_time_member_is_in_the_slice() {
+        let mut set_id = None;
         let function = function(|builder| {
             let member = builder.temp();
             builder.emit(MirInst::Move {
@@ -2829,6 +3041,7 @@ mod tests {
                 value: Operand::Const(Const::Int(2)),
             });
             let set = builder.temp();
+            set_id = Some(set);
             builder.emit(MirInst::Set {
                 dest: set,
                 items: vec![Operand::Const(Const::Int(1)), Operand::Temp(member)],
@@ -2836,13 +3049,10 @@ mod tests {
             builder.emit(MirInst::Print(Operand::Temp(set)));
             builder.terminate(Terminator::Exit);
         });
-        let error = analyze(&program_of(vec![function])).expect_err("run-time set member");
-        assert!(error.contains("E177"), "{}", error);
-        assert!(
-            error.contains("set built from run-time values"),
-            "{}",
-            error
-        );
+        let typed = analyze(&program_of(vec![function])).expect("a run-time set member");
+        let set = set_id.expect("the set");
+        assert_eq!(typed.functions[0].temps.get(&set), Some(&Kind::Set));
+        assert_eq!(typed.functions[0].elems.get(&set), Some(&vec![Kind::Int]));
     }
 
     #[test]

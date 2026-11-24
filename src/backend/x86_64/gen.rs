@@ -1026,6 +1026,11 @@ impl Gen {
                         code.call("rt_print_collection");
                         code.call("rt_write_newline");
                     }
+                    // A value read out of a heterogeneous collection has no
+                    // static kind; the analyzer refuses it where it is read.
+                    Kind::Dynamic => {
+                        return Err(unsupported("a print of a value whose kind varies"))
+                    }
                 }
             }
             MirInst::ToStr { dest, value } => {
@@ -1039,12 +1044,23 @@ impl Gen {
                 self.sequence(code, data, *dest, Kind::Tuple, items)?;
             }
             MirInst::Set { dest, items } => {
-                let unique = dedup_set(items)?;
-                self.sequence(code, data, *dest, Kind::Set, &unique)?;
+                if items.iter().all(|item| matches!(item, Operand::Const(_))) {
+                    let unique = dedup_set(items)?;
+                    self.sequence(code, data, *dest, Kind::Set, &unique)?;
+                } else {
+                    self.runtime_set(code, data, *dest, items)?;
+                }
             }
             MirInst::Dict { dest, pairs } => {
-                let unique = dedup_dict(pairs)?;
-                self.dictionary(code, data, *dest, &unique)?;
+                if pairs
+                    .iter()
+                    .all(|(key, _)| matches!(key, Operand::Const(Const::Str(_))))
+                {
+                    let unique = dedup_dict(pairs)?;
+                    self.dictionary(code, data, *dest, &unique)?;
+                } else {
+                    self.runtime_dict(code, data, *dest, pairs)?;
+                }
             }
             MirInst::Index {
                 dest,
@@ -1182,6 +1198,80 @@ impl Gen {
         Ok(())
     }
 
+    /// Emit a fresh descriptor of `kind` with room for `elements` members
+    /// (a dict pair counts as one) and length 0. One allocation covers the
+    /// whole literal, so the runtime can fill it in place.
+    fn sized_collection(&self, code: &mut Code, kind: Kind, elements: i32, dest: Temp) {
+        let stride = if kind == Kind::Dict { 32 } else { 16 };
+        code.mov_imm32(RDI, 16 + stride * elements);
+        code.call("rt_alloc");
+        code.mov_imm32(RCX, kind.tag() as i32);
+        code.store_ptr_disp32(RAX, 0, RCX);
+        code.mov_imm32_zero(RCX, 0);
+        code.store_ptr_disp32(RAX, 8, RCX);
+        self.store(code, &Operand::Temp(dest));
+    }
+
+    /// Build a set in one descriptor: the runtime's `rt_fill_set` appends the
+    /// member that is not already present, which is the interpreter's
+    /// insertion-ordered deduplication -- a member that already lives in the
+    /// set keeps the position it first had. This is the path for a literal
+    /// with a run-time member, where `dedup_set` cannot see the value before
+    /// the program runs. A loop that rebuilds the literal therefore allocates
+    /// once per evaluation instead of once per member.
+    fn runtime_set(
+        &mut self,
+        code: &mut Code,
+        data: &mut Data,
+        dest: Temp,
+        items: &[Operand],
+    ) -> Result<(), String> {
+        self.sized_collection(code, Kind::Set, items.len() as i32, dest);
+        for item in items {
+            let item_kind = self.kind(item)?;
+            // `rax` base, `rdx` the member word and `rdi` its tag. Dedup can
+            // only drop a member, so the literal's capacity is never exceeded.
+            self.load(code, data, item);
+            code.mov_rr(RDX, RAX);
+            code.mov_imm32(RDI, item_kind.tag() as i32);
+            self.load(code, data, &Operand::Temp(dest));
+            code.call("rt_fill_set");
+            self.store(code, &Operand::Temp(dest));
+        }
+        Ok(())
+    }
+
+    /// Build a dict in one descriptor: `rt_fill_dict` appends a key it has not
+    /// seen and updates the value of one it has, so a key keeps the position
+    /// it first had and takes the last value. This is the path for a literal
+    /// with a run-time key, where `dedup_dict` cannot compare the key before
+    /// the program runs. Like a set, a dict literal rebuilt in a loop costs one
+    /// allocation per evaluation.
+    fn runtime_dict(
+        &mut self,
+        code: &mut Code,
+        data: &mut Data,
+        dest: Temp,
+        pairs: &[(Operand, Operand)],
+    ) -> Result<(), String> {
+        self.sized_collection(code, Kind::Dict, pairs.len() as i32, dest);
+        for (key, value) in pairs {
+            let value_kind = self.kind(value)?;
+            // `rax` base, `rcx` the key, `rdx` the value word and `rdi` its
+            // tag. A repeated key overwrites in place, so the capacity is
+            // never exceeded.
+            self.load(code, data, key);
+            code.mov_rr(RCX, RAX);
+            self.load(code, data, value);
+            code.mov_rr(RDX, RAX);
+            code.mov_imm32(RDI, value_kind.tag() as i32);
+            self.load(code, data, &Operand::Temp(dest));
+            code.call("rt_fill_dict");
+            self.store(code, &Operand::Temp(dest));
+        }
+        Ok(())
+    }
+
     /// Emit a dict descriptor: `{ TAG_DICT, len, [key_tag, key, val_tag, val] }
     /// * len`. Keys are string literals, deduplicated by the analyzer/codegen;
     /// a run-time key needs the runtime's hash/equality and is refused.
@@ -1256,6 +1346,40 @@ impl Gen {
         Ok(())
     }
 
+    /// Convert the double in `xmm0` to its saturating `as i64`: NaN is 0,
+    /// anything at or past 2^63 is `i64::MAX`, and anything below -2^63 is
+    /// `i64::MIN`. That is the interpreter's cast, and `sum` uses it for its
+    /// integer answer.
+    fn float_to_int(&mut self, code: &mut Code) {
+        let site = self.next_site();
+        let nan = format!("f2i_nan_{site}");
+        let big = format!("f2i_big_{site}");
+        let small = format!("f2i_small_{site}");
+        let done = format!("f2i_done_{site}");
+        code.ucomisd(XMM0, XMM0);
+        code.jcc(CC_P, &nan);
+        code.mov_imm64(RCX, 0x43E0_0000_0000_0000);
+        code.movq_xmm_gpr(XMM1, RCX);
+        code.ucomisd(XMM0, XMM1);
+        code.jcc(CC_AE, &big);
+        // `-2^63` itself converts, so only a strictly smaller value saturates.
+        code.mov_imm64(RCX, 0xC3E0_0000_0000_0000);
+        code.movq_xmm_gpr(XMM1, RCX);
+        code.ucomisd(XMM0, XMM1);
+        code.jcc(CC_B, &small);
+        code.cvttsd2si(RAX, XMM0);
+        code.jmp(&done);
+        code.label(&nan);
+        code.mov_imm32_zero(RAX, 0);
+        code.jmp(&done);
+        code.label(&big);
+        code.mov_imm64(RAX, i64::MAX as u64);
+        code.jmp(&done);
+        code.label(&small);
+        code.mov_imm64(RAX, i64::MIN as u64);
+        code.label(&done);
+    }
+
     /// Emit `abs`, `min` or `max`, leaving the result in `rax`.
     ///
     /// `abs` of an int is the value or its negation; of a float it is the
@@ -1319,6 +1443,85 @@ impl Gen {
                     .first()
                     .ok_or_else(|| unsupported("`str` with no argument"))?;
                 self.to_str(code, data, arg)?;
+            }
+            // `keys(d)`: the runtime already builds exactly that list for a
+            // `for` loop over a dict, so the builtin is that call.
+            Builtin::Keys => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`keys` with no argument"))?;
+                self.load(code, data, arg);
+                code.call("rt_items_dict");
+            }
+            // `values(d)` copies each pair's value word with its own tag into
+            // a fresh list, in the dict's insertion order.
+            Builtin::Values => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`values` with no argument"))?;
+                self.load(code, data, arg);
+                code.call("rt_values_dict");
+            }
+            // `entries(d)` is a fresh list holding one `(key, value)` tuple
+            // per pair, built by the runtime with the stored tags.
+            Builtin::Entries => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`entries` with no argument"))?;
+                self.load(code, data, arg);
+                code.call("rt_entries_dict");
+            }
+            // `sum(xs)`: walk the descriptor left to right, adding every
+            // element as a double -- the interpreter accumulates in `f64` --
+            // and answer an int through its saturating `as i64` cast, or the
+            // double itself when the elements are floats.
+            Builtin::Sum => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`sum` with no argument"))?;
+                let Some(shape) = self.elem_kind(arg) else {
+                    // An empty collection: the interpreter's answer is the int 0.
+                    code.mov_imm32_zero(RAX, 0);
+                    return Ok(());
+                };
+                if !matches!(shape, Kind::Int | Kind::Float) {
+                    return Err(unsupported(&format!(
+                        "`sum` of a collection of {}",
+                        shape.name()
+                    )));
+                }
+                let site = self.next_site();
+                let loop_label = format!("sum_loop_{site}");
+                let done_label = format!("sum_done_{site}");
+                self.load(code, data, arg);
+                // `r10` is the descriptor, `r11` its length, `rcx` the index.
+                code.mov_rr(R10, RAX);
+                code.load_ptr_disp32(R11, RAX, 8);
+                code.mov_imm32_zero(RCX, 0);
+                code.xorpd(XMM0, XMM0);
+                code.label(&loop_label);
+                code.cmp_rr(RCX, R11);
+                code.jcc(CC_AE, &done_label);
+                // The element word of item `i` is at `base + 24 + 16 * i`.
+                code.mov_rr(RDX, RCX);
+                code.shl_imm(RDX, 4);
+                code.add_imm8(RDX, 24);
+                code.add_rr(RDX, R10);
+                code.load_ptr(RAX, RDX);
+                if shape == Kind::Float {
+                    code.movq_xmm_gpr(XMM1, RAX);
+                } else {
+                    code.cvtsi2sd(XMM1, RAX);
+                }
+                code.addsd(XMM0, XMM1);
+                code.inc(RCX);
+                code.jmp(&loop_label);
+                code.label(&done_label);
+                if shape == Kind::Float {
+                    code.movq_gpr_xmm(RAX, XMM0);
+                } else {
+                    self.float_to_int(code);
+                }
             }
             // `push`/`append`: the runtime's indexed write with the index set
             // to the current length is exactly "append at the end", and it

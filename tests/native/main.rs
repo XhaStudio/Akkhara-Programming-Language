@@ -62,6 +62,53 @@ const CASES: &[Case] = &[
         name: "builtins",
         stdout: &["7", "2.5", "1", "3", "2.5", "-2.5", "4", "1.5"],
     },
+    // Heterogeneous collections: a mixed literal printed, counted and
+    // compared; a store and a `push` that widen the element shape; a nested
+    // widening; a set with a run-time member deduplicated at run time; and a
+    // dict with a run-time key (first position, last value).
+    Case {
+        name: "dynamic_collections",
+        stdout: &[
+            "[1, \"two\", 3.5, True]",
+            "4",
+            "True",
+            "False",
+            "[\"a\", 2]",
+            "[\"a\", 2, 7.5]",
+            "[\"a\", 2, 7.5, False]",
+            "[[\"nine\"], [2]]",
+            "[[1], [\"a\"], []]",
+            "{2, 1, 3}",
+            "3",
+            "{\"a\": 3, \"b\": 2}",
+            "2",
+            "3",
+        ],
+    },
+    // `values()` and `entries()` beside `keys()`: a view is an ordinary list
+    // (printed, counted, indexed, iterated) and an entry is a two-element
+    // tuple whose value keeps its own tag; a dict of strings stays readable
+    // inside an entry, and a dict of lists keeps its nested shape.
+    Case {
+        name: "dict_views",
+        stdout: &[
+            "[1, 2]",
+            "[(\"a\", 1), (\"b\", 2)]",
+            "[\"a\", \"b\"]",
+            "2",
+            "2",
+            "2",
+            "1",
+            "2",
+            "(\"a\", 1)",
+            "(\"b\", 2)",
+            // `entries(s)[0][1]` is `p`; `values(s)[1]` is the second value `q`.
+            "p",
+            "q",
+            "2",
+            "[3]",
+        ],
+    },
     // Collection literals: a list indexed and printed, `len`, a dict looked
     // up by key, set deduplication, a tuple, a nested list and a float list.
     // The interpreter is the reference for every line.
@@ -413,6 +460,28 @@ const CASES: &[Case] = &[
             "caught E038",
             "finally",
             "caught E039",
+        ],
+    },
+    // `sum()` over a list, a tuple, a set and a parameter (int and float
+    // elements), with the interpreter's f64 accumulation and saturating int
+    // answer, and `keys()` over a dict: printed, indexed and iterated.
+    Case {
+        name: "reducers",
+        stdout: &[
+            "6",
+            "3.75",
+            "9",
+            "15",
+            "60",
+            "9223372036854775807",
+            "10",
+            "0.75",
+            "[\"a\", \"b\"]",
+            "2",
+            "b",
+            "a",
+            "b",
+            "[\"a\", \"b\"]",
         ],
     },
 ];
@@ -825,26 +894,19 @@ struct Refused {
 }
 
 const REFUSED: &[Refused] = &[
-    // A collection with two element kinds needs the dynamic value word; this
-    // slice writes one tag per collection and refuses a mixed literal.
+    // A heterogeneous collection holds its elements with a tag each, but an
+    // element read out of one has no static kind: the read is refused rather
+    // than given whatever kind the analyzer saw first.
     Refused {
-        name: "list_mixed",
-        mentions: "list",
-        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nxs ကို ဖော်ပြပါ။\n",
+        name: "dynamic_read",
+        mentions: "element whose kind varies",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nxs[0] ကို ဖော်ပြပါ။\n",
     },
-    // A set drops duplicates, so its members must be known well enough to
-    // compare; a member computed at run time is still refused.
+    // Iterating one needs the same static element kind a read does.
     Refused {
-        name: "set_runtime",
-        mentions: "set built from run-time",
-        source: "n သည် 1 ဖြစ်၏။\ns မှာ {n, 2} ဖြစ်၏။\ns ကို ဖော်ပြပါ။\n",
-    },
-    // A dict key has to be a literal so that duplicate keys keep the
-    // interpreter's first position / last value rule.
-    Refused {
-        name: "dict_key",
-        mentions: "dict",
-        source: "k သည် \"a\" ဖြစ်၏။\nd မှာ { k သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nd ကို ဖော်ပြပါ။\n",
+        name: "dynamic_iteration",
+        mentions: "more than one kind",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nfor x in xs {\n    print(x);\n}\n",
     },
     // A string known at compile time is lowered to a list of grapheme
     // clusters, but one that arrives at run time cannot be: the native
@@ -865,34 +927,12 @@ const REFUSED: &[Refused] = &[
         mentions: "an index into a string",
         source: "fn second(s) {\n    return s[1];\n}\nprint(second(\"abc\"));\n",
     },
-    // A write must match the collection's element kind: the interpreter
-    // allows a heterogeneous list, the native layout writes one element kind.
-    // A nested element has a shape too: a list of int lists cannot take a
-    // list of strings, because the inner reads are typed statically.
+    // A builtin that answers one element (or orders them all) needs one static
+    // element kind, so a heterogeneous collection is refused by name.
     Refused {
-        name: "nested_store_kind",
-        mentions: "a store of a list of string",
-        source: "grid မှာ [[1], [2]] ဖြစ်၏။\ngrid[0] က [\"nine\"]။\n",
-    },
-    // An empty inner list has no element kind, so reading through it again is
-    // not typed; the interpreter would answer at run time instead.
-    Refused {
-        name: "nested_unknown_inner",
-        mentions: "could not be worked out",
-        source: "xs မှာ [[]] ဖြစ်၏။\nxs[0] က [7]။\nprint(xs[0][0]);\n",
-    },
-    Refused {
-        name: "mixed_store",
-        mentions: "where a int is needed",
-        source: "xs မှာ [1, 2] ဖြစ်၏။\nxs[0] က \"a\"။\nxs ကို ဖော်ပြပါ။\n",
-    },
-    // `push` joins the element shape the list already has, so a value of
-    // another kind is refused the same way an element write of it is: the
-    // interpreter's heterogeneous list needs the dynamic value word.
-    Refused {
-        name: "push_mixed",
-        mentions: "where a int is needed",
-        source: "xs မှာ [1, 2] ဖြစ်၏။\npush(xs, \"a\");\nxs ကို ဖော်ပြပါ။\n",
+        name: "dynamic_pop",
+        mentions: "more than one kind",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(pop(xs));\n",
     },
     // One function's parameter sees one element shape: a caller passing a
     // list of strings and another passing a list of ints cannot both describe
@@ -928,6 +968,7 @@ const REFUSED: &[Refused] = &[
         mentions: "E177",
         source: "ပုံသေ Point သည်\n    fn sum() {\n        return 1;\n    }\nပြီး။\np သည် Point() ဖြစ်၏။\np ကို ဖော်ပြပါ။\n",
     },
+    // `sum` totals numbers only, and `keys` reads a dict only: the interpreter
 ];
 
 /// A builtin called with the wrong kind or number of arguments is a broken
@@ -981,6 +1022,30 @@ const MISUSE: &[Misuse] = &[
         name: "sort_extra",
         mentions: "sort",
         source: "xs မှာ [2, 1] ဖြစ်၏။\nprint(sort(xs, 1));\n",
+    },
+    // `sum` totals numbers and `keys` reads a dict: anything else is the
+    // interpreter's `E110`, and the build reports the same code and wording.
+    Misuse {
+        name: "sum_of_strings",
+        mentions: "sum",
+        source: "xs မှာ [\"a\", \"b\"] ဖြစ်၏။\nprint(sum(xs));\n",
+    },
+    Misuse {
+        name: "keys_of_list",
+        mentions: "keys",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(keys(xs));\n",
+    },
+    // `values` and `entries` read a dict too: anything else is the
+    // interpreter's `E110`, and an extra argument is its one-argument error.
+    Misuse {
+        name: "values_of_list",
+        mentions: "values",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(values(xs));\n",
+    },
+    Misuse {
+        name: "entries_arity",
+        mentions: "entries",
+        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(entries(d, d));\n",
     },
 ];
 
@@ -1348,6 +1413,83 @@ fn the_collection_arena_reports_exhaustion_honestly() {
     assert!(
         failures.is_empty(),
         "{} arena-exhaustion check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// A set or dict literal with a run-time member or key used to be built by
+/// appending one member at a time, and each append allocated a fresh copy of
+/// the whole collection. Rebuilt in a loop, a small literal could therefore
+/// exhaust the fixed arena even though the collection it makes is tiny. Both
+/// now allocate their descriptor once and fill it in place, so the loops below
+/// stay inside the 256 KiB arena and finish normally. The counts are chosen so
+/// the old behaviour would have exhausted it: 3500 `{i, 0}` literals cost 96
+/// bytes each that way (336000 > 262144), and 2000 `{k: i, "a": 1}` literals
+/// cost 144 each (288000 > 262144).
+#[test]
+fn a_runtime_member_literal_allocates_once_per_evaluation() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let cases = [
+        (
+            "arena_set_literal",
+            "for i in 3500 {\n    s မှာ {i, 0} ဖြစ်၏။\n    if (i == 3499) {\n        print(len(s));\n        print(s);\n    }\n}\n",
+            "2\n{3499, 0}\n",
+        ),
+        (
+            "arena_dict_literal",
+            "k သည် \"k\" ဖြစ်၏။\nfor i in 2000 {\n    d မှာ { k သည် i ဖြစ်၏။ \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\n    if (i == 1999) {\n        print(len(d));\n        print(d);\n    }\n}\n",
+            "2\n{\"k\": 1999, \"a\": 1}\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, program, want) in cases {
+        for optimize in [true, false] {
+            let label = if optimize { "opt" } else { "no-opt" };
+            let dir = work_dir(name, label);
+            let source = dir.join(format!("{name}.akk"));
+            fs::write(&source, program).expect("the source");
+
+            let reference = interpret(&source);
+            let reference_stdout = program_output(text(&reference.stdout));
+            if !reference.status.success() || reference_stdout != want {
+                failures.push(format!(
+                    "{name} ({label}): the interpreter should print {want:?} and exit 0, got {:?} / {:?}",
+                    reference.status.code(),
+                    text(&reference.stderr).trim()
+                ));
+                continue;
+            }
+
+            let built = build(&source, optimize);
+            if !built.status.success() {
+                failures.push(format!(
+                    "{name} ({label}): `akk build` failed: {}",
+                    text(&built.stderr).trim()
+                ));
+                continue;
+            }
+            let native = execute(&executable_for(&source));
+            let native_stdout = program_output(text(&native.stdout));
+            if native.status.code() != Some(0) || !text(&native.stderr).is_empty() {
+                failures.push(format!(
+                    "{name} ({label}): the literal exhausted the arena (exit {:?}, stderr {:?})",
+                    native.status.code(),
+                    text(&native.stderr).trim()
+                ));
+            }
+            if native_stdout != want {
+                failures.push(format!(
+                    "{name} ({label}): stdout was {native_stdout:?}, expected {want:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} runtime-literal allocation check(s) failed:\n\n{}",
         failures.len(),
         failures.join("\n\n")
     );

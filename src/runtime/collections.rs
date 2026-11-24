@@ -79,6 +79,8 @@ pub(crate) fn emit(
     emit_index(code);
     emit_index_dict(code);
     emit_items_dict(code);
+    emit_values_dict(code);
+    emit_entries_dict(code);
     emit_items_range(code);
     emit_store(code);
     emit_reverse(code);
@@ -357,6 +359,134 @@ fn emit_items_dict(code: &mut Code) {
     code.ret();
 }
 
+/// `rt_values_dict`: `rax` is a dict descriptor and the result is a fresh list
+/// holding its values, in insertion order, each with the tag stored beside it.
+/// Every value word is copied as it sits, so a dict of strings, ints or nested
+/// collections all leave the same list shape the analyzer settled.
+fn emit_values_dict(code: &mut Code) {
+    code.label("rt_values_dict");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(48);
+    code.store(-8, RAX);
+    code.load_ptr_disp32(RDX, RAX, 8);
+    code.store(-16, RDX);
+    // `16 + 16 * len`: the list header plus one tag/word pair per value.
+    code.mov_rr(RDI, RDX);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-32, RAX);
+    code.mov_imm32(RCX, TAG_LIST as i32);
+    code.store_ptr_disp32(RAX, 0, RCX);
+    code.load(RCX, -16);
+    code.store_ptr_disp32(RAX, 8, RCX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-40, RCX);
+    code.label("values_dict_loop");
+    code.load(RCX, -40);
+    code.load(RDX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "values_dict_done");
+    // Pair `i` sits at `dict + 16 + 32 * i`; its value is the second half.
+    code.load(RAX, -8);
+    code.load(RCX, -40);
+    code.shl_imm(RCX, 5);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load(RAX, -32);
+    code.load(RDX, -40);
+    code.shl_imm(RDX, 4);
+    code.add_imm8(RDX, 16);
+    code.add_rr(RDX, RAX);
+    code.load_ptr_disp32(R8, RCX, 16);
+    code.store_ptr_disp32(RDX, 0, R8);
+    code.load_ptr_disp32(R8, RCX, 24);
+    code.store_ptr_disp32(RDX, 8, R8);
+    code.load(RCX, -40);
+    code.inc(RCX);
+    code.store(-40, RCX);
+    code.jmp("values_dict_loop");
+    code.label("values_dict_done");
+    code.load(RAX, -32);
+    code.leave();
+    code.ret();
+}
+
+/// `rt_entries_dict`: `rax` is a dict descriptor and the result is a fresh list
+/// holding one two-element tuple per pair, in insertion order. The key tuple
+/// element is always a string; the value keeps the tag stored in the pair. One
+/// descriptor is allocated for the list and one per tuple.
+fn emit_entries_dict(code: &mut Code) {
+    code.label("rt_entries_dict");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(64);
+    code.store(-8, RAX);
+    code.load_ptr_disp32(RDX, RAX, 8);
+    code.store(-16, RDX);
+    // `16 + 16 * len`: the list header plus one element per entry tuple.
+    code.mov_rr(RDI, RDX);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-32, RAX);
+    code.mov_imm32(RCX, TAG_LIST as i32);
+    code.store_ptr_disp32(RAX, 0, RCX);
+    code.load(RCX, -16);
+    code.store_ptr_disp32(RAX, 8, RCX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-40, RCX);
+    code.label("entries_dict_loop");
+    code.load(RCX, -40);
+    code.load(RDX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "entries_dict_done");
+    // A two-element tuple: `{ TAG_TUPLE, 2, [tag, word] * 2 }`.
+    code.mov_imm32(RDI, 48);
+    code.call("rt_alloc");
+    code.store(-56, RAX);
+    code.mov_imm32(RCX, TAG_TUPLE as i32);
+    code.store_ptr_disp32(RAX, 0, RCX);
+    code.mov_imm32(RCX, 2);
+    code.store_ptr_disp32(RAX, 8, RCX);
+    // Pair `i` sits at `dict + 16 + 32 * i`.
+    code.load(R10, -8);
+    code.load(RCX, -40);
+    code.shl_imm(RCX, 5);
+    code.add_imm8(RCX, 16);
+    code.add_rr(R10, RCX);
+    // The tuple's first element is the key, always a string.
+    code.load(R8, -56);
+    code.mov_imm32(RCX, TAG_STR as i32);
+    code.store_ptr_disp32(R8, 16, RCX);
+    code.load_ptr_disp32(RCX, R10, 8);
+    code.store_ptr_disp32(R8, 24, RCX);
+    // The second is the value word with the tag the pair stores.
+    code.load_ptr_disp32(RCX, R10, 16);
+    code.store_ptr_disp32(R8, 32, RCX);
+    code.load_ptr_disp32(RCX, R10, 24);
+    code.store_ptr_disp32(R8, 40, RCX);
+    // The list element holds the tuple descriptor.
+    code.load(RAX, -32);
+    code.load(RDX, -40);
+    code.shl_imm(RDX, 4);
+    code.add_imm8(RDX, 16);
+    code.add_rr(RDX, RAX);
+    code.mov_imm32(RCX, TAG_TUPLE as i32);
+    code.store_ptr_disp32(RDX, 0, RCX);
+    code.load(RCX, -56);
+    code.store_ptr_disp32(RDX, 8, RCX);
+    code.load(RCX, -40);
+    code.inc(RCX);
+    code.store(-40, RCX);
+    code.jmp("entries_dict_loop");
+    code.label("entries_dict_done");
+    code.load(RAX, -32);
+    code.leave();
+    code.ret();
+}
+
 /// The indexed-write helpers. Every one of them returns a **new** descriptor
 /// and leaves the old one untouched: the interpreter's collections have value
 /// semantics (`ys = xs` gives `ys` its own contents), so the generated code
@@ -369,6 +499,137 @@ fn emit_store(code: &mut Code) {
     emit_store_seq(code);
     emit_store_dict(code);
     emit_store_set(code);
+    emit_fill_set(code);
+    emit_fill_dict(code);
+}
+
+/// `rt_fill_set`: `rax` is a freshly allocated set descriptor of capacity `n`,
+/// `rdx` the member word and `rdi` its tag. The member is appended unless the
+/// set already holds it, which is the interpreter's insertion-ordered
+/// deduplication. Unlike [`emit_store_set`] this never allocates: the
+/// descriptor is filled in place, so one literal evaluation is one allocation.
+fn emit_fill_set(code: &mut Code) {
+    code.label("rt_fill_set");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(48);
+    code.store(-8, RAX);
+    code.store(-16, RDX);
+    code.store(-24, RDI);
+    code.load_ptr_disp32(R9, RAX, 8);
+    code.store(-32, R9);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-40, RCX);
+    code.label("fill_set_find");
+    code.load(RCX, -40);
+    code.load(RDX, -32);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "fill_set_append");
+    code.load(RAX, -8);
+    code.load(RCX, -40);
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load_ptr_disp32(RDI, RCX, 0);
+    code.load_ptr_disp32(RAX, RCX, 8);
+    code.load(RDX, -16);
+    code.call("rt_value_eq");
+    code.test_rr(RAX, RAX);
+    code.jcc(CC_NE, "fill_set_done");
+    code.load(RCX, -40);
+    code.inc(RCX);
+    code.store(-40, RCX);
+    code.jmp("fill_set_find");
+    code.label("fill_set_append");
+    // The new member goes just past the end: `base + 16 + 16 * len`.
+    code.load(RAX, -8);
+    code.load(RCX, -32);
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load(RDX, -16);
+    code.store_ptr_disp32(RCX, 8, RDX);
+    code.load(RDX, -24);
+    code.store_ptr_disp32(RCX, 0, RDX);
+    code.load(RDX, -32);
+    code.inc(RDX);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.label("fill_set_done");
+    code.load(RAX, -8);
+    code.leave();
+    code.ret();
+}
+
+/// `rt_fill_dict`: `rax` is a freshly allocated dict descriptor of capacity
+/// `n`, `rcx` the key string, `rdx` the value word and `rdi` its tag. A key
+/// that is already present keeps its position and takes the new value; any
+/// other key is appended. It never allocates, so the literal costs one
+/// allocation however many pairs it has.
+fn emit_fill_dict(code: &mut Code) {
+    code.label("rt_fill_dict");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(64);
+    code.store(-8, RAX);
+    code.store(-16, RCX);
+    code.store(-24, RDX);
+    code.store(-32, RDI);
+    code.load_ptr_disp32(R9, RAX, 8);
+    code.store(-40, R9);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-48, RCX);
+    code.label("fill_dict_find");
+    code.load(RCX, -48);
+    code.load(RDX, -40);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "fill_dict_append");
+    // The key word of pair `i` sits at `base + 16 + 32 * i + 8`.
+    code.load(RAX, -8);
+    code.load(RCX, -48);
+    code.shl_imm(RCX, 5);
+    code.add_imm8(RCX, 24);
+    code.add_rr(RCX, RAX);
+    code.load_ptr(RAX, RCX);
+    code.load(RCX, -16);
+    code.call("rt_cmp_str");
+    code.test_rr(RAX, RAX);
+    code.jcc(CC_E, "fill_dict_update");
+    code.load(RCX, -48);
+    code.inc(RCX);
+    code.store(-48, RCX);
+    code.jmp("fill_dict_find");
+    code.label("fill_dict_update");
+    code.load(RAX, -8);
+    code.load(RCX, -48);
+    code.shl_imm(RCX, 5);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load(RDX, -24);
+    code.store_ptr_disp32(RCX, 24, RDX);
+    code.load(RDX, -32);
+    code.store_ptr_disp32(RCX, 16, RDX);
+    code.jmp("fill_dict_done");
+    code.label("fill_dict_append");
+    code.load(RAX, -8);
+    code.load(RCX, -40);
+    code.shl_imm(RCX, 5);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load(RDX, -16);
+    code.store_ptr_disp32(RCX, 8, RDX);
+    code.mov_imm32(R8, TAG_STR as i32);
+    code.store_ptr_disp32(RCX, 0, R8);
+    code.load(RDX, -24);
+    code.store_ptr_disp32(RCX, 24, RDX);
+    code.load(RDX, -32);
+    code.store_ptr_disp32(RCX, 16, RDX);
+    code.load(RDX, -40);
+    code.inc(RDX);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.label("fill_dict_done");
+    code.load(RAX, -8);
+    code.leave();
+    code.ret();
 }
 
 /// `rt_value_eq`: `rdi` is the element tag, `rax` and `rdx` are the two words;

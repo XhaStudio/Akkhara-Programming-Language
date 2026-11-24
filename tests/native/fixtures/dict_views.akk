@@ -1,0 +1,29 @@
+# dict_views.akk -- `values()` and `entries()` over a dict, beside `keys()`.
+# A dict is one descriptor of `[key_tag, key, value_tag, value]` pairs, so the
+# views copy each stored tag with its word: a view is an ordinary list, and an
+# entry is a two-element tuple whose value keeps its own kind.
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+print(values(d));
+print(entries(d));
+print(keys(d));
+print(len(values(d)));
+print(len(entries(d)));
+
+# A view is a list, so it indexes and iterates like any other.
+print(values(d)[1]);
+v သည် values(d) ထဲမှ တစ်ခုစီ
+    print(v);
+ပြီး။
+e သည် entries(d) ထဲမှ တစ်ခုစီ
+    e ကို ဖော်ပြပါ။
+ပြီး။
+
+# A string-valued dict leaves every entry element a string, so an entry's
+# position is readable; a list-valued dict keeps its nested shape readable too.
+s မှာ { "x" သည် "p" ဖြစ်၏။ "y" သည် "q" ဖြစ်၏။ } ဖြစ်၏။
+es မှာ entries(s) ဖြစ်၏။
+print(es[0][1]);
+print(values(s)[1]);
+n မှာ { "a" သည် [1, 2] ဖြစ်၏။ "b" သည် [3] ဖြစ်၏။ } ဖြစ်၏။
+print(values(n)[0][1]);
+print(values(n)[1]);

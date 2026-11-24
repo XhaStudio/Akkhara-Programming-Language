@@ -341,7 +341,12 @@ error.
   `for i in 5` walks 0 to 4, a float bound is rounded up, and zero or a
   negative bound runs no iterations), and writing through an index (`xs[i] = v`: replace
   at a position, append just past the end, update or add a dict key, and the
-  interpreter's set duplicate rule). `push`/`append` appends one value to the
+  interpreter's set duplicate rule). `sum` totals a list, tuple or set of
+  numbers (a double accumulation, answered as an int unless a float element
+  appeared), and `keys` answers a dict's keys in insertion order as a list;
+  `values` and `entries` answer the same list of a dict's values or of its
+  `(key, value)` tuples, built from the tags the dict already stores.
+  `push`/`append` appends one value to the
   list a variable names and answers the new length, and `reverse` answers the
   elements in the opposite order: a list variable is reversed in place, while a
   tuple or a list literal is reversed as a value (text reverse needs the
@@ -361,6 +366,14 @@ error.
   a call too: a list, tuple, set or dict parameter is typed from what its
   call sites pass and from what its body does with it, and a returned
   collection's shape reaches the caller, so indexing a call's result works.
+  A collection whose elements are not all one kind (`[1, "two", 3.5, True]`)
+  is compiled: every element keeps its own tag, so printing, `len`, equality,
+  copying, an element store and `push` all work, and a store of another kind
+  widens the collection instead of being refused (a list of int lists takes a
+  list of strings). A set built from a run-time member and a dict built from a
+  run-time key are deduplicated by the runtime, in the interpreter's order.
+  A *read* of such an element has no static kind, so indexing or iterating the
+  collection, and `pop`/`remove`/`sort`/`sum` over it, are refused with `E177`.
   One function's parameter has one element shape; two call sites that pass
   different shapes are refused with `E177`. Ordering two
   collections is the interpreter's `E042`. A string whose text is known at
@@ -370,9 +383,9 @@ error.
   clusters, so an out-of-range read is still the interpreter's `E049`.
   `+` joins two strings (the interpreter's only string arithmetic): a
   constant pair is folded, and a run-time join copies both into a new string
-  in the runtime arena. Writing into a string, mixing element kinds and indexing through an inner
-  collection that started empty (its element kind is unknown) are still
-  refused with `E177`, and so are `len`, indexing and iteration over a string
+  in the runtime arena. Writing into a string, and reading or iterating an
+  element whose kind varies, are still refused with `E177`, and so are `len`,
+  indexing and iteration over a string
   that only arrives at run time (a parameter, a call result), because the
   native runtime carries no Unicode tables; a nested write such as
   `grid[0][1] = v` stays a parse error in the language itself. Collections

@@ -750,3 +750,119 @@ interpreter's arithmetic codes behave like the raises they always were:
   `rt_panic_zero` and exits with `E038`, because `StoreVar` carries no line and
   has no guard in front of it; the unused `rt_panic_div_int`/
   `rt_panic_div_float` routines were removed.
+
+### Step 14, `sum` and `keys` (landed)
+
+Two reducers the analyzer can type without guessing now compile:
+
+- `sum(xs)` walks the descriptor in generated code: `r10` is the base, `r11`
+  the length, `rcx` the index, `xmm0` the running total, and each element word
+  at `base + 24 + 16 * i` is promoted (`cvtsi2sd` for an int list, `movq` for a
+  float one) and added. That is the interpreter's `f64` accumulation, so the
+  result of an int list is the same after its saturating `as i64` cast --
+  `f2i_*` labels reuse the conversion `floor`/`ceil`/`round` already needed
+  (NaN is 0, at or past 2^63 is `i64::MAX`, below -2^63 is `i64::MIN`). The
+  element shape the analyzer tracks chooses int or float; a collection of
+  another kind, or one whose shape never settled, is refused with `E177`
+  instead of compiling an `E110` the interpreter would raise at run time.
+- `keys(d)` is `rt_items_dict`, the list a `for` loop over a dict already
+  builds, so it adds no runtime code at all. The analyzer types the result as
+  `list` of `str`, which is what makes `print`, `len`, indexing and iteration
+  over it work; a non-dict argument is refused with `E177`.
+- Measured evidence: `tests/native/fixtures/reducers.akk` compares both
+  optimiser modes with the interpreter for an int list (`6`), a float list
+  (`3.75`), a tuple (`9`), a set (`15`), a literal (`60`), an int list that
+  saturates to `9223372036854775807`, two parameter call sites (int and float),
+  and `keys` printed (`["a", "b"]`), measured with `len`, indexed (`b`) and
+  walked by `for`. `sum` of a string list and `keys` of a list are pinned as
+  refusals in `tests/native/main.rs`.
+- Parity is unchanged at 15 match / 41 refuse: none of the refused corpus
+  fixtures waits on these two builtins.
+
+### Step 15, dynamic element shapes (landed)
+
+Heterogeneous collections compile, without moving the value word yet:
+
+- The runtime descriptor has always carried a tag beside every element word
+  (`{ kind, len, [tag, word] * len }`), and the literal builder and the
+  indexed write have always written the *value's own* tag. The one thing that
+  refused a mixed collection was the analyzer's rule that a sequence literal's
+  elements share one shape, so this slice is mostly that rule.
+- `Kind` grew `Dynamic`, which is only ever a member of an element shape, never
+  the kind of a value: it means "this collection's elements are not all one
+  kind". `widen_shape` merges two shapes into one that describes both, marking
+  the first disagreement `Dynamic` and dropping anything deeper, which is what
+  the runtime can still say about the elements: `[Int]` beside `[Str]` is
+  `[Dynamic]`, and `[List, Int]` beside `[List, Str]` is `[List, Dynamic]`. A
+  shape that is a prefix of the other (`[]` beside `[1]`) keeps the longer one,
+  because a collection that started empty has simply not settled yet.
+- A sequence literal with mixed element kinds types as `Dynamic`. A store
+  (`xs[0] = v`), `push`/`append` and `insert` widen the target's element shape
+  the same way instead of refusing, so `mixed_store`, `push_mixed`,
+  `nested_store_kind` and `nested_unknown_inner` all compile now; so does a
+  binding re-assigned a collection of another element shape.
+- Two literal paths needed runtime work, because their duplicates are only
+  knowable when the program runs: a set member that is not a literal, and a
+  dict key that is not a string literal. The obvious route -- appending each
+  member through the copying indexed write (`rt_store_set`/`rt_store_dict`,
+  one new descriptor and one full copy of the collection so far per member) --
+  allocated once per member, so a literal rebuilt in a loop grew the arena in
+  proportion to the collection's size on every iteration and could exhaust it
+  even when the collection itself stayed tiny. Instead the code generator
+  allocates the literal's final capacity once (`16 + 16 * n`, or
+  `16 + 32 * n` for a dict) and the new `rt_fill_set`/`rt_fill_dict` helpers
+  fill that descriptor in place: they deduplicate a set member, and give a
+  repeated dict key its first position and last value. The rules are the
+  interpreter's, unchanged; only the allocation count changed, from one per
+  member to one per literal evaluation. A literal whose members are all
+  constants keeps the compile-time deduplication and the direct descriptor
+  build.
+- An element read out of a `Dynamic` collection has no static kind, so it is
+  refused with `E177` by name (indexing, iteration, and `pop`/`remove`/`sort`/
+  `sum`, which answer or consume one element). This is the honest half of the
+  step: the one-word NaN-boxed value from the top of this ADR is what would let
+  such a read carry its tag in a temporary and dispatch at each use, and that
+  is the next slice. Until then no code is emitted that would print or compare
+  an element under a guessed kind.
+- `tests/native/fixtures/dynamic_collections.akk` compares both optimiser modes
+  with the interpreter for a mixed literal (print/`len`/equality), a store and
+  a `push` that widen, a nested widening, a set with a run-time member and   a dict with a run-time key; the `dynamic_read`, `dynamic_iteration` and
+  `dynamic_pop` cases in `tests/native/main.rs` pin the refusals, and
+  `a_runtime_member_literal_allocates_once_per_evaluation` rebuilds both literal
+  forms thousands of times so that a regression to per-member allocation would
+  exhaust the arena and fail. Parity stays 15 match / 41 refuse: no corpus
+  fixture is heterogeneous.
+
+### Step 16, dict views (landed)
+
+`values(d)` and `entries(d)` compile beside `keys(d)`; the value word stays as
+it is, because the dict descriptor already carries a tag beside every key and
+every value:
+
+- `rt_values_dict` copies each pair's value word with its stored tag into a
+  fresh list, and `rt_entries_dict` builds one two-element tuple per pair (the
+  key is always a string, the value keeps the pair's tag) and puts those in a
+  list. Both walk the pairs in insertion order, which is the order the
+  descriptor stores and the interpreter's `IndexMap` iteration yields. One
+  allocation pays for the list and, for `entries`, one more per tuple.
+- The result types as a list: `values` takes the dict's value shape as its
+  element shape, so a dict of lists stays readable at the second level, and
+  `entries` takes `[Tuple, ...]` where the tuple contents are the widening of
+  `[Str]` (the key) with the value shape. That widening is the same rule a
+  written tuple of those kinds gets, so a string-valued dict leaves an entry
+  position readable while a key beside a value of another kind settles the
+  entry as `Dynamic`, whose inner read is refused like any dynamic read. No
+  new refusal wording is needed beyond the existing dynamic-read message.
+- A non-dict argument and a wrong arity reproduce the interpreter's `E110`
+  (the same sentence `keys` already used), without the line clause compiled
+  code cannot carry. `tests/native/fixtures/dict_views.akk` compares both
+  optimiser modes with the interpreter for both views printed, counted,
+  indexed and iterated, a string-valued dict's entry position and a
+  list-valued dict's nested shape; the `values_of_list` and `entries_arity`
+  cases pin the `E110` refusals. Parity is unchanged: no corpus fixture calls
+  the two builtins.
+
+A dynamic element *read* is still the next slice: the tag has to travel with
+it in a temporary (boxed or NaN-boxed), and every use that needs a static kind
+has to dispatch on that tag or refuse by name. `values`/`entries` do not need
+it because they copy tags the descriptor already holds.

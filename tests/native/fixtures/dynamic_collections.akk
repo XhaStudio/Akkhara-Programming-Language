@@ -1,0 +1,43 @@
+# dynamic_collections.akk -- collections whose elements are not all one kind.
+# The runtime stores a tag beside every element word, so a mixed literal is one
+# ordinary descriptor: printing, len, equality, element stores and `push` all
+# keep working. A *read* of such an element has no static kind and is refused.
+mixed မှာ [1, "two", 3.5, True] ဖြစ်၏။
+mixed ကို ဖော်ပြပါ။
+print(len(mixed));
+same မှာ [1, "two", 3.5, True] ဖြစ်၏။
+print(mixed == same);
+print(mixed == [1, "two", 3.5, False]);
+
+# A store of another kind widens the element shape instead of being refused.
+xs မှာ [1, 2] ဖြစ်၏။
+xs[0] က "a"။
+xs ကို ဖော်ပြပါ။
+xs[2] က 7.5။
+xs ကို ဖော်ပြပါ။
+
+# `push` joins the collection the same way.
+push(xs, False);
+xs ကို ဖော်ပြပါ။
+
+# Nested shapes widen too: a list of int lists takes a list of strings.
+grid မှာ [[1], [2]] ဖြစ်၏။
+grid[0] က ["nine"]။
+grid ကို ဖော်ပြပါ။
+nested မှာ [[1], ["a"], []] ဖြစ်၏။
+nested ကို ဖော်ပြပါ။
+
+# A set with a run-time member is deduplicated by the runtime, in insertion
+# order, exactly as the interpreter's set is.
+n သည် 2 ဖြစ်၏။
+s မှာ {n, 1, 2, 3} ဖြစ်၏။
+s ကို ဖော်ပြပါ။
+print(len(s));
+
+# A dict with a run-time key keeps the position a key first had and the value
+# it was last given.
+k သည် "a" ဖြစ်၏။
+d မှာ { k သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ k သည် 3 ဖြစ်၏။ } ဖြစ်၏။
+d ကို ဖော်ပြပါ။
+print(len(d));
+print(d["a"]);

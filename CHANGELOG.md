@@ -1,6 +1,84 @@
 # Changelog
 
+## 3.1.1-alpha.3
+
+### Added
+
+- `values(d)` and `entries(d)` compile beside `keys(d)`: the runtime copies the
+  dict's stored tags into a fresh list, so both views print, count, index,
+  compare and iterate as ordinary lists, and an entry is a `(key, value)`
+  tuple whose value keeps its own tag. `tests/native/fixtures/dict_views.akk`
+  covers both optimiser modes, and `values_of_list`/`entries_arity` pin the
+  interpreter's `E110`.
+- Heterogeneous collections (`[1, "two", 3.5, True]`) compile: the descriptor
+  already stores a tag beside every element word, so printing, `len`,
+  equality, copying, an element store and `push`/`insert` all read each
+  element's own tag. The analyzer's element shape gained `Dynamic` for exactly
+  this case; an element *read* has no static kind and is still refused with
+  `E177` by name. `tests/native/fixtures/dynamic_collections.akk` pins the
+  supported forms and `dynamic_read`/`dynamic_iteration`/`dynamic_pop` the
+  refusals.
+- A set with a run-time member or a dict with a run-time key allocates its
+  descriptor once and fills it in place through the new `rt_fill_set` and
+  `rt_fill_dict`, keeping the interpreter's insertion-ordered deduplication
+  and a key's first position / last value. A literal rebuilt in a loop no
+  longer allocates (and copies) once per member, which is what could exhaust
+  the fixed arena for a small literal;
+  `a_runtime_member_literal_allocates_once_per_evaluation` pins it.
+
+### Changed
+
+- Version bumped to `3.1.1-alpha.3`.
+- `docs/COLLECTIONS.md` now says mixed-kind element stores are supported (only
+  an element read is refused), as Step 15 landed.
+
 ## 3.1.0-alpha.3
+
+### Added (heterogeneous collections)
+
+- A collection whose elements are not all one kind now compiles. The runtime
+  descriptor already carried a tag beside every element word, so a literal
+  such as `[1, "two", 3.5, True]` is one ordinary descriptor: printing, `len`,
+  equality, copying and iteration-free use all read each element's own tag, and
+  the output is the interpreter's, byte for byte. The analyzer's element shape
+  gained a `Dynamic` marker for exactly this case.
+- An element write and a `push`/`insert` of another kind widen the element
+  shape to `Dynamic` instead of being refused, at any nesting depth: a list of
+  int lists takes a list of strings (`grid[0] = ["nine"]`), and an inner list
+  that started empty settles from the value written into it.
+- A set with a run-time member (`{n, 2}`) and a dict with a run-time key are
+  now built into one pre-sized descriptor: the code generator allocates room
+  for every written member once, and `rt_fill_set`/`rt_fill_dict` fill it in
+  place with the interpreter's insertion-ordered deduplication and a key's
+  first position / last value. A literal rebuilt inside a loop therefore costs
+  one allocation per evaluation instead of one per member (each of which also
+  copied the whole collection so far), which is what used to exhaust the fixed
+  arena for a small literal in a long loop.
+  `a_runtime_member_literal_allocates_once_per_evaluation` in
+  `tests/native/main.rs` loops over both literal forms enough that the old
+  per-member allocation would have exhausted the 256 KiB arena.
+- A read of a `Dynamic` element (indexing or iterating the collection), and a
+  builtin that answers one element of it (`pop`, `remove`, `sort`, `sum`), are
+  refused with `E177` by name: the value's kind is only known at run time, and
+  compiled code must not guess it. `tests/native/fixtures/dynamic_collections.akk`
+  pins the supported forms in both optimiser modes, and `dynamic_read`,
+  `dynamic_iteration` and `dynamic_pop` pin the refusals.
+
+### Added (dict views)
+
+- `values(d)` and `entries(d)` now compile beside `keys(d)`. A dict descriptor
+  already stores each value's own tag, so the runtime copies the pairs into an
+  ordinary list: `values` copies every value word with its tag, and `entries`
+  builds one `(key, value)` tuple per pair, in insertion order. The result
+  types as a list, so it prints, counts, indexes, compares and iterates with
+  the rest of the collection slice; a dict of strings keeps every entry
+  element a string (so an entry position is readable), a dict of lists keeps
+  its nested shape readable, and a tuple of mixed kinds settles as `Dynamic`
+  exactly as a written tuple of the same kinds would. A non-dict argument and
+  a wrong arity reproduce the interpreter's `E110`, without the line number
+  compiled code cannot carry. `tests/native/fixtures/dict_views.akk` pins the
+  supported forms in both optimiser modes, and `values_of_list` and
+  `entries_arity` pin the `E110` refusals.
 
 ### Added
 
@@ -31,6 +109,28 @@
   wrong arity or a value that is neither a list nor a tuple keeps the
   interpreter's `E110`. `list_builtins` also covers a tuple and a list literal,
   and `push_arity`/`reverse_arity` pin the two `E110` cases.
+
+### Added (sum and keys)
+
+- `sum(xs)` in compiled programs, over a list, tuple or set of numbers. The
+  element shape the analyzer already tracks picks the result: an int list sums
+  into a double and comes back through the interpreter's saturating `as i64`
+  cast (`sum([9223372036854775807, 1])` is `9223372036854775807`), a float list
+  answers the double. The walk is emitted in line: the loop adds each element
+  word as a double, in descriptor order, which is the interpreter's `f64`
+  accumulation. A collection of another element kind, or one whose element
+  kind never settled, is refused with `E177` by name instead of compiled into
+  an `E110` the interpreter would report at run time.
+- `keys(d)` in compiled programs: a dict's keys, in insertion order, as a
+  list. It is the same list a `for` loop over the dict already built
+  (`rt_items_dict`), so the builtin is that call and needs no new runtime
+  code; the analyzer types the result as a list of strings, which makes
+  printing, indexing, `len` and iteration over it work. A non-dict argument is
+  refused with `E177`.
+- `tests/native/fixtures/reducers.akk` covers both in both optimiser modes: an
+  int list, a float list, a tuple, a set, a literal and a one-off int list that
+  saturates, `sum` through two parameters (one int call site, one float), and
+  `keys()` printed, indexed with `len` and walked by `for`.
 
 ### Added (catchable arithmetic errors)
 
