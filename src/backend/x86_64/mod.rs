@@ -54,9 +54,13 @@
 //! floats or strings. A call carries no span, so the run-time failures these
 //! can hit (`E110` for an empty pop, `E049` for a position outside the list)
 //! are written without the interpreter's line clause, the same rule the
-//! arithmetic panics follow. Text reverse, a `push` whose value does not fit
-//! the list's element shape, and a sort of any other element kind are refused
-//! rather than guessed. Anything else -- a closure, a class -- is refused with `E177`,
+//! arithmetic panics follow. `slice(xs, start[, end])` answers a fresh list of
+//! the elements between two positions: both ends clamp to the length, a start
+//! past the end is an empty result, and a negative end is the interpreter's
+//! `E110` panic (without the line clause a call cannot carry). Text reverse, a
+//! `push` whose value does not fit the list's element shape, a sort of any
+//! other element kind, and a slice of text (its characters need the Unicode
+//! tables) are refused rather than guessed. Anything else -- a closure, a class -- is refused with `E177`,
 //! naming the item. Refusing is what keeps the backend
 //! honest: a construct it cannot emit must never become silently different
 //! code.
@@ -159,6 +163,8 @@ pub(crate) enum Builtin {
     Entries,
     /// `sum`: the total of a list, tuple or set of numbers.
     Sum,
+    /// `slice`: a fresh list of a collection's elements between two positions.
+    Slice,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -183,6 +189,7 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "values" => Some(Builtin::Values),
         "entries" => Some(Builtin::Entries),
         "sum" => Some(Builtin::Sum),
+        "slice" => Some(Builtin::Slice),
         _ => None,
     }
 }
@@ -1628,6 +1635,39 @@ fn learn_builtin(
                 None => Ok(false),
             }
         }
+        // `slice(xs, start[, end])` answers a fresh list of the elements
+        // between two positions. Text slices by grapheme cluster, which needs
+        // the Unicode tables, so it is refused by name; a dict is not a
+        // sequence and gets the interpreter's `E110`, as does a wrong arity.
+        // The result is a list whatever the source was, so it keeps the
+        // element shape (a slice of a set is a list of that set's members).
+        Builtin::Slice => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::slice_args_needed_detail(args.len()),
+                ));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::List | Kind::Tuple | Kind::Set) => {
+                    let mut changed = false;
+                    for arg in &args[1..] {
+                        changed |= learn_operand(arg, Kind::Int, typed)?;
+                    }
+                    changed |=
+                        learn_collection(dest, Kind::List, elems_of(&args[0], typed), typed)?;
+                    Ok(changed)
+                }
+                Some(Kind::Str) => Err(unsupported(
+                    "slice of a string (its characters need the Unicode tables)",
+                )),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("စာသား သို့မဟုတ် စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
         // `push`/`append` appends one value to the list the first argument
         // names and answers the new length, exactly as the interpreter does.
         // The argument has to be that variable (a value is a copy, so writing
@@ -2057,10 +2097,11 @@ fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, 
     let Some((first, rest)) = shape.split_first() else {
         return Ok(false);
     };
+    // A dynamic element is read as `Dynamic`: the code generator leaves the
+    // address of the element's own `{ tag, word }` pair in the temporary, so
+    // its tag travels with the value instead of being guessed here.
     if *first == Kind::Dynamic {
-        return Err(unsupported(
-            "a read of an element whose kind varies (the collection holds more than one kind)",
-        ));
+        return learn_temp(&mut typed.temps, dest, Kind::Dynamic);
     }
     let mut changed = learn_temp(&mut typed.temps, dest, *first)?;
     if !rest.is_empty() {
@@ -3001,10 +3042,12 @@ mod tests {
         );
     }
 
-    /// A read of an element whose kind varies has no static kind, so it is
-    /// refused by name instead of printing whatever the analyzer saw first.
+    /// A read of an element whose kind varies is typed `Dynamic`: the code
+    /// generator keeps the element's `{ tag, word }` address, so the tag it
+    /// was stored with reaches the display instead of being guessed here.
     #[test]
-    fn a_read_of_a_dynamic_element_is_refused() {
+    fn a_read_of_a_dynamic_element_is_typed_dynamic() {
+        let mut first_id = None;
         let function = function(|builder| {
             let list = builder.temp();
             builder.emit(MirInst::List {
@@ -3015,6 +3058,7 @@ mod tests {
                 ],
             });
             let first = builder.temp();
+            first_id = Some(first);
             builder.emit(MirInst::Index {
                 dest: first,
                 base: Operand::Temp(list),
@@ -3024,9 +3068,9 @@ mod tests {
             builder.emit(MirInst::Print(Operand::Temp(first)));
             builder.terminate(Terminator::Exit);
         });
-        let error = analyze(&program_of(vec![function])).expect_err("a dynamic element");
-        assert!(error.contains("E177"), "{}", error);
-        assert!(error.contains("element whose kind varies"), "{}", error);
+        let typed = analyze(&program_of(vec![function])).expect("a dynamic read");
+        let first = first_id.expect("the read");
+        assert_eq!(typed.functions[0].temps.get(&first), Some(&Kind::Dynamic));
     }
 
     /// A member computed at run time is deduplicated by the runtime's set

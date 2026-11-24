@@ -584,6 +584,30 @@ impl Gen {
         Ok(())
     }
 
+    /// Load `operand` as one collection element: its word in `rdx` and its
+    /// tag in `rdi`. A dynamic read already holds the address of the element's
+    /// own `{ tag, word }` pair, so both come from that pair; otherwise the
+    /// tag is the static kind. One register pair serves every literal and
+    /// runtime write, so the tag always reaches the descriptor unchanged.
+    fn load_tagged(
+        &self,
+        code: &mut Code,
+        data: &mut Data,
+        operand: &Operand,
+    ) -> Result<(), String> {
+        let kind = self.kind(operand)?;
+        self.load(code, data, operand);
+        if kind == Kind::Dynamic {
+            code.mov_rr(R10, RAX);
+            code.load_ptr_disp32(RDI, R10, 0);
+            code.load_ptr_disp32(RDX, R10, 8);
+        } else {
+            code.mov_rr(RDX, RAX);
+            code.mov_imm32(RDI, kind.tag() as i32);
+        }
+        Ok(())
+    }
+
     fn store(&self, code: &mut Code, operand: &Operand) {
         match operand {
             Operand::Temp(temp) => code.store(self.slots[temp], RAX),
@@ -1026,10 +1050,14 @@ impl Gen {
                         code.call("rt_print_collection");
                         code.call("rt_write_newline");
                     }
-                    // A value read out of a heterogeneous collection has no
-                    // static kind; the analyzer refuses it where it is read.
+                    // A dynamic read holds the address of the element's own
+                    // `{ tag, word }` pair, so the display dispatches on the
+                    // tag the collection stored.
                     Kind::Dynamic => {
-                        return Err(unsupported("a print of a value whose kind varies"))
+                        code.mov_rr(R11, RAX);
+                        code.load_ptr_disp32(RDI, R11, 0);
+                        code.load_ptr_disp32(RAX, R11, 8);
+                        code.call("rt_print_dynamic");
                     }
                 }
             }
@@ -1077,15 +1105,27 @@ impl Gen {
                 code.mov_rr(R11, RAX);
                 self.load(code, data, index);
                 // `r8` carries the source line for the E049/E053 text.
+                // A dynamic read keeps the element's `{ tag, word }` address,
+                // so the tag it was stored with reaches every later use; any
+                // other read takes the word alone.
+                let dynamic = self.kind(&Operand::Temp(*dest))? == Kind::Dynamic;
                 code.mov_imm32(R8, *line as i32);
                 if base_kind == Kind::Dict {
                     code.mov_rr(RDX, RAX);
                     code.mov_rr(RAX, R11);
-                    code.call("rt_index_dict");
+                    code.call(if dynamic {
+                        "rt_index_dict_ref"
+                    } else {
+                        "rt_index_dict"
+                    });
                 } else {
                     code.mov_rr(RCX, RAX);
                     code.mov_rr(RAX, R11);
-                    code.call("rt_index_seq");
+                    code.call(if dynamic {
+                        "rt_index_seq_ref"
+                    } else {
+                        "rt_index_seq"
+                    });
                 }
                 self.store(code, &Operand::Temp(*dest));
             }
@@ -1186,12 +1226,10 @@ impl Gen {
         code.mov_imm32(RCX, items.len() as i32);
         code.store_ptr_disp32(R11, 8, RCX);
         for (position, item) in items.iter().enumerate() {
-            let item_kind = self.kind(item)?;
             let offset = 16 + 16 * position as i32;
-            self.load(code, data, item);
-            code.store_ptr_disp32(R11, offset + 8, RAX);
-            code.mov_imm32(RCX, item_kind.tag() as i32);
-            code.store_ptr_disp32(R11, offset, RCX);
+            self.load_tagged(code, data, item)?;
+            code.store_ptr_disp32(R11, offset, RDI);
+            code.store_ptr_disp32(R11, offset + 8, RDX);
         }
         code.mov_rr(RAX, R11);
         self.store(code, &Operand::Temp(dest));
@@ -1228,12 +1266,9 @@ impl Gen {
     ) -> Result<(), String> {
         self.sized_collection(code, Kind::Set, items.len() as i32, dest);
         for item in items {
-            let item_kind = self.kind(item)?;
             // `rax` base, `rdx` the member word and `rdi` its tag. Dedup can
             // only drop a member, so the literal's capacity is never exceeded.
-            self.load(code, data, item);
-            code.mov_rr(RDX, RAX);
-            code.mov_imm32(RDI, item_kind.tag() as i32);
+            self.load_tagged(code, data, item)?;
             self.load(code, data, &Operand::Temp(dest));
             code.call("rt_fill_set");
             self.store(code, &Operand::Temp(dest));
@@ -1256,15 +1291,12 @@ impl Gen {
     ) -> Result<(), String> {
         self.sized_collection(code, Kind::Dict, pairs.len() as i32, dest);
         for (key, value) in pairs {
-            let value_kind = self.kind(value)?;
             // `rax` base, `rcx` the key, `rdx` the value word and `rdi` its
             // tag. A repeated key overwrites in place, so the capacity is
             // never exceeded.
             self.load(code, data, key);
             code.mov_rr(RCX, RAX);
-            self.load(code, data, value);
-            code.mov_rr(RDX, RAX);
-            code.mov_imm32(RDI, value_kind.tag() as i32);
+            self.load_tagged(code, data, value)?;
             self.load(code, data, &Operand::Temp(dest));
             code.call("rt_fill_dict");
             self.store(code, &Operand::Temp(dest));
@@ -1291,16 +1323,14 @@ impl Gen {
         code.mov_imm32(RCX, pairs.len() as i32);
         code.store_ptr_disp32(R11, 8, RCX);
         for (position, (key, value)) in pairs.iter().enumerate() {
-            let value_kind = self.kind(value)?;
             let offset = 16 + 32 * position as i32;
             self.load(code, data, key);
             code.store_ptr_disp32(R11, offset + 8, RAX);
             code.mov_imm32(RCX, Kind::Str.tag() as i32);
             code.store_ptr_disp32(R11, offset, RCX);
-            self.load(code, data, value);
-            code.store_ptr_disp32(R11, offset + 24, RAX);
-            code.mov_imm32(RCX, value_kind.tag() as i32);
-            code.store_ptr_disp32(R11, offset + 16, RCX);
+            self.load_tagged(code, data, value)?;
+            code.store_ptr_disp32(R11, offset + 16, RDI);
+            code.store_ptr_disp32(R11, offset + 24, RDX);
         }
         code.mov_rr(RAX, R11);
         self.store(code, &Operand::Temp(dest));
@@ -1522,6 +1552,32 @@ impl Gen {
                 } else {
                     self.float_to_int(code);
                 }
+            }
+            // `slice(xs, start[, end])`: the runtime clamps both ends, copies
+            // the selected `{ tag, word }` pairs into a fresh list and answers
+            // it. The end defaults to the descriptor's length, which the
+            // runtime would clamp to anyway, but passing it keeps the helper's
+            // calling convention one shape.
+            Builtin::Slice => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`slice` with no argument"))?;
+                let start = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`slice` with no start"))?;
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, start);
+                code.mov_rr(RCX, RAX);
+                match args.get(2) {
+                    Some(end) => {
+                        self.load(code, data, end);
+                        code.mov_rr(RDX, RAX);
+                    }
+                    None => code.load_ptr_disp32(RDX, R11, 8),
+                }
+                code.mov_rr(RAX, R11);
+                code.call("rt_slice_seq");
             }
             // `push`/`append`: the runtime's indexed write with the index set
             // to the current length is exactly "append at the end", and it

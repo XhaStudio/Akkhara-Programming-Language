@@ -1,7 +1,7 @@
 # dynamic_collections.akk -- collections whose elements are not all one kind.
 # The runtime stores a tag beside every element word, so a mixed literal is one
 # ordinary descriptor: printing, len, equality, element stores and `push` all
-# keep working. A *read* of such an element has no static kind and is refused.
+# keep working. A read keeps the element's tag; dynamic_reads.akk covers it.
 mixed မှာ [1, "two", 3.5, True] ဖြစ်၏။
 mixed ကို ဖော်ပြပါ။
 print(len(mixed));

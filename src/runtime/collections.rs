@@ -88,6 +88,7 @@ pub(crate) fn emit(
     emit_insert(code);
     emit_remove(code);
     emit_sort(code);
+    emit_slice(code, data, newline);
     emit_panic_message(code, newline);
     emit_panics(
         code,
@@ -222,11 +223,14 @@ fn emit_items_range(code: &mut Code) {
     code.ret();
 }
 
-/// `rt_index_seq`: `rax` is the collection descriptor, `rcx` the index and
-/// `r8` the source line; the element word comes back in `rax`. Negative and
-/// past-the-end indices are the interpreter's `E049`, line included.
+/// `rt_index_seq_ref`: `rax` is the collection descriptor, `rcx` the index and
+/// `r8` the source line; the address of the element's `{ tag, word }` pair
+/// comes back in `rax`. Negative and past-the-end indices are the
+/// interpreter's `E049`, line included. `rt_index_seq` loads the word from
+/// that address, while a dynamic read keeps it so the tag the collection
+/// stored travels with the value.
 fn emit_index(code: &mut Code) {
-    code.label("rt_index_seq");
+    code.label("rt_index_seq_ref");
     code.push(RBP);
     code.mov_rbp_rsp();
     code.sub_rsp(32);
@@ -243,10 +247,12 @@ fn emit_index(code: &mut Code) {
     code.label("index_non_negative");
     code.cmp_rr(RCX, RDX);
     code.jcc(CC_AE, "index_out_of_range");
+    // The element's tag sits at `16 + 16 * i` and its word eight bytes on,
+    // so the pair address is the tag address.
     code.shl_imm(RCX, 4);
-    code.add_imm8(RCX, 24);
+    code.add_imm8(RCX, 16);
     code.add_rr(RCX, RAX);
-    code.load_ptr(RAX, RCX);
+    code.mov_rr(RAX, RCX);
     code.leave();
     code.ret();
     code.label("index_out_of_range");
@@ -254,13 +260,23 @@ fn emit_index(code: &mut Code) {
     code.load(RDI, -24);
     code.call("rt_panic_index");
     code.ud2();
+
+    // The ordinary sequence read: the element word of a list, tuple or set.
+    code.label("rt_index_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_index_seq_ref");
+    code.load_ptr_disp32(RAX, RAX, 8);
+    code.leave();
+    code.ret();
 }
 
-/// `rt_index_dict`: `rax` is the dict descriptor, `rdx` the key string and
-/// `r8` the source line; the matching value word comes back in `rax`. A missing
-/// key is the interpreter's `E053`, line included.
+/// `rt_index_dict_ref`: `rax` is the dict descriptor, `rdx` the key string and
+/// `r8` the source line; the address of the matching value's `{ tag, word }`
+/// pair comes back in `rax`. A missing key is the interpreter's `E053`, line
+/// included.
 fn emit_index_dict(code: &mut Code) {
-    code.label("rt_index_dict");
+    code.label("rt_index_dict_ref");
     code.push(RBP);
     code.mov_rbp_rsp();
     code.sub_rsp(32);
@@ -288,12 +304,14 @@ fn emit_index_dict(code: &mut Code) {
     code.store(-32, RCX);
     code.jmp("dict_index_loop");
     code.label("dict_index_found");
+    // A dict pair is `[key_tag, key, value_tag, value]`, so the value's tag
+    // (and the pair address a dynamic read keeps) is at `32 + 32 * i`.
     code.load(RAX, -8);
     code.load(RCX, -32);
     code.shl_imm(RCX, 5);
-    code.add_imm8(RCX, 40);
+    code.add_imm8(RCX, 32);
     code.add_rr(RCX, RAX);
-    code.load_ptr(RAX, RCX);
+    code.mov_rr(RAX, RCX);
     code.leave();
     code.ret();
     code.label("dict_index_missing");
@@ -301,6 +319,15 @@ fn emit_index_dict(code: &mut Code) {
     code.load(RDI, -24);
     code.call("rt_panic_key");
     code.ud2();
+
+    // The ordinary dict read: the matching value word.
+    code.label("rt_index_dict");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.call("rt_index_dict_ref");
+    code.load_ptr_disp32(RAX, RAX, 8);
+    code.leave();
+    code.ret();
 }
 
 /// `rt_items_dict`: `rax` is a dict descriptor and the result is a fresh list
@@ -1612,6 +1639,117 @@ fn emit_store_set(code: &mut Code) {
     code.ud2();
 }
 
+/// `rt_slice_seq`: `rax` is a list, tuple or set descriptor, `rcx` the start
+/// and `rdx` the end (exclusive). The interpreter clamps both ends to the
+/// length, treats a start past the end as an empty result, and refuses a
+/// negative end with `E110`; the fresh list in `rax` copies the selected
+/// `{ tag, word }` pairs in order, so a heterogeneous collection slices too.
+fn emit_slice(code: &mut Code, data: &mut Data, newline: u32) {
+    let prefix = data.intern("E110 slice() အနုတ်မဟုတ်သော အညွှန်းများ လိုအပ်ပါသည်၊ စတင် ");
+    let mid = data.intern(" နှင့် အဆုံး ");
+    let suffix = data.intern(" ရပါသည်");
+    let prefix_len = "E110 slice() အနုတ်မဟုတ်သော အညွှန်းများ လိုအပ်ပါသည်၊ စတင် ".len();
+    let mid_len = " နှင့် အဆုံး ".len();
+    let suffix_len = " ရပါသည်".len();
+
+    code.label("rt_slice_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(64);
+    code.store(-8, RAX);
+    code.store(-16, RCX);
+    code.store(-24, RDX);
+    code.load_ptr_disp32(R9, RAX, 8);
+    code.store(-32, R9);
+    // A negative start or end is the interpreter's `E110`.
+    code.load(RCX, -16);
+    code.cmp_imm32(RCX, 0);
+    code.jcc(CC_L, "slice_bad");
+    code.load(RDX, -24);
+    code.cmp_imm32(RDX, 0);
+    code.jcc(CC_L, "slice_bad");
+    // Both ends clamp to the length.
+    code.load(RCX, -16);
+    code.load(RDX, -32);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_B, "slice_start_kept");
+    code.mov_rr(RCX, RDX);
+    code.label("slice_start_kept");
+    code.store(-16, RCX);
+    code.load(RDX, -24);
+    code.load(R9, -32);
+    code.cmp_rr(RDX, R9);
+    code.jcc(CC_B, "slice_end_kept");
+    code.mov_rr(RDX, R9);
+    code.label("slice_end_kept");
+    code.store(-24, RDX);
+    // A start past the end is empty, not an error.
+    code.load(RCX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_BE, "slice_ordered");
+    code.mov_rr(RCX, RDX);
+    code.store(-16, RCX);
+    code.label("slice_ordered");
+    code.mov_rr(R9, RDX);
+    code.sub_rr(R9, RCX);
+    code.store(-40, R9);
+    code.mov_rr(RDI, R9);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-48, RAX);
+    // The result is always a list, whatever the source was.
+    code.mov_imm32(RCX, TAG_LIST as i32);
+    code.store_ptr_disp32(RAX, 0, RCX);
+    code.load(RDX, -40);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-56, RCX);
+    code.label("slice_copy");
+    code.load(RCX, -56);
+    code.load(RDX, -40);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "slice_copied");
+    // The source pair of `start + i`.
+    code.load(R8, -16);
+    code.add_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.load(R9, -8);
+    code.add_rr(R8, R9);
+    // The destination pair of `i`.
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 16);
+    code.load(R9, -48);
+    code.add_rr(RCX, R9);
+    code.load_ptr(R10, R8);
+    code.store_ptr_disp32(RCX, 0, R10);
+    code.load_ptr_disp32(R10, R8, 8);
+    code.store_ptr_disp32(RCX, 8, R10);
+    code.load(RCX, -56);
+    code.inc(RCX);
+    code.store(-56, RCX);
+    code.jmp("slice_copy");
+    code.label("slice_copied");
+    code.load(RAX, -48);
+    code.leave();
+    code.ret();
+    // The interpreter's sentence, with both offending values, minus its line
+    // clause: a builtin call carries no span.
+    code.label("slice_bad");
+    write(code, prefix, prefix_len, true);
+    code.load(RAX, -16);
+    code.call("rt_write_int_err");
+    write(code, mid, mid_len, true);
+    code.load(RAX, -24);
+    code.call("rt_write_int_err");
+    write(code, suffix, suffix_len, true);
+    write(code, newline, 1, true);
+    code.mov_imm32_zero(RAX, 1);
+    code.call("rt_exit");
+    code.ud2();
+}
+
 /// `rt_panic_message`: `rax` is an interned `{ length, bytes }` descriptor;
 /// write it and a newline to stderr, then exit 1. Codegen uses it for a
 /// diagnostic it can build completely at compile time (the interpreter's
@@ -1787,6 +1925,60 @@ fn emit_print_value(code: &mut Code, null: u32, question: u32) {
     code.ret();
 }
 
+/// `rt_print_dynamic`: `rdi` is the tag and `rax` the word of an element read
+/// out of a heterogeneous collection, exactly as the element's `{ tag, word }`
+/// pair stores them. The display is the top-level `print` form -- a string is
+/// written raw, not quoted as inside a collection -- and it ends with the
+/// statement newline, like the other `rt_print_*` routines. A collection value
+/// goes through `rt_print_collection`, whose `repr` carries no newline.
+fn emit_print_dynamic(code: &mut Code) {
+    code.label("rt_print_dynamic");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(16);
+    code.store(-8, RAX);
+    code.store(-16, RDI);
+    for (tag, label) in [
+        (TAG_INT, "pd_int"),
+        (TAG_FLOAT, "pd_float"),
+        (TAG_BOOL, "pd_bool"),
+        (TAG_STR, "pd_str"),
+        (TAG_LIST, "pd_list"),
+        (TAG_TUPLE, "pd_tuple"),
+        (TAG_SET, "pd_set"),
+        (TAG_DICT, "pd_dict"),
+    ] {
+        code.load(RDI, -16);
+        code.cmp_imm32(RDI, tag as i32);
+        code.jcc(CC_E, label);
+    }
+    // No element is ever stored with another tag; nothing is printed if one
+    // somehow is, rather than guessing a form for it.
+    code.leave();
+    code.ret();
+    for (label, printer) in [
+        ("pd_int", "rt_print_int"),
+        ("pd_float", "rt_print_float"),
+        ("pd_bool", "rt_print_bool"),
+        ("pd_str", "rt_print_str"),
+    ] {
+        code.label(label);
+        code.load(RAX, -8);
+        code.call(printer);
+        code.leave();
+        code.ret();
+    }
+    for label in ["pd_list", "pd_tuple", "pd_set", "pd_dict"] {
+        code.label(label);
+        code.load(RDI, -16);
+        code.load(RAX, -8);
+        code.call("rt_print_collection");
+        code.call("rt_write_newline");
+        code.leave();
+        code.ret();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_print(
     code: &mut Code,
@@ -1805,6 +1997,7 @@ fn emit_print(
     question: u32,
 ) {
     emit_print_value(code, null, question);
+    emit_print_dynamic(code);
 
     // `rt_print_collection`: `rdi` is the collection tag, `rax` its address.
     code.label("rt_print_collection");

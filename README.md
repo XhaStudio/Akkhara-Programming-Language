@@ -353,9 +353,12 @@ error.
   Unicode tables and is still refused). `pop`, `insert`, `remove` and `sort`
   work on a list variable too: `pop`/`remove` answer the element they dropped,
   `insert` answers the new length, and `sort` is a stable ascending sort over
-  ints, floats or strings. Popping an empty list and a position outside the
-  list are the interpreter's `E110`/`E049`, without the line clause a compiled
-  call cannot carry. A write builds a fresh collection and
+  ints, floats or strings. `slice(xs, start[, end])` answers a fresh list of
+  the elements between two positions, with both ends clamped to the length and
+  a start past the end empty, exactly as the interpreter has it; a tuple or a
+  set slices into a list, and a negative bound is its `E110`. Popping an empty
+  list and a position outside the list are the interpreter's `E110`/`E049`,
+  without the line clause a compiled call cannot carry. A write builds a fresh collection and
   rebinds the name, so another binding keeps its own contents, exactly as the
   interpreter's value semantics do. Equality (`==`/`!=`) is structural and
   order-sensitive, like the printed form: same kind, length and elements, and
@@ -372,8 +375,10 @@ error.
   widens the collection instead of being refused (a list of int lists takes a
   list of strings). A set built from a run-time member and a dict built from a
   run-time key are deduplicated by the runtime, in the interpreter's order.
-  A *read* of such an element has no static kind, so indexing or iterating the
-  collection, and `pop`/`remove`/`sort`/`sum` over it, are refused with `E177`.
+  A *read* of such an element keeps the tag the descriptor stored, so printing
+  it (top level, through a binding, a parameter or a new literal) dispatches at
+  run time; a use that needs one static kind -- `str`, arithmetic, iterating
+  the collection, `pop`/`remove`/`sort`/`sum` -- is refused with `E177`.
   One function's parameter has one element shape; two call sites that pass
   different shapes are refused with `E177`. Ordering two
   collections is the interpreter's `E042`. A string whose text is known at
@@ -383,8 +388,8 @@ error.
   clusters, so an out-of-range read is still the interpreter's `E049`.
   `+` joins two strings (the interpreter's only string arithmetic): a
   constant pair is folded, and a run-time join copies both into a new string
-  in the runtime arena. Writing into a string, and reading or iterating an
-  element whose kind varies, are still refused with `E177`, and so are `len`,
+  in the runtime arena. Writing into a string, and `str` or arithmetic on a
+  value whose kind varies, are still refused with `E177`, and so are `len`,
   indexing and iteration over a string
   that only arrives at run time (a parameter, a call result), because the
   native runtime carries no Unicode tables; a nested write such as

@@ -1,0 +1,5 @@
+# slice_negative.akk -- a negative slice bound is the interpreter's E110 panic.
+xs မှာ [1, 2, 3] ဖြစ်၏။
+print("before");
+print(slice(xs, 1, -1));
+print("after");

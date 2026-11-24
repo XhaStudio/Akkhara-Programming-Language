@@ -85,6 +85,29 @@ const CASES: &[Case] = &[
             "3",
         ],
     },
+    // Reading one element out of a heterogeneous collection: the read keeps
+    // the tag the descriptor stored, so printing dispatches at run time and
+    // the value travels through a binding, a parameter and a new literal.
+    Case {
+        name: "dynamic_reads",
+        stdout: &[
+            "1",
+            "two",
+            "3.5",
+            "True",
+            "two",
+            "[\"two\", 1]",
+            "[2, 3]",
+            "3.5",
+            "1",
+            "b",
+            "1",
+            "two",
+            "two",
+            "two",
+            "x",
+        ],
+    },
     // `values()` and `entries()` beside `keys()`: a view is an ordinary list
     // (printed, counted, indexed, iterated) and an entry is a two-element
     // tuple whose value keeps its own tag; a dict of strings stays readable
@@ -273,6 +296,28 @@ const CASES: &[Case] = &[
             "[\"a\", \"b\", \"c\"]",
             "[4]",
             "[]",
+        ],
+    },
+    // `slice(xs, start[, end])`: both ends clamp to the length, a start past
+    // the end is empty, the result is a fresh list (changing it leaves the
+    // source alone), a tuple and a set slice into a list, nested lists keep
+    // their shape, and a run-time position works.
+    Case {
+        name: "slice",
+        stdout: &[
+            "[20, 30]",
+            "[30, 40, 50]",
+            "[10, 20, 30, 40, 50]",
+            "[]",
+            "[]",
+            "[10, 20, 30, 40, 50]",
+            "[99, 30, 40]",
+            "[10, 20, 30, 40, 50]",
+            "[2, 3]",
+            "[3, 1]",
+            "[[3, 4], [5]]",
+            "4",
+            "[\"b\", \"c\"]",
         ],
     },
     // `switch`: the default arm runs only when no case matched wherever it is
@@ -883,6 +928,46 @@ fn a_pop_from_an_empty_list_panics_like_the_interpreter() {
     assert_eq!(native.status.code(), reference.status.code());
 }
 
+/// A negative slice bound is the interpreter's `E110`: the executable writes
+/// the same sentence with both offending values (and no line number) and exits
+/// 1, and never reaches the statements after the slice.
+#[test]
+fn a_slice_with_a_negative_bound_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let dir = work_dir("slice_negative", "opt");
+    let source = dir.join("slice_negative.akk");
+    fs::copy(fixtures().join("slice_negative.akk"), &source).expect("the fixture");
+
+    let reference = interpret(&source);
+    let built = build(&source, true);
+    assert!(
+        built.status.success(),
+        "`akk build` failed: {}",
+        text(&built.stderr).trim()
+    );
+    let native = execute(&executable_for(&source));
+
+    assert_eq!(
+        text(&native.stdout),
+        "before\n",
+        "the executable prints the statement before the panic"
+    );
+    let reference_stderr = text(&reference.stderr);
+    assert!(
+        reference_stderr.contains("E110") && reference_stderr.contains("slice()"),
+        "the interpreter should report the negative slice, got {reference_stderr:?}"
+    );
+    assert_eq!(
+        text(&native.stderr).trim_end(),
+        "E110 slice() အနုတ်မဟုတ်သော အညွှန်းများ လိုအပ်ပါသည်၊ စတင် 1 နှင့် အဆုံး -1 ရပါသည်",
+        "the executable writes the interpreter's sentence without the line"
+    );
+    assert_eq!(native.status.code(), Some(1));
+    assert_eq!(native.status.code(), reference.status.code());
+}
+
 /// A construct is outside the slice, with the word the message should name it
 /// by. The program itself is valid: the interpreter runs it before `akk build`
 /// is asked to, so the refusal is about the slice and not about the syntax.
@@ -894,13 +979,18 @@ struct Refused {
 }
 
 const REFUSED: &[Refused] = &[
-    // A heterogeneous collection holds its elements with a tag each, but an
-    // element read out of one has no static kind: the read is refused rather
-    // than given whatever kind the analyzer saw first.
+    // A read out of a heterogeneous collection carries its tag, so printing
+    // it dispatches at run time; a use that needs one static kind -- `str`,
+    // arithmetic -- is refused by name instead of guessing.
     Refused {
-        name: "dynamic_read",
-        mentions: "element whose kind varies",
-        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nxs[0] ကို ဖော်ပြပါ။\n",
+        name: "dynamic_str",
+        mentions: "`str` of a dynamic",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(str(xs[0]));\n",
+    },
+    Refused {
+        name: "dynamic_arithmetic",
+        mentions: "arithmetic on a dynamic",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(xs[0] + 1);\n",
     },
     // Iterating one needs the same static element kind a read does.
     Refused {
@@ -933,6 +1023,13 @@ const REFUSED: &[Refused] = &[
         name: "dynamic_pop",
         mentions: "more than one kind",
         source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(pop(xs));\n",
+    },
+    // Text slices by grapheme cluster, which needs the Unicode tables the
+    // native runtime does not carry, so a run-time string is refused.
+    Refused {
+        name: "string_slice",
+        mentions: "slice of a string",
+        source: "fn part(s) {\n    return slice(s, 0, 1);\n}\nprint(part(\"abc\"));\n",
     },
     // One function's parameter sees one element shape: a caller passing a
     // list of strings and another passing a list of ints cannot both describe
@@ -1022,6 +1119,18 @@ const MISUSE: &[Misuse] = &[
         name: "sort_extra",
         mentions: "sort",
         source: "xs မှာ [2, 1] ဖြစ်၏။\nprint(sort(xs, 1));\n",
+    },
+    // `slice` needs a collection, a start and an optional end, and a dict is
+    // not a sequence: both are the interpreter's `E110`.
+    Misuse {
+        name: "slice_arity",
+        mentions: "slice",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(slice(xs));\n",
+    },
+    Misuse {
+        name: "slice_of_dict",
+        mentions: "slice",
+        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(slice(d, 0));\n",
     },
     // `sum` totals numbers and `keys` reads a dict: anything else is the
     // interpreter's `E110`, and the build reports the same code and wording.

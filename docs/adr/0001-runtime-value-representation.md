@@ -862,7 +862,77 @@ every value:
   cases pin the `E110` refusals. Parity is unchanged: no corpus fixture calls
   the two builtins.
 
-A dynamic element *read* is still the next slice: the tag has to travel with
-it in a temporary (boxed or NaN-boxed), and every use that needs a static kind
-has to dispatch on that tag or refuse by name. `values`/`entries` do not need
-it because they copy tags the descriptor already holds.
+### Step 17, dynamic element reads (landed)
+
+A read out of a heterogeneous collection now carries its tag, without moving
+the value word:
+
+- The descriptor already stores every element as `{ tag, word }`, so the
+  temporary of a dynamic read holds the **address of that pair** rather than a
+  copy of either half. `rt_index_seq_ref` and `rt_index_dict_ref` return the
+  pair address after the same bounds/key checks the ordinary reads do (the
+  sequence pair starts at `16 + 16 * i`, a dict value's at `32 + 32 * i`), and
+  `rt_index_seq`/`rt_index_dict` are now thin wrappers that load the word at
+  `+8`. The address stays valid because the runtime copies collections on
+  every write and never frees the arena, so the pair a temporary points at is
+  never overwritten.
+- The analyzer types such a read `Dynamic` (it no longer refuses it). Every
+  use that needs one static kind refuses by name -- `str`, arithmetic,
+  comparison, a condition, `len`, indexing the value itself, iterating the
+  collection, `pop`/`remove`/`sort`/`sum` -- so no code is emitted that would
+  treat the pair pointer as an int or a string.
+- Printing dispatches on the stored tag: the code generator loads the pair's
+  tag into `rdi` and its word into `rax` and calls `rt_print_dynamic`, which
+  picks the same writer the static print uses (a string raw, not quoted) and
+  ends with the statement newline; collection tags go through
+  `rt_print_collection` and take the newline after their `repr`. Inside a
+  collection literal the tag and word are copied into the new element
+  (`Gen::load_tagged`), so `[xs[1], xs[0]]`, a set member and a dict value keep
+  the kinds they were read with. A value also crosses a call unchanged: the
+  pair address moves through the argument/return slots, and the analyzer types
+  the parameter or result `Dynamic` from its call sites.
+- `tests/native/fixtures/dynamic_reads.akk` compares both optimiser modes with
+  the interpreter for int, string, float and bool reads, a read kept in a
+  binding and copied into a new list, a collection-valued read, a parameter, a
+  nested read beside a static one, a dict of mixed values (directly and through
+  `values`/`entries`) and a set of mixed members. `dynamic_str` and
+  `dynamic_arithmetic` pin the named refusals. Parity is unchanged: no corpus
+  fixture waits on a heterogeneous read.
+
+### Step 18, `slice` (landed)
+
+`slice(xs, start[, end])` compiles over a list, tuple or set, still without
+moving the value word:
+
+- The runtime copies the selected elements' `{ tag, word }` pairs into a fresh
+  descriptor through `rt_slice_seq`, so a heterogeneous collection slices and
+  the result keeps the elements' own kinds (and their nested shapes, because
+  an element that is itself a descriptor is copied by address). The result is
+  always a list, which is what the interpreter answers for every sequence
+  source: a tuple and a set slice into a list too.
+- The interpreter's bounds rules are kept in one place: both ends clamp to the
+  length, a start past the end is an empty result (not an error), and a start
+  past the clamped end is ordered before the copy (`start = min(start, end)`).
+  Only a negative start or end fails, which is the interpreter's `E110`; the
+  executable writes that sentence with both values and no line clause, because
+  a builtin call carries no span.
+- The analyzer types the result as a list with the source's element shape and
+  requires both positions to be ints (a `Dynamic` element shape is fine -- the
+  copy carries tags). A dict is not a sequence, so it gets the interpreter's
+  `E110`; text slices by grapheme cluster, which needs the Unicode tables, so
+  it is refused with `E177` by name; a wrong arity is the interpreter's `E110`
+  wording.
+- `tests/native/fixtures/slice.akk` compares both optimiser modes with the
+  interpreter for both bounds, the omitted end, clamping past the length, a
+  start past the end, an empty result from reversed bounds, value semantics
+  (the copy is fresh), a tuple, a set, nested lists and a run-time position;
+  `slice_arity` and `slice_of_dict` pin the `E110` refusals, `string_slice`
+  pins the `E177`, and
+  `a_slice_with_a_negative_bound_panics_like_the_interpreter` checks the
+  panic's exact sentence. Parity is unchanged: no corpus fixture calls
+  `slice`.
+
+A single NaN-boxed word is still the longer-term shape (it would also make
+`str`/arithmetic on a dynamic value dispatchable), but the pair address needs
+no change to the element storage, the ABI or the static kinds every other
+instruction depends on.

@@ -1,5 +1,31 @@
 # Changelog
 
+## 3.1.2-alpha.3
+
+### Added
+
+- `slice(xs, start[, end])` in compiled programs, over a list, tuple or set.
+  The runtime copies the selected elements' `{ tag, word }` pairs into a fresh
+  list through `rt_slice_seq`, so a heterogeneous collection slices and the
+  result keeps each element's own tag and nested shape; a tuple or a set slices
+  into a list, which is what the interpreter answers for every source. The
+  interpreter's bounds rules are kept: both ends clamp to the length, a start
+  past the end is an empty result, and only a negative start or end fails --
+  the interpreter's `E110`, written without the line clause a call cannot
+  carry. A dict is not a sequence (its `E110`), text slices by grapheme cluster
+  and needs the Unicode tables (refused with `E177`), and a wrong arity keeps
+  the interpreter's `E110` wording. `tests/native/fixtures/slice.akk` covers
+  both optimiser modes, `slice_arity`/`slice_of_dict` pin the `E110` refusals,
+  `string_slice` pins the `E177`, and
+  `a_slice_with_a_negative_bound_panics_like_the_interpreter` checks the
+  panic's exact sentence.
+
+### Changed
+
+- Version bumped to `3.1.2-alpha.3`.
+- The `E177` slice summary now names `slice` beside the other collection
+  builtins.
+
 ## 3.1.1-alpha.3
 
 ### Added
@@ -25,6 +51,16 @@
   longer allocates (and copies) once per member, which is what could exhaust
   the fixed arena for a small literal;
   `a_runtime_member_literal_allocates_once_per_evaluation` pins it.
+
+- An element read out of a heterogeneous collection compiles: the temporary
+  keeps the address of the element's own `{ tag, word }` pair, so printing
+  dispatches on the stored tag through `rt_print_dynamic`, and a literal, set
+  member or dict value copies both words with `Gen::load_tagged`. The value
+  keeps its kind through a binding, a function parameter and a new literal;
+  `str`, arithmetic, comparison, a condition, iteration and
+  `pop`/`remove`/`sort`/`sum` on it are refused by name with `E177`.
+  `tests/native/fixtures/dynamic_reads.akk` covers both optimiser modes and
+  `dynamic_str`/`dynamic_arithmetic` pin the refusals.
 
 ### Changed
 

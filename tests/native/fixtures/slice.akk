@@ -1,0 +1,31 @@
+# slice.akk -- `slice(xs, start[, end])`: a clamped copy of a collection.
+xs မှာ [10, 20, 30, 40, 50] ဖြစ်၏။
+print(slice(xs, 1, 3));
+print(slice(xs, 2));
+print(slice(xs, 0, len(xs)));
+print(slice(xs, 99));
+print(slice(xs, 3, 1));
+print(xs);
+
+# The result is a fresh list: changing it leaves the source alone.
+ys မှာ slice(xs, 1, 4) ဖြစ်၏။
+ys[0] က 99။
+print(ys);
+print(xs);
+
+# A tuple slices into a list, and a set answers its members in their order.
+t မှာ (1, 2, 3) ဖြစ်၏။
+print(slice(t, 1));
+s မှာ {3, 1, 2} ဖြစ်၏။
+print(slice(s, 0, 2));
+
+# Nested lists keep their shape, so a selected element still indexes.
+grid မှာ [[1, 2], [3, 4], [5]] ဖြစ်၏။
+part မှာ slice(grid, 1) ဖြစ်၏။
+print(part);
+print(part[0][1]);
+
+# A string list slices like any other list, and a run-time position works.
+names မှာ ["a", "b", "c"] ဖြစ်၏။
+n သည် 1 ဖြစ်၏။
+print(slice(names, n, n + 2));

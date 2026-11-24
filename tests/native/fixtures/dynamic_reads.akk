@@ -1,0 +1,41 @@
+# dynamic_reads.akk -- reading one element out of a heterogeneous collection.
+# The read leaves the element's own `{ tag, word }` pair in the temporary, so
+# printing dispatches on the tag the descriptor stored: the value keeps its
+# kind through a binding, a function parameter and a new collection literal.
+mixed မှာ [1, "two", 3.5, True] ဖြစ်၏။
+mixed[0] ကို ဖော်ပြပါ။
+mixed[1] ကို ဖော်ပြပါ။
+mixed[2] ကို ဖော်ပြပါ။
+mixed[3] ကို ဖော်ပြပါ။
+v သည် mixed[1] ဖြစ်၏။
+v ကို ဖော်ပြပါ။
+pair မှာ [v, mixed[0]] ဖြစ်၏။
+pair ကို ဖော်ပြပါ။
+
+# A read of a collection value keeps the collection's tag, so its `repr`
+# prints like any other list.
+holder မှာ [1, [2, 3]] ဖြစ်၏။
+holder[1] ကို ဖော်ပြပါ။
+
+# The same read reaches a function's parameter with its tag intact.
+fn show(value) {
+    value ကို ဖော်ပြပါ။
+}
+show(mixed[2]);
+
+# A nested read: the outer element is a list with mixed inners, so the inner
+# read is dynamic again, beside one that is still statically an int.
+grid မှာ [[1], [2, "b"]] ဖြစ်၏။
+grid[0][0] ကို ဖော်ပြပါ။
+grid[1][1] ကို ဖော်ပြပါ။
+
+# A dict whose values have more than one kind reads each value's own tag.
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် "two" ဖြစ်၏။ } ဖြစ်၏။
+d["a"] ကို ဖော်ပြပါ။
+d["b"] ကို ဖော်ပြပါ။
+values(d)[1] ကို ဖော်ပြပါ။
+entries(d)[1][1] ကို ဖော်ပြပါ။
+
+# A set built from mixed members reads them the same way.
+s မှာ {1, "x"} ဖြစ်၏။
+s[1] ကို ဖော်ပြပါ။
