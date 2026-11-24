@@ -591,5 +591,162 @@ Still deferred (and to which step):
   keyword moved rather than the count -- and `remaining_forms` still refuses at
   `reverse("abc")`.
 
+### Step 10, list editing builtins slice (landed)
+
+`pop`, `insert`, `remove` and `sort` now compile:
+
+- All four follow the mutating-builtin rule the interpreter uses: the first
+  argument must be the variable that names the list, so the runtime's fresh
+  descriptor can replace it, and a second binding keeps its own contents
+  (value semantics, exactly as `push` and the element write already did).
+- `pop(xs)` copies the list without its last element (`rt_pop_seq`) and answers
+  the dropped word; `insert(xs, at, v)` copies it with everything from `at`
+  shifted one place and the value written into the gap (`rt_insert_seq`),
+  answering the new length; `remove(xs, at)` copies it without the element at
+  `at` (`rt_remove_seq`), answering that element. Positions follow the
+  interpreter: `insert` takes `0..=len` (the length appends), `remove` and
+  `pop` need an element that exists.
+- `sort(xs)` is a stable insertion sort over a copy (`rt_sort_seq`). The
+  analyzer's element shape picks the comparison -- ints, floats, or the
+  runtime's `rt_cmp_str` for strings -- so only the element words move. Equal
+  elements keep their order, as the interpreter's stable `sort_by` does. A
+  list of any other element kind (bool, nested collection) is refused with
+  `E177`: the interpreter orders those through its collection rules (`E042`),
+  which would need the dynamic value word.
+- A call carries no span, so the two run-time failures these builtins can hit
+  are written without the interpreter's line clause, the same rule the
+  arithmetic panics follow: `E110 pop() စာရင်းအလွတ်မှ ဖယ်၍မရပါ` for an empty
+  pop and `E049 အညွှန်း <n> သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။` for a position
+  outside the list. Compile-time misuse keeps the interpreter's `E110` with its
+  wording and without the line, and a `pop`/`remove` whose result is used while
+  the element kind is still unknown is refused by the kind pass.
+- `tests/native/fixtures/list_edits.akk` covers the returned values, inserting
+  at the front, the middle and the length, a discarded result still changing
+  the list, value semantics across a second binding, and int, float and string
+  sorts, with and without `--no-opt`; `pop_empty` pins the empty-pop panic, and
+  `insert_arity`/`sort_extra` pin `E110`. Parity moves to **10 match / 46
+  refuse**: the corpus fixture `mutating` now compiles and matches the
+  interpreter byte for byte.
+
+### Step 11, switch lowering (landed)
+
+`switch` (both spellings) now compiles, and it needed no runtime work at all:
+
+- The AST arm became `HirStmt::Switch { subject, arms }`, which resolves the
+  subject, every case expression and every arm body in the enclosing scope.
+  The body of a `switch` is not a new scope in the interpreter, so a binding
+  declared in an arm is visible after the switch, and HIR keeps that.
+- MIR lowering reproduces the interpreter's evaluation order exactly: the
+  subject goes into a fresh temporary once, then each `case` expression is
+  evaluated and compared with `==` in written order until one matches. A case
+  written after the matching one is never evaluated, so a call in it never
+  runs. The first matching arm's block runs, the `default` arm's block is
+  reached only after every case failed (wherever the default is written), and
+  there is no fall-through. `==` is the language's own equality, so a float
+  subject never equals an `int` case. All of this is `Compare`/`Branch`, the
+  shape `if` already used, so the kind pass, the optimiser, codegen and the
+  runtime are untouched.
+- `break` needed one structural change: `Ctx` now keeps a `breaks` stack
+  (switch ends and loop exits) apart from `loops` (continue targets). A
+  `break` in an arm leaves through the switch's end block while a `continue`
+  still goes to the enclosing loop, which is what the interpreter's
+  `loop_depth` bump for a switch does. A `break` inside a switch with no loop
+  around it therefore compiles, as it does when interpreted.
+- `switch_forms` (the corpus fixture) now refuses later, at its `str(i)` call:
+  the `str` conversion builtin is not in the slice yet, so its expectation
+  keyword moved from `E176 switch` to `E177 a function call to "str"` rather
+  than the count changing (10 match / 46 refuse). The native fixture
+  `switch.akk` is the measured evidence for the construct; it is compared with
+  the interpreter under both optimiser modes.
+- Still refused by name: a `break` that carries a value in an arm, and a
+  `continue` in a switch that is not inside a loop.
+
 The interpreter and VM still produce byte-for-byte identical output and error
 text, which the parity harness enforces.
+
+### Step 12, string conversion and interpolation (landed)
+
+`str(x)` and `{name}` interpolation now compile, and both are one conversion:
+
+- The conversion builtins answer to `str`, `စာ` and `စာသား`, the names the
+  interpreter's `convert_target` already accepts, and become `Builtin::Str`.
+  The result kind is always `Str`, so the analyzer settles the destination
+  without knowing the argument, and it refuses a collection argument (whose
+  display form is the interpreter's `repr`, which would have to be rendered
+  into a buffer) instead of guessing.
+- Interpolation is a lowering rule, not a new runtime feature. `text_literal`
+  reads the literal exactly as `interpolate_text` does -- `\{` and `\}` are
+  literal braces, a `{…}` name is trimmed, placeholders are taken in source
+  order -- and builds `str(name)` pieces joined with `+`. `+` on two strings is
+  already `rt_concat_str`, so `"v = {x}"` and `"v = " + str(x)` are the same
+  program. An unclosed brace, an empty `{}`, a `{အတု …}` field placeholder and
+  an unknown name are refused by name (`E177`) rather than compiled.
+- A placeholder becomes `MirInst::ToStr` rather than a `Call` to `str`, so a
+  user function named `str` cannot shadow what interpolation means. The
+  instruction is typed `Str`, carried by the DCE and constant-fold passes, and
+  emitted by one codegen helper.
+- The runtime gained `rt_str_int` (decimal digits built backwards on the stack,
+  then copied into an arena `{ length, bytes }`), `rt_str_bool` (the interned
+  `True`/`False` descriptors the printer uses, so `str(b)` and `print(b)`
+  cannot disagree) and `rt_str_float`. The float formatter was already exact,
+  so it is reused: a `.data` flag tells its final step to copy the rendered
+  bytes into a fresh arena string instead of calling `rt_write`. The flag is
+  cleared before returning, so printing is unaffected.
+- Measured evidence: `tests/native/fixtures/stringify.akk` is compared with the
+  interpreter under both optimiser modes, covering ints (positive, negative,
+  zero and the largest), floats (fractional, whole, `-0.0`, a small and a very
+  large one), bools, a Myanmar string, escaped braces, a concatenated
+  conversion, and a parameter filled by a string and by an int call site.
+  Parity moved to **13 match / 43 refuse**: `native_interpolation`,
+  `eng_print` and `switch_forms` (which had been waiting on `str(i)`) compile
+  and match byte for byte. `functions`, `eng_fn` and `collections` now refuse
+  later than the interpolation, at their own unrelated gaps (kind inference for
+  an unconstrained parameter, a function returning on only one path, and a
+  binding re-used as a float and then a string).
+- Still refused by name: `str()` of a collection, a `{အတု …}` placeholder, an
+  unclosed or empty placeholder, and an interpolated name that is not in scope.
+
+### Step 13, catchable arithmetic errors (landed)
+
+A zero divisor for `/` or `%` now unwinds instead of exiting, so the
+interpreter's arithmetic codes behave like the raises they always were:
+
+- `HirExpr::Binary` carries the operator's line, which was previously dropped
+  in lowering (the AST already had it). Lowering emits `MirInst::GuardZero`
+  before every `/` and `%`: it names both operands, the operator, the line and
+  the block the error goes to -- `raise_target`, i.e. the innermost enclosing
+  `try` or the function's escape block. Being a real instruction with a
+  successor, the guard survives DCE (its target counts as reachable) and its
+  target is remapped when blocks are renumbered, so an optimised program cannot
+  lose the edge.
+- Codegen picks the code from the operand kinds, exactly as the interpreter
+  does: two ints give `E036` for `/` and `E038` for `%`, any float operand
+  gives `E037`/`E039`. A float divisor is compared with `ucomisd` and the
+  unordered (NaN) case is skipped, so a `NaN` divisor is not a zero. The
+  message is the interpreter's, built with the operator's line; the identity
+  slot gets the code and the prefix slot is emptied, because a panic is not a
+  named raise.
+- The unwinding protocol therefore changed from "prefix means pending" to "the
+  identity slot means pending": `check_error` after a call tests the identity,
+  `clear_error` empties it, and a `bind_error` whose prefix is empty binds the
+  code instead of a message. `E178` now tests that a prefix exists, so it takes
+  a raise and not a panic -- the interpreter's `error_matches` rule -- while `E`
+  still takes both. `rt_report_error` skips an empty slot, which is how an
+  uncaught panic prints just its message.
+- The analyzer accepts a clause for an interpreter code only when the program
+  can produce it: `GuardZero` with `/` puts `E036` and `E037` in the raised set,
+  `%` puts `E038` and `E039`. A clause for any other code (`E104`, `E049`) is
+  still refused with `E177`.
+- Measured evidence: the corpus fixtures `div_zero` and `mod_zero` moved from
+  refused to **match**, byte for byte (stdout, stderr with line numbers, exit
+  status), taking parity to **15 match / 41 refuse**. The new
+  `tests/native/fixtures/arith_catch.akk` pins the interesting cases under both
+  optimiser modes: `E` binds `E036`, `E037`/`E038`/`E039` are selected by code,
+  a matching clause runs its `finally`, `E178` lets a panic through, and the
+  final uncaught `%` prints `E038 လိုင်း 37 တွင် ...` and exits 1. The
+  pre-existing `E037`/`E038`/`E039` panic tests now compare stderr exactly
+  instead of only its first four characters.
+- Unchanged: a compound remainder assignment (`x %= 0`) still calls
+  `rt_panic_zero` and exits with `E038`, because `StoreVar` carries no line and
+  has no guard in front of it; the unused `rt_panic_div_int`/
+  `rt_panic_div_float` routines were removed.

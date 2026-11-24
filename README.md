@@ -310,9 +310,31 @@ error.
 - `akk build` (a native executable) supports raising and `try/catch` too. Its
   message must be text there, because the catch clause binds it and an uncaught
   raise prints it; a raise inside a call unwinds to the clause that selects it,
-  exactly as it does when interpreted. A `break`, `continue` or `return` that
-  would leave a `finally` without running it is refused with `E177` rather than
-  skipping the block.
+  exactly as it does when interpreted. A zero divisor for `/` or `%` is a
+  runtime error there too -- `E036`/`E037` for a division, `E038`/`E039` for a
+  remainder, chosen by the operand kinds -- and it unwinds like a raise: a
+  clause for that code catches it and binds the code, a `finally` still runs,
+  `E178` does not take it, and an uncaught one writes the interpreter's exact
+  line (line number included) and exits 1. A `break`, `continue` or `return`
+  that would leave a `finally` without running it is refused with `E177` rather
+  than skipping the block.
+- `akk build` supports `switch` in both spellings. The subject is evaluated
+  once, then the case expressions in written order until one is equal to it,
+  so a later case is never evaluated and its side effects never happen; the
+  first matching arm runs and nothing falls through, and the `default` arm
+  runs only when no case matched, wherever it is written. A `break` inside an
+  arm stops the switch rather than the loop it sits in, while a `continue`
+  still reaches that loop. Equality is the language's `==`, so a float subject
+  never equals an `int` case.
+- `akk build` supports `str(x)` (also spelled `စာ` and `စာသား`) for an int, a
+  float, a bool and a string, and `{name}` interpolation inside a string
+  literal. The conversion is the interpreter's display form exactly -- `3.0`
+  for a whole float, `2.5`, `True`/`False`, a string unchanged -- and
+  interpolation is that conversion joined left to right with `+`, so
+  `"v = {x}"` and `"v = " + str(x)` print the same text. `\{` and `\}` are
+  literal braces, and a placeholder is resolved where the literal is written.
+  A collection's `repr`, a `{အတု …}` self-field placeholder and a name that is
+  not in scope are refused with `E177` rather than printed differently.
 - `akk build` supports list/tuple/set/dict literals, indexing, `len`,
   collection printing, `for` over a list, tuple or set (a dict yields its
   keys, in insertion order) or over a number (the interpreter's auto-range:
@@ -323,7 +345,12 @@ error.
   list a variable names and answers the new length, and `reverse` answers the
   elements in the opposite order: a list variable is reversed in place, while a
   tuple or a list literal is reversed as a value (text reverse needs the
-  Unicode tables and is still refused). A write builds a fresh collection and
+  Unicode tables and is still refused). `pop`, `insert`, `remove` and `sort`
+  work on a list variable too: `pop`/`remove` answer the element they dropped,
+  `insert` answers the new length, and `sort` is a stable ascending sort over
+  ints, floats or strings. Popping an empty list and a position outside the
+  list are the interpreter's `E110`/`E049`, without the line clause a compiled
+  call cannot carry. A write builds a fresh collection and
   rebinds the name, so another binding keeps its own contents, exactly as the
   interpreter's value semantics do. Equality (`==`/`!=`) is structural and
   order-sensitive, like the printed form: same kind, length and elements, and

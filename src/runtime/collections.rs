@@ -63,6 +63,9 @@ pub(crate) fn emit(
     let key_mid = data.intern(" တွင် သော့ \"");
     let key_suffix = data.intern("\" ကို ရှာမတွေ့ပါ။");
     let exhausted = data.intern("E177 native runtime arena ကုန်ဆုံးသွားပါသည်။");
+    let pop_empty = data.intern("E110 pop() စာရင်းအလွတ်မှ ဖယ်၍မရပါ");
+    let index_plain_prefix = data.intern("E049 အညွှန်း ");
+    let index_plain_suffix = data.intern(" သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။");
 
     emit_alloc(
         code,
@@ -79,6 +82,10 @@ pub(crate) fn emit(
     emit_items_range(code);
     emit_store(code);
     emit_reverse(code);
+    emit_pop(code, pop_empty, newline);
+    emit_insert(code);
+    emit_remove(code);
+    emit_sort(code);
     emit_panic_message(code, newline);
     emit_panics(
         code,
@@ -89,6 +96,8 @@ pub(crate) fn emit(
         key_prefix,
         key_mid,
         key_suffix,
+        index_plain_prefix,
+        index_plain_suffix,
         newline,
     );
     emit_print(
@@ -602,6 +611,368 @@ fn emit_reverse(code: &mut Code) {
     code.ret();
 }
 
+/// `rt_pop_seq`: `rax` is a list descriptor. The result is a fresh descriptor
+/// without its last element in `rax` and the dropped element's word in `rdx`.
+/// An empty list is the interpreter's `E110` panic (with no line number, since
+/// a call carries no span).
+fn emit_pop(code: &mut Code, pop_empty: u32, newline: u32) {
+    code.label("rt_pop_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(48);
+    code.store(-8, RAX);
+    code.load_ptr_disp32(RCX, RAX, 8);
+    code.test_rr(RCX, RCX);
+    code.jcc(CC_NE, "pop_nonempty");
+    write(code, pop_empty, "E110 pop() စာရင်းအလွတ်မှ ဖယ်၍မရပါ".len(), true);
+    write(code, newline, 1, true);
+    code.mov_imm32_zero(RAX, 1);
+    code.call("rt_exit");
+    code.ud2();
+    code.label("pop_nonempty");
+    code.dec(RCX);
+    code.store(-16, RCX);
+    code.mov_rr(RDI, RCX);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-24, RAX);
+    // Header: the source's kind tag, then the shorter length.
+    code.load(RCX, -8);
+    code.load_ptr(RDX, RCX);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    code.load(RDX, -16);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-32, RCX);
+    code.label("pop_copy");
+    code.load(RCX, -32);
+    code.load(RDX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "pop_copied");
+    code.load(RAX, -8);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.add_rr(R8, RAX);
+    code.load(R9, -24);
+    code.mov_rr(R10, RCX);
+    code.shl_imm(R10, 4);
+    code.add_imm8(R10, 16);
+    code.add_rr(R10, R9);
+    code.load_ptr(R11, R8);
+    code.store_ptr_disp32(R10, 0, R11);
+    code.load_ptr_disp32(R11, R8, 8);
+    code.store_ptr_disp32(R10, 8, R11);
+    code.load(RCX, -32);
+    code.inc(RCX);
+    code.store(-32, RCX);
+    code.jmp("pop_copy");
+    code.label("pop_copied");
+    // The dropped word is element `newlen` of the source: 24 + 16 * newlen.
+    code.load(RAX, -8);
+    code.load(RCX, -16);
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 24);
+    code.add_rr(RCX, RAX);
+    code.load_ptr(RDX, RCX);
+    code.load(RAX, -24);
+    code.leave();
+    code.ret();
+}
+
+/// `rt_insert_seq`: `rax` is a list descriptor, `rcx` the position, `rdx` the
+/// value word and `rdi` its tag. The position may equal the length, which
+/// appends; anything outside `0..=len` is the interpreter's `E049` (without
+/// the line clause a call cannot carry). The result is a new descriptor in
+/// `rax`.
+fn emit_insert(code: &mut Code) {
+    code.label("rt_insert_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(96);
+    code.store(-8, RAX);
+    code.store(-16, RCX);
+    code.store(-24, RDX);
+    code.store(-32, RDI);
+    code.load_ptr_disp32(R9, RAX, 8);
+    code.store(-40, R9);
+    code.load(RCX, -16);
+    code.cmp_imm32(RCX, 0);
+    code.jcc(CC_L, "insert_bad");
+    code.load(RDX, -40);
+    code.load(RCX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_A, "insert_bad");
+    code.load(R9, -40);
+    code.inc(R9);
+    code.store(-48, R9);
+    code.mov_rr(RDI, R9);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-56, RAX);
+    code.load(RCX, -8);
+    code.load_ptr(RDX, RCX);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    code.load(RDX, -48);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-64, RCX);
+    code.label("insert_copy");
+    code.load(RCX, -64);
+    code.load(RDX, -40);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "insert_copied");
+    // The source element.
+    code.load(RAX, -8);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.add_rr(R8, RAX);
+    // Everything from the position on moves one place right.
+    code.load(R9, -64);
+    code.load(R10, -16);
+    code.cmp_rr(R9, R10);
+    code.jcc(CC_B, "insert_keep_index");
+    code.inc(R9);
+    code.label("insert_keep_index");
+    code.shl_imm(R9, 4);
+    code.add_imm8(R9, 16);
+    code.load(R10, -56);
+    code.add_rr(R9, R10);
+    code.load_ptr(R10, R8);
+    code.store_ptr_disp32(R9, 0, R10);
+    code.load_ptr_disp32(R10, R8, 8);
+    code.store_ptr_disp32(R9, 8, R10);
+    code.load(RCX, -64);
+    code.inc(RCX);
+    code.store(-64, RCX);
+    code.jmp("insert_copy");
+    code.label("insert_copied");
+    // The new element at the position.
+    code.load(RAX, -56);
+    code.load(RCX, -16);
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 16);
+    code.add_rr(RCX, RAX);
+    code.load(RDX, -24);
+    code.store_ptr_disp32(RCX, 8, RDX);
+    code.load(RDX, -32);
+    code.store_ptr_disp32(RCX, 0, RDX);
+    code.load(RAX, -56);
+    code.leave();
+    code.ret();
+    code.label("insert_bad");
+    code.load(RAX, -16);
+    code.call("rt_panic_index_plain");
+    code.ud2();
+}
+
+/// `rt_remove_seq`: `rax` is a list descriptor and `rcx` the position. The
+/// result is a fresh descriptor without that element in `rax` and the removed
+/// element's word in `rdx`. A position outside `0..len` is `E049` without the
+/// line clause.
+fn emit_remove(code: &mut Code) {
+    code.label("rt_remove_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(80);
+    code.store(-8, RAX);
+    code.store(-16, RCX);
+    code.load_ptr_disp32(R9, RAX, 8);
+    code.store(-24, R9);
+    code.load(RCX, -16);
+    code.cmp_imm32(RCX, 0);
+    code.jcc(CC_L, "remove_bad");
+    code.load(RDX, -24);
+    code.load(RCX, -16);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "remove_bad");
+    code.load(R9, -24);
+    code.dec(R9);
+    code.store(-32, R9);
+    code.mov_rr(RDI, R9);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-40, RAX);
+    code.load(RCX, -8);
+    code.load_ptr(RDX, RCX);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    code.load(RDX, -32);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-48, RCX);
+    code.label("remove_copy");
+    code.load(RCX, -48);
+    code.load(RDX, -32);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "remove_copied");
+    // Everything after the position comes from one place further on.
+    code.load(R9, -48);
+    code.load(R10, -16);
+    code.cmp_rr(R9, R10);
+    code.jcc(CC_B, "remove_keep_source");
+    code.inc(R9);
+    code.label("remove_keep_source");
+    code.load(RAX, -8);
+    code.shl_imm(R9, 4);
+    code.add_imm8(R9, 16);
+    code.add_rr(R9, RAX);
+    code.load(R10, -40);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.add_rr(R8, R10);
+    code.load_ptr(R11, R9);
+    code.store_ptr_disp32(R8, 0, R11);
+    code.load_ptr_disp32(R11, R9, 8);
+    code.store_ptr_disp32(R8, 8, R11);
+    code.load(RCX, -48);
+    code.inc(RCX);
+    code.store(-48, RCX);
+    code.jmp("remove_copy");
+    code.label("remove_copied");
+    // The removed word is the source element at the position.
+    code.load(RAX, -8);
+    code.load(RCX, -16);
+    code.shl_imm(RCX, 4);
+    code.add_imm8(RCX, 24);
+    code.add_rr(RCX, RAX);
+    code.load_ptr(RDX, RCX);
+    code.load(RAX, -40);
+    code.leave();
+    code.ret();
+    code.label("remove_bad");
+    code.load(RAX, -16);
+    code.call("rt_panic_index_plain");
+    code.ud2();
+}
+
+/// `rt_sort_seq`: `rax` is a list descriptor and `rdi` picks the comparison --
+/// `0` ints, `1` floats, `2` strings. The result is a fresh, stably sorted
+/// descriptor in `rax`; the source is never written. Insertion sort keeps the
+/// interpreter's stable order for equal elements, and every element of a
+/// native list shares one kind (the analyzer's element shape), so only the
+/// words move.
+fn emit_sort(code: &mut Code) {
+    code.label("rt_sort_seq");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(96);
+    code.store(-8, RAX);
+    code.store(-16, RDI);
+    code.load_ptr_disp32(RCX, RAX, 8);
+    code.store(-24, RCX);
+    code.mov_rr(RDI, RCX);
+    code.shl_imm(RDI, 4);
+    code.add_imm8(RDI, 16);
+    code.call("rt_alloc");
+    code.store(-32, RAX);
+    code.load(RCX, -8);
+    code.load_ptr(RDX, RCX);
+    code.store_ptr_disp32(RAX, 0, RDX);
+    code.load(RDX, -24);
+    code.store_ptr_disp32(RAX, 8, RDX);
+    // Copy every element, then sort the copy.
+    code.mov_imm32_zero(RCX, 0);
+    code.store(-40, RCX);
+    code.label("sort_copy");
+    code.load(RCX, -40);
+    code.load(RDX, -24);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "sort_copied");
+    code.load(RAX, -8);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.add_imm8(R8, 16);
+    code.add_rr(R8, RAX);
+    code.load(R9, -32);
+    code.mov_rr(R10, RCX);
+    code.shl_imm(R10, 4);
+    code.add_imm8(R10, 16);
+    code.add_rr(R10, R9);
+    code.load_ptr(R11, R8);
+    code.store_ptr_disp32(R10, 0, R11);
+    code.load_ptr_disp32(R11, R8, 8);
+    code.store_ptr_disp32(R10, 8, R11);
+    code.load(RCX, -40);
+    code.inc(RCX);
+    code.store(-40, RCX);
+    code.jmp("sort_copy");
+    code.label("sort_copied");
+    code.mov_imm32(RCX, 1);
+    code.store(-48, RCX);
+    code.label("sort_outer");
+    code.load(RCX, -48);
+    code.load(RDX, -24);
+    code.cmp_rr(RCX, RDX);
+    code.jcc(CC_AE, "sort_done");
+    code.store(-56, RCX);
+    code.label("sort_inner");
+    code.load(RCX, -56);
+    code.test_rr(RCX, RCX);
+    code.jcc(CC_E, "sort_next_i");
+    // Element `j - 1` is at `dest + 8 + 16 * j`, element `j` at `dest + 24 +
+    // 16 * j`; only the words move, because the tags are all the same kind.
+    code.load(RAX, -32);
+    code.mov_rr(R8, RCX);
+    code.shl_imm(R8, 4);
+    code.mov_rr(R9, R8);
+    code.add_imm8(R9, 8);
+    code.add_rr(R9, RAX);
+    code.mov_rr(R10, R8);
+    code.add_imm8(R10, 24);
+    code.add_rr(R10, RAX);
+    code.store(-64, R9);
+    code.store(-72, R10);
+    code.load(RDI, -16);
+    code.cmp_imm32(RDI, 0);
+    code.jcc(CC_NE, "sort_not_int");
+    code.load_ptr(RDX, R9);
+    code.load_ptr(R11, R10);
+    code.cmp_rr(RDX, R11);
+    code.jcc(CC_LE, "sort_next_i");
+    code.jmp("sort_swap");
+    code.label("sort_not_int");
+    code.cmp_imm32(RDI, 1);
+    code.jcc(CC_NE, "sort_strings");
+    code.load_ptr(RDX, R9);
+    code.movq_xmm_gpr(XMM0, RDX);
+    code.load_ptr(R11, R10);
+    code.movq_xmm_gpr(XMM1, R11);
+    code.ucomisd(XMM0, XMM1);
+    code.jcc(CC_BE, "sort_next_i");
+    code.jmp("sort_swap");
+    code.label("sort_strings");
+    code.load_ptr(RAX, R9);
+    code.load_ptr(RCX, R10);
+    code.call("rt_cmp_str");
+    code.test_rr(RAX, RAX);
+    code.jcc(CC_LE, "sort_next_i");
+    code.label("sort_swap");
+    code.load(R9, -64);
+    code.load(R10, -72);
+    code.load_ptr(RDX, R9);
+    code.load_ptr(R11, R10);
+    code.store_ptr(R9, R11);
+    code.store_ptr(R10, RDX);
+    code.load(RCX, -56);
+    code.dec(RCX);
+    code.store(-56, RCX);
+    code.jmp("sort_inner");
+    code.label("sort_next_i");
+    code.load(RCX, -48);
+    code.inc(RCX);
+    code.store(-48, RCX);
+    code.jmp("sort_outer");
+    code.label("sort_done");
+    code.load(RAX, -32);
+    code.leave();
+    code.ret();
+}
+
 /// `rt_store_seq`: `rax` is a list/tuple descriptor, `rcx` the index, `rdx` the
 /// value word, `rdi` its tag and `r8` the source line. The index may equal the
 /// length, which appends, and anything else outside `0..=len` is the
@@ -1018,6 +1389,8 @@ fn emit_panics(
     key_prefix: u32,
     key_mid: u32,
     key_suffix: u32,
+    index_plain_prefix: u32,
+    index_plain_suffix: u32,
     newline: u32,
 ) {
     let index_prefix_len = "E049 လိုင်း ".len();
@@ -1060,6 +1433,28 @@ fn emit_panics(
     code.load(RAX, -16);
     code.call("rt_write_str_err");
     write(code, key_suffix, key_suffix_len, true);
+    write(code, newline, 1, true);
+    code.mov_imm32_zero(RAX, 1);
+    code.call("rt_exit");
+    code.ud2();
+
+    // `rax` is the offending index of a builtin call. A call carries no span,
+    // so the line clause is left out -- the same rule the arithmetic panics
+    // follow -- and the interpreter's sentence is otherwise unchanged.
+    code.label("rt_panic_index_plain");
+    code.push(RBP);
+    code.mov_rbp_rsp();
+    code.sub_rsp(16);
+    code.store(-16, RAX);
+    write(code, index_plain_prefix, "E049 အညွှန်း ".len(), true);
+    code.load(RAX, -16);
+    code.call("rt_write_int_err");
+    write(
+        code,
+        index_plain_suffix,
+        " သည် အကွာအဝေးပြင်ပတွင် ရှိနေပါသည်။".len(),
+        true,
+    );
     write(code, newline, 1, true);
     code.mov_imm32_zero(RAX, 1);
     code.call("rt_exit");

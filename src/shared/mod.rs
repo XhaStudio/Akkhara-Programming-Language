@@ -8,6 +8,11 @@
 pub(crate) mod errors;
 pub(crate) mod sym;
 
+/// The marker that starts a `{အတု <field>}` interpolation placeholder: the
+/// one that reads a field off the object under construction. It lives here,
+/// not in the interpreter, because the middle end lowers interpolation too.
+pub(crate) const SELF_PREFIX: &str = "အတု ";
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

@@ -73,11 +73,15 @@ fn reachable(function: &MirFn) -> HashSet<usize> {
         let Some(block) = function.blocks.get(index) else {
             continue;
         };
-        // A call that raises jumps to its check's target, so that block is
-        // reachable even though the block's terminator does not name it.
+        // A call that raises jumps to its check's target, and a zero-divisor
+        // guard jumps to its handler, so those blocks are reachable even
+        // though the block's terminator does not name them.
         for instruction in &block.insts {
-            if let MirInst::CheckError { target } = instruction {
-                pending.push(*target as usize);
+            match instruction {
+                MirInst::CheckError { target } | MirInst::GuardZero { target, .. } => {
+                    pending.push(*target as usize)
+                }
+                _ => {}
             }
         }
         match &block.term {
@@ -114,8 +118,11 @@ fn prune(function: &mut MirFn, reachable: &HashSet<usize>) {
         block.id = number;
         block.term = block.term.map(|term| remap(term, &numbers));
         for instruction in &mut block.insts {
-            if let MirInst::CheckError { target } = instruction {
-                *target = numbers.get(target).copied().unwrap_or(*target);
+            match instruction {
+                MirInst::CheckError { target } | MirInst::GuardZero { target, .. } => {
+                    *target = numbers.get(target).copied().unwrap_or(*target);
+                }
+                _ => {}
             }
         }
         kept.push(block);
@@ -164,6 +171,7 @@ fn operands(instruction: &MirInst) -> Vec<&Operand> {
         | MirInst::IsType { value, .. }
         | MirInst::Items { value, .. }
         | MirInst::Len { value, .. }
+        | MirInst::ToStr { value, .. }
         | MirInst::StoreVar { value, .. }
         | MirInst::SetError { value, .. } => vec![value],
         MirInst::Call { args, .. }
@@ -187,6 +195,7 @@ fn operands(instruction: &MirInst) -> Vec<&Operand> {
             .collect(),
         MirInst::StoreField { base, value, .. } => vec![base, value],
         MirInst::Print(value) | MirInst::Eval(value) => vec![value],
+        MirInst::GuardZero { lhs, rhs, .. } => vec![lhs, rhs],
         MirInst::ErrorMatches { .. }
         | MirInst::BindError { .. }
         | MirInst::ClearError
@@ -248,6 +257,7 @@ fn dest(instruction: &MirInst) -> Option<Temp> {
         | MirInst::IsType { dest, .. }
         | MirInst::Items { dest, .. }
         | MirInst::Len { dest, .. }
+        | MirInst::ToStr { dest, .. }
         | MirInst::ErrorMatches { dest, .. } => Some(*dest),
         MirInst::StoreVar { .. }
         | MirInst::StoreIndex { .. }
@@ -255,6 +265,7 @@ fn dest(instruction: &MirInst) -> Option<Temp> {
         | MirInst::Print(_)
         | MirInst::Eval(_)
         | MirInst::SetError { .. }
+        | MirInst::GuardZero { .. }
         | MirInst::BindError { .. }
         | MirInst::ClearError
         | MirInst::CheckError { .. } => None,

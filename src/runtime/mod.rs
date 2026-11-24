@@ -16,6 +16,7 @@ pub(crate) mod panic;
 pub(crate) mod print;
 pub(crate) mod raise;
 pub(crate) mod rem;
+pub(crate) mod strconv;
 pub(crate) mod string;
 pub(crate) mod value;
 
@@ -50,6 +51,7 @@ pub(crate) fn emit(
     imports: &mut Vec<Import>,
     error_prefix: u32,
     error_payload: u32,
+    str_mode: u32,
     arena_used: u32,
     arena_start: u32,
     arena_size: u32,
@@ -59,13 +61,13 @@ pub(crate) fn emit(
     let platform = print::declare_imports(data, imports, target);
     print::emit_write_and_exit(code, &platform);
     print::emit_int(code, data);
-    float::emit(code);
+    float::emit(code, str_mode);
     print::emit_bool(code, data);
     print::emit_str(code, data);
+    strconv::emit(code, data);
     string::emit_cmp(code);
     string::emit_cat(code);
     panic::emit_zero(code, data);
-    panic::emit_div(code, data);
     rem::emit(code, data);
     raise::emit_report(code, data, error_prefix, error_payload);
     collections::emit(code, data, arena_used, arena_start, arena_size);

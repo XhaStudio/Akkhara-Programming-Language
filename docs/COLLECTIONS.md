@@ -385,6 +385,10 @@ shape မတူလျှင် `E177` ဖြင့် ငြင်းသည်�
 ငြင်းသည်။
 စာသားထဲ အက္ခရာရေးခြင်း၊ nested element ထဲ ရေးခြင်း (parser ကိုယ်တိုင် `E001` ဖြင့် ငြင်းသည်) နှင့်
 ဒြပ်စင် အမျိုးအစား ရောထည့်ခြင်းတို့ကို မထောက်ပံ့သေးဘဲ `E177` ဖြင့် ငြင်းသည်။
+`push`/`append`၊ `pop`၊ `insert`၊ `remove` နှင့် `sort` တို့ကို ယခု `akk build` တွင်လည်း
+သုံးနိုင်ပြီး — `sort` က int/float/string စာရင်းအတွက် stable ascending အစဉ်ဖြစ်သည်။
+အလွတ်စာရင်းမှ `pop` နှင့် စာရင်းအပြင်ဘက် အညွှန်းတို့သည် interpreter ၏ `E110`/`E049`
+ဖြစ်ပြီး၊ call တွင် line မသယ်ဆောင်သဖြင့် လိုင်းအပိုင်းသာ မပါပါ။
 အလွတ် စုစည်းမှုအဖြစ် စတင်ခဲ့သော အတွင်းပိုင်း စုစည်းမှုကို ထပ်မံ index လုပ်ခြင်းကိုလည်း
 (ဒြပ်စင် အမျိုးအစား မသိနိုင်သေးသဖြင့်) `E177` ဖြင့် ငြင်းသည်။ စုစည်းမှုကို အစဉ်လိုက် နှိုင်းယှဉ်ခြင်း (`<`, `>`) သည် interpreter
 နည်းတူ `E042` ဖြစ်ပြီး native တွင်လည်း တူညီသော စာသား၊ လိုင်းနှင့် exit 1 ဖြစ်သည်။
@@ -394,5 +398,5 @@ shape မတူလျှင် `E177` ဖြင့် ငြင်းသည်�
 w မှာ "မြ" ဖြစ်၏။
 w[0] က "က"။
 # အမှား:
-# E177 native backend တွင် a write into a string ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
+# E177 native backend တွင် a write into a string ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, pop/insert/remove/sort, str conversion နှင့် {…} interpolation, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)
 ```

@@ -200,6 +200,93 @@ const CASES: &[Case] = &[
             "[3, 1, 2, 4, 5, 6]",
         ],
     },
+    // `pop`, `insert`, `remove` and `sort`: the value each returns, the length
+    // `insert` answers, the position rules (front, middle, the length itself),
+    // a discarded result still changing the list, value semantics across a
+    // second binding, and an int, float and string sort.
+    Case {
+        name: "list_edits",
+        stdout: &[
+            "2",
+            "[3, 1]",
+            "3",
+            "[3, 9, 1]",
+            "3",
+            "[9, 1]",
+            "[1, 9]",
+            "[1, 9]",
+            "9",
+            "[1, 9]",
+            "[1]",
+            "[7, 1]",
+            "[7, 1, 5]",
+            "[1.5, 2.0, 2.5]",
+            "[1.5, 2.0, 2.5]",
+            "[\"a\", \"b\", \"c\"]",
+            "[\"a\", \"b\", \"c\"]",
+            "[4]",
+            "[]",
+        ],
+    },
+    // `switch`: the default arm runs only when no case matched wherever it is
+    // written, only the first match runs, the case expressions are evaluated
+    // in written order until one does, there is no fall-through, a float never
+    // equals an int case, a `break` stops the switch and not the loop around
+    // it, a `continue` still reaches that loop, and the Myanmar spelling works.
+    Case {
+        name: "switch",
+        stdout: &[
+            "nine",
+            "fallback",
+            "no-match",
+            "only-default",
+            "1",
+            "2",
+            "probe-two",
+            "float-one",
+            "inner",
+            "after-switch",
+            "true",
+            "other",
+            "tail",
+            "one",
+            "tail",
+            "other",
+            "tail",
+            "0",
+            "after",
+            "1",
+            "after",
+            "3",
+            "after",
+            "seven",
+        ],
+    },
+    // `str()` of an int (positive, negative, zero), a float (fractional, whole,
+    // -0.0, a small and a very large one), a bool and a string; `{…}`
+    // interpolation with the same display forms, an escaped brace pair, a
+    // concatenated conversion, and a parameter from both call kinds.
+    Case {
+        name: "stringify",
+        stdout: &[
+            "42",
+            "-7",
+            "0",
+            "2.5",
+            "3.0",
+            "True",
+            "False",
+            "မြန်မာ",
+            "n = 42, f = 2.5",
+            "yes = True, s = မြန်မာ",
+            "brace { 42 }",
+            "42 2.5 False",
+            "sum = 43",
+            "Hi, World!",
+            "Hi, မြန်မာ!",
+            "num = 9",
+        ],
+    },
     // `for` over a list, a tuple, a set and a dict (whose iteration yields its
     // keys), then `continue` and `break` inside a collection loop.
     Case {
@@ -312,6 +399,20 @@ const CASES: &[Case] = &[
             "plain body",
             "plain finally",
             "end",
+        ],
+    },
+    // A run-time arithmetic error is catchable like a raise: `E` takes it and
+    // binds its code, a named clause matches `E037`/`E038`/`E039`, a matching
+    // clause still runs its `finally`, and `E178` does not take a panic. The
+    // program then ends uncaught with the interpreter's exact `E038` line.
+    Case {
+        name: "arith_catch",
+        stdout: &[
+            "E036",
+            "caught E037",
+            "caught E038",
+            "finally",
+            "caught E039",
         ],
     },
 ];
@@ -470,10 +571,10 @@ fn built_programs_match_the_interpreter() {
     );
 }
 
-/// `%` by zero is the one run-time failure the slice can hit. The interpreter
+/// `%` by zero is a run-time failure the slice can hit. The interpreter
 /// reports `E038` on stderr and exits 1; the executable writes the same
-/// message to stderr (with no line number, because compiled code carries no
-/// spans) and exits 1 too.
+/// message, with the same line number the operator's span gives it, and exits
+/// 1 too.
 #[test]
 fn a_modulo_by_zero_panics_like_the_interpreter() {
     if !cfg!(target_arch = "x86_64") {
@@ -511,6 +612,10 @@ fn a_modulo_by_zero_panics_like_the_interpreter() {
     assert!(
         native_stderr.starts_with("E038"),
         "the executable should reach the panic, got {native_stderr:?}"
+    );
+    assert_eq!(
+        native_stderr, reference_stderr,
+        "the panic line should match the interpreter's byte for byte"
     );
     assert_eq!(
         native.status.code(),
@@ -567,8 +672,7 @@ fn a_float_division_by_zero_panics_like_the_interpreter() {
 }
 
 /// A float remainder by zero is the interpreter's `E039`: the executable writes
-/// the same message (without the line number compiled code has no span for) to
-/// stderr and exits 1.
+/// the same message to stderr, line number included, and exits 1.
 #[test]
 fn a_float_remainder_by_zero_panics_like_the_interpreter() {
     if !cfg!(target_arch = "x86_64") {
@@ -662,6 +766,52 @@ fn an_uncaught_raise_reports_like_the_interpreter() {
         );
         assert_eq!(native.status.code(), Some(1));
     }
+}
+
+/// Popping an empty list is the interpreter's `E110`: the executable writes the
+/// same sentence (without the line number compiled code has no span for) to
+/// stderr and exits 1, and never reaches the statement after the pop.
+#[test]
+fn a_pop_from_an_empty_list_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let dir = work_dir("pop_empty", "opt");
+    let source = dir.join("pop_empty.akk");
+    fs::copy(fixtures().join("pop_empty.akk"), &source).expect("the fixture");
+
+    let reference = interpret(&source);
+    let built = build(&source, true);
+    assert!(
+        built.status.success(),
+        "`akk build` failed: {}",
+        text(&built.stderr).trim()
+    );
+    let native = execute(&executable_for(&source));
+
+    assert_eq!(
+        program_output(text(&reference.stdout)),
+        "before\n",
+        "the interpreter prints the statement before the panic"
+    );
+    assert_eq!(
+        text(&native.stdout),
+        "before\n",
+        "the executable prints the statement before the panic"
+    );
+    let reference_stderr = text(&reference.stderr);
+    let native_stderr = text(&native.stderr);
+    assert!(
+        reference_stderr.contains("E110") && reference_stderr.contains("pop()"),
+        "the interpreter should report the empty pop, got {reference_stderr:?}"
+    );
+    assert_eq!(
+        native_stderr.trim_end(),
+        "E110 pop() စာရင်းအလွတ်မှ ဖယ်၍မရပါ",
+        "the executable writes the interpreter's sentence without the line"
+    );
+    assert_eq!(native.status.code(), Some(1));
+    assert_eq!(native.status.code(), reference.status.code());
 }
 
 /// A construct is outside the slice, with the word the message should name it
@@ -821,6 +971,16 @@ const MISUSE: &[Misuse] = &[
         name: "reverse_arity",
         mentions: "reverse",
         source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(reverse());\n",
+    },
+    Misuse {
+        name: "insert_arity",
+        mentions: "insert",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(insert(xs, 1));\n",
+    },
+    Misuse {
+        name: "sort_extra",
+        mentions: "sort",
+        source: "xs မှာ [2, 1] ဖြစ်၏။\nprint(sort(xs, 1));\n",
     },
 ];
 

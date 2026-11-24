@@ -128,6 +128,9 @@ pub(crate) fn compile(program: &MirProgram, target: Target) -> Result<Image, Str
     let error_payload = data.reserve_slot();
     // The collection arena: its bump offset and the zeroed bytes themselves.
     let arena_used = data.reserve_slot();
+    // Non-zero while `rt_str_float` runs: the float formatter then builds the
+    // string instead of writing it to stdout.
+    let str_mode = data.reserve_slot();
     let arena_start = data.reserve_arena(ARENA_SIZE as usize);
     let mut imports = Vec::new();
     // Label names must be unique across the whole image: `finish` resolves a
@@ -141,6 +144,8 @@ pub(crate) fn compile(program: &MirProgram, target: Target) -> Result<Image, Str
         let mut gen = Gen {
             kinds: typed_fn.temps.clone(),
             var_kinds: typed_fn.vars.clone(),
+            elems: typed_fn.elems.clone(),
+            var_elems: typed_fn.var_elems.clone(),
             slots: slots.temps,
             var_slots: slots.vars,
             callees: typed.clone_indexes(),
@@ -219,6 +224,7 @@ pub(crate) fn compile(program: &MirProgram, target: Target) -> Result<Image, Str
         &mut imports,
         error_prefix,
         error_payload,
+        str_mode,
         arena_used,
         arena_start,
         ARENA_SIZE,
@@ -469,6 +475,10 @@ fn dedup_dict(pairs: &[(Operand, Operand)]) -> Result<Vec<(Operand, Operand)>, S
 struct Gen {
     kinds: HashMap<Temp, Kind>,
     var_kinds: HashMap<VarId, Kind>,
+    /// The element shape of a collection temporary (see [`super::Typed`]).
+    elems: HashMap<Temp, Vec<Kind>>,
+    /// The element shape of a collection binding.
+    var_elems: HashMap<VarId, Vec<Kind>>,
     slots: HashMap<Temp, i32>,
     var_slots: HashMap<VarId, i32>,
     callees: HashMap<String, usize>,
@@ -520,6 +530,22 @@ impl Gen {
             // `analyze` refuses this before code generation runs.
             Operand::Const(Const::Null) => {}
             Operand::Name(_) | Operand::Fn(_) => {}
+        }
+    }
+
+    /// The first element kind of a collection operand, when the analyzer
+    /// settled one. `sort` needs it to pick the runtime's comparison.
+    fn elem_kind(&self, operand: &Operand) -> Option<Kind> {
+        match operand {
+            Operand::Temp(temp) => self
+                .elems
+                .get(temp)
+                .and_then(|shape| shape.first().copied()),
+            Operand::Var(var) => self
+                .var_elems
+                .get(var)
+                .and_then(|shape| shape.first().copied()),
+            _ => None,
         }
     }
 
@@ -622,31 +648,16 @@ impl Gen {
                         '%' => {
                             // No SSE remainder: the runtime's x87 `fprem`
                             // routine computes the interpreter's `rem_euclid`
-                            // over the two promoted doubles, and reports its
-                            // E039 for a zero divisor.
+                            // over the two promoted doubles. Its own zero check
+                            // never fires: the `guard_zero` emitted before this
+                            // instruction already raised `E039`.
                             code.movq_gpr_xmm(RAX, XMM0);
                             code.movq_gpr_xmm(RCX, XMM1);
                             code.call("rt_rem_float");
                             self.store(code, &Operand::Temp(*dest));
                             return Ok(());
                         }
-                        '/' => {
-                            // The interpreter reports E037 for a zero float
-                            // divisor. A NaN divisor is not zero (parity is
-                            // set, so the panic is skipped).
-                            let site = self.next_site();
-                            let nonzero = format!("fdiv_nz_{site}");
-                            // A zero divisor is E037; a NaN one merely comes
-                            // out unordered, so parity skips the panic.
-                            code.xorpd(XMM2, XMM2);
-                            code.ucomisd(XMM1, XMM2);
-                            code.jcc(CC_P, &nonzero);
-                            code.jcc(CC_NE, &nonzero);
-                            code.call("rt_panic_div_float");
-                            code.ud2();
-                            code.label(&nonzero);
-                            code.divsd(XMM0, XMM1);
-                        }
+                        '/' => code.divsd(XMM0, XMM1),
                         other => return Err(unsupported(&format!("the operator '{}'", other))),
                     }
                     code.movq_gpr_xmm(RAX, XMM0);
@@ -662,17 +673,10 @@ impl Gen {
                     '+' => code.add_rr(RAX, RCX),
                     '-' => code.sub_rr(RAX, RCX),
                     '*' => code.imul_rr(RAX, RCX),
-                    '%' => self.remainder(code),
+                    '%' => self.remainder(code, false),
                     '/' => {
-                        // Two ints divide as doubles, and a zero divisor is
-                        // the interpreter's E036 rather than a hardware trap.
-                        let site = self.next_site();
-                        let nonzero = format!("idiv_nz_{site}");
-                        code.test_rr(RCX, RCX);
-                        code.jcc(CC_NE, &nonzero);
-                        code.call("rt_panic_div_int");
-                        code.ud2();
-                        code.label(&nonzero);
+                        // The zero divisor was already refused by the
+                        // `guard_zero` before this instruction.
                         code.cvtsi2sd(XMM0, RAX);
                         code.cvtsi2sd(XMM1, RCX);
                         code.divsd(XMM0, XMM1);
@@ -858,7 +862,11 @@ impl Gen {
                     '+' => code.add_rr(RAX, RCX),
                     '-' => code.sub_rr(RAX, RCX),
                     '*' => code.imul_rr(RAX, RCX),
-                    '%' => self.remainder(code),
+                    // A compound assignment has no `guard_zero` in front of
+                    // it, so the remainder keeps its own check and exits with
+                    // the interpreter's `E038` (without the line it has no
+                    // span for here).
+                    '%' => self.remainder(code, true),
                     other => return Err(unsupported(&format!("the operator '{}='", other))),
                 }
                 self.store(code, &Operand::Var(*var));
@@ -875,6 +883,65 @@ impl Gen {
                     return Err(unsupported(&format!("a function call to \"{}\"", name)));
                 }
                 self.store(code, &Operand::Temp(*dest));
+            }
+            // A zero divisor: the interpreter's arithmetic code, chosen by the
+            // operand kinds. It unwinds like a raise -- the identity slot holds
+            // the code, the payload the exact message with the operator's line
+            // -- but it has no prefix, because a panic is not a named raise.
+            MirInst::GuardZero {
+                lhs,
+                rhs,
+                op,
+                line,
+                target,
+            } => {
+                let left = self.kind(lhs)?;
+                let right = self.kind(rhs)?;
+                if !matches!(left, Kind::Int | Kind::Float)
+                    || !matches!(right, Kind::Int | Kind::Float)
+                {
+                    // Nothing numeric to divide: the `binary` that follows
+                    // refuses the program.
+                    return Ok(());
+                }
+                let both_int = left == Kind::Int && right == Kind::Int;
+                let (name, text) = match (op, both_int) {
+                    ('/', true) => ("E036", format!("E036 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line)),
+                    ('/', false) => ("E037", format!("E037 လိုင်း {} တွင် သုညဖြင့် စား၍မရပါ။", line)),
+                    (_, true) => (
+                        "E038",
+                        format!("E038 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။", line),
+                    ),
+                    (_, false) => (
+                        "E039",
+                        format!("E039 လိုင်း {} တွင် သုညဖြင့် ကြွင်းကိန်းရှာ၍မရပါ။", line),
+                    ),
+                };
+                let site = self.next_site();
+                let nonzero = format!("guard_nz_{site}");
+                self.load(code, data, rhs);
+                if right == Kind::Float {
+                    // A NaN divisor is not zero: parity is set, so it is
+                    // skipped before the equality test is read.
+                    code.movq_xmm_gpr(XMM0, RAX);
+                    code.xorpd(XMM1, XMM1);
+                    code.ucomisd(XMM0, XMM1);
+                    code.jcc(CC_P, &nonzero);
+                    code.jcc(CC_NE, &nonzero);
+                } else {
+                    code.test_rr(RAX, RAX);
+                    code.jcc(CC_NE, &nonzero);
+                }
+                let identity = data.intern(name);
+                code.mov_data_address(RAX, identity);
+                self.store_error(code, self.error_identity);
+                code.mov_imm32_zero(RAX, 0);
+                self.store_error(code, self.error_prefix);
+                let message = data.intern(&text);
+                code.mov_data_address(RAX, message);
+                self.store_error(code, self.error_payload);
+                code.jmp(&format!("fn{}.bb{}", self.function, *target));
+                code.label(&nonzero);
             }
             MirInst::SetError {
                 identity,
@@ -897,7 +964,11 @@ impl Gen {
             // are interned, so equal text is the same pointer.
             MirInst::ErrorMatches { dest, identity } => {
                 if identity == "E178" {
-                    code.mov_imm32_zero(RAX, 1);
+                    // `E178` selects a raise, never a run-time panic: only a
+                    // raise leaves a prefix behind.
+                    self.load_error(code, self.error_prefix);
+                    code.test_rr(RAX, RAX);
+                    code.setcc(CC_NE);
                 } else {
                     self.load_error(code, self.error_identity);
                     let name = data.intern(identity);
@@ -907,20 +978,34 @@ impl Gen {
                 }
                 self.store(code, &Operand::Temp(*dest));
             }
-            // What a catch clause binds: the raise's message.
+            // What a catch clause binds: a raise's message, or -- for a
+            // run-time panic, which has no prefix -- its code (`E036`).
             MirInst::BindError { var } => {
+                let site = self.next_site();
+                let panic = format!("bind_code_{site}");
+                let done = format!("bind_done_{site}");
+                self.load_error(code, self.error_prefix);
+                code.test_rr(RAX, RAX);
+                code.jcc(CC_E, &panic);
                 self.load_error(code, self.error_payload);
+                code.jmp(&done);
+                code.label(&panic);
+                self.load_error(code, self.error_identity);
+                code.label(&done);
                 self.store(code, &Operand::Var(*var));
             }
-            // The clause has taken the raise; the next call must not think it
-            // is still pending.
+            // The clause has taken the error; the next check must not think it
+            // is still pending. The identity is the flag a check reads.
             MirInst::ClearError => {
                 code.mov_imm32_zero(RAX, 0);
+                self.store_error(code, self.error_identity);
                 self.store_error(code, self.error_prefix);
             }
-            // A call that raised: unwind the way a raise written here does.
+            // A call that raised: unwind the way a raise written here does. The
+            // identity slot is non-zero for a raise and for a run-time panic
+            // alike, so both are caught by the same check.
             MirInst::CheckError { target } => {
-                self.load_error(code, self.error_prefix);
+                self.load_error(code, self.error_identity);
                 code.test_rr(RAX, RAX);
                 code.jcc(CC_NE, &format!("fn{}.bb{}", self.function, *target));
             }
@@ -942,6 +1027,10 @@ impl Gen {
                         code.call("rt_write_newline");
                     }
                 }
+            }
+            MirInst::ToStr { dest, value } => {
+                self.to_str(code, data, value)?;
+                self.store(code, &Operand::Temp(*dest));
             }
             MirInst::List { dest, items } => {
                 self.sequence(code, data, *dest, Kind::List, items)?;
@@ -1150,6 +1239,23 @@ impl Gen {
         code.call(&function_label(index));
     }
 
+    /// Emit `str(value)`, leaving a string descriptor in `rax`: a string is
+    /// itself, an int its decimal text, a float its print form and a bool
+    /// `True`/`False` (the interpreter's display). The fresh descriptors come
+    /// from the collection arena.
+    fn to_str(&self, code: &mut Code, data: &mut Data, value: &Operand) -> Result<(), String> {
+        let kind = self.kind(value)?;
+        self.load(code, data, value);
+        match kind {
+            Kind::Str => {}
+            Kind::Int => code.call("rt_str_int"),
+            Kind::Float => code.call("rt_str_float"),
+            Kind::Bool => code.call("rt_str_bool"),
+            other => return Err(unsupported(&format!("a `str` of a {}", other.name()))),
+        }
+        Ok(())
+    }
+
     /// Emit `abs`, `min` or `max`, leaving the result in `rax`.
     ///
     /// `abs` of an int is the value or its negation; of a float it is the
@@ -1208,6 +1314,12 @@ impl Gen {
                 self.load(code, data, arg);
                 code.load_ptr_disp32(RAX, RAX, 8);
             }
+            Builtin::Str => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`str` with no argument"))?;
+                self.to_str(code, data, arg)?;
+            }
             // `push`/`append`: the runtime's indexed write with the index set
             // to the current length is exactly "append at the end", and it
             // answers a fresh descriptor. That descriptor replaces what the
@@ -1241,6 +1353,103 @@ impl Gen {
                 let slot = self.var_slots[var];
                 code.store(slot, RAX);
                 code.load_ptr_disp32(RAX, RAX, 8);
+            }
+            // `pop`: the runtime copies the list without its last element
+            // (answering the copy in `rax` and the dropped word in `rdx`), so
+            // the binding takes the copy and the popped value is the result.
+            // An empty list is the interpreter's `E110` panic.
+            Builtin::Pop => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`pop` with no argument"))?;
+                let Operand::Var(var) = base else {
+                    return Err(unsupported("a pop whose list is not a variable"));
+                };
+                self.load(code, data, base);
+                code.call("rt_pop_seq");
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
+                code.mov_rr(RAX, RDX);
+            }
+            // `insert`: the runtime copies the list with `at` shifted by one
+            // and the value written into the gap; the binding takes the copy
+            // and the new length (its second word) is the result.
+            Builtin::Insert => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`insert` with no argument"))?;
+                let index = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`insert` with no index"))?;
+                let value = args
+                    .get(2)
+                    .ok_or_else(|| unsupported("`insert` with no value"))?;
+                // `analyze` refuses anything else before this runs.
+                let Operand::Var(var) = base else {
+                    return Err(unsupported("an insert whose list is not a variable"));
+                };
+                let value_kind = self.kind(value)?;
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, index);
+                code.mov_rr(RCX, RAX);
+                self.load(code, data, value);
+                code.mov_rr(RDX, RAX);
+                code.mov_imm32(RDI, value_kind.tag() as i32);
+                code.mov_rr(RAX, R11);
+                code.call("rt_insert_seq");
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
+                code.load_ptr_disp32(RAX, RAX, 8);
+            }
+            // `remove`: the runtime copies the list without the element at
+            // `at` and answers that element word in `rdx`.
+            Builtin::Remove => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`remove` with no argument"))?;
+                let index = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`remove` with no index"))?;
+                let Operand::Var(var) = base else {
+                    return Err(unsupported("a remove whose list is not a variable"));
+                };
+                self.load(code, data, base);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, index);
+                code.mov_rr(RCX, RAX);
+                code.mov_rr(RAX, R11);
+                code.call("rt_remove_seq");
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
+                code.mov_rr(RAX, RDX);
+            }
+            // `sort`: a stable insertion sort in the runtime, over a copy.
+            // The selector tells it which comparison to use: an int, a float
+            // or a string comparison (`rt_cmp_str`).
+            Builtin::Sort => {
+                let base = args
+                    .first()
+                    .ok_or_else(|| unsupported("`sort` with no argument"))?;
+                let Operand::Var(var) = base else {
+                    return Err(unsupported("a sort whose list is not a variable"));
+                };
+                let selector = match self.elem_kind(base) {
+                    Some(Kind::Int) => 0,
+                    Some(Kind::Float) => 1,
+                    Some(Kind::Str) => 2,
+                    other => {
+                        return Err(unsupported(&format!(
+                            "sort of a list of {}",
+                            other.map_or("unknown elements", |kind| kind.name())
+                        )))
+                    }
+                };
+                self.load(code, data, base);
+                code.mov_imm32(RDI, selector);
+                code.call("rt_sort_seq");
+                let slot = self.var_slots[var];
+                code.store(slot, RAX);
             }
             // `reverse` answers a fresh descriptor with the elements in the
             // opposite order, through the runtime's `rt_reverse_seq`. A list
@@ -1462,21 +1671,23 @@ impl Gen {
     /// `%` as the interpreter's `rem_euclid`: a non-negative remainder. The
     /// divisor is in `rcx` and the dividend in `rax` on entry; the result is
     /// left in `rax`.
-    fn remainder(&mut self, code: &mut Code) {
+    fn remainder(&mut self, code: &mut Code, guard: bool) {
         let site = self.site;
         self.site += 1;
         let add = format!("rem_a_{}", site);
         let done = format!("rem_d_{}", site);
         let nonzero = format!("rem_n_{}", site);
 
-        // A zero divisor panics. It has to be a `call`, not a jump, or the
-        // panic routine would run with the stack 8 bytes off its aligned
-        // position.
-        code.test_rr(RCX, RCX);
-        code.jcc(CC_NE, &nonzero);
-        code.call("rt_panic_zero");
-        code.ud2();
-        code.label(&nonzero);
+        if guard {
+            // A zero divisor panics. It has to be a `call`, not a jump, or the
+            // panic routine would run with the stack 8 bytes off its aligned
+            // position.
+            code.test_rr(RCX, RCX);
+            code.jcc(CC_NE, &nonzero);
+            code.call("rt_panic_zero");
+            code.ud2();
+            code.label(&nonzero);
+        }
         code.cqo();
         code.idiv(RCX);
         // rdx = a % b; make it non-negative the way `rem_euclid` does.

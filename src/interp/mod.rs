@@ -6992,7 +6992,7 @@ fn mentions(expr: &Expr, name: &str) -> bool {
     }
 }
 
-pub(crate) const SELF_PREFIX: &str = "အတု ";
+pub(crate) use crate::shared::SELF_PREFIX;
 
 /// A `{name}` placeholder whose name is not a known variable (`E058`), worded
 /// once for both backends.

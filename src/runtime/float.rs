@@ -214,7 +214,20 @@ fn emit_copy(code: &mut Code, from: i32, to: i32) {
     code.label("pf_copy_done");
 }
 
-pub(crate) fn emit(code: &mut Code) {
+/// `str_mode` is the `.data` word that turns the formatter into a string
+/// builder: non-zero means `rt_str_float` is running, so the rendered bytes
+/// are copied into a fresh arena string instead of written to stdout.
+pub(crate) fn emit(code: &mut Code, str_mode: u32) {
+    code.label("rt_str_float");
+    // `rax` holds the float bits; the flag is set around the call and cleared
+    // by the formatter before it returns the string.
+    code.mov_rr(R11, RAX);
+    code.mov_imm32(R10, 1);
+    code.mov_data_address(RAX, str_mode);
+    code.store_ptr(RAX, R10);
+    code.mov_rr(RAX, R11);
+    code.jmp("rt_write_float");
+
     code.label("rt_write_float");
     code.push(RBP);
     code.mov_rbp_rsp();
@@ -617,6 +630,33 @@ pub(crate) fn emit(code: &mut Code) {
     code.label("pf_write");
     code.mov_rr(RCX, R9);
     code.lea_disp32(RAX, RBP, OUT);
+    code.mov_data_address(R10, str_mode);
+    code.load_ptr(R10, R10);
+    code.test_rr(R10, R10);
+    code.jcc(CC_E, "pf_write_stdout");
+
+    // String mode: clear the flag, then copy the rendered bytes into a fresh
+    // `{ length, bytes... }` descriptor in the arena.
+    code.mov_imm32_zero(R10, 0);
+    code.mov_data_address(R11, str_mode);
+    code.store_ptr(R11, R10);
+    code.store(S_T1, RCX);
+    code.store(S_T2, RAX);
+    code.mov_rr(RDI, RCX);
+    code.add_imm8(RDI, 8);
+    code.call("rt_alloc");
+    code.store(S_BITS, RAX);
+    code.load(RCX, S_T1);
+    code.store_ptr_disp32(RAX, 0, RCX);
+    code.mov_rr(RDI, RAX);
+    code.add_imm8(RDI, 8);
+    code.load(RSI, S_T2);
+    code.rep_movsb();
+    code.load(RAX, S_BITS);
+    code.leave();
+    code.ret();
+
+    code.label("pf_write_stdout");
     code.call("rt_write");
     code.leave();
     code.ret();

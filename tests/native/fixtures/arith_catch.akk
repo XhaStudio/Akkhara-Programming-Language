@@ -1,0 +1,40 @@
+# arith_catch.akk -- a run-time arithmetic error is catchable exactly like a
+# raise: the `E` clause takes it and binds its code, a named clause matches its
+# code, a matching clause still runs its `finally`, and `E178` does not take a
+# panic at all (only a raise). The last statement is uncaught, so the program
+# ends with the interpreter's `E038` line and exit 1.
+fn share(n :int) {
+    return n / 0;
+}
+
+စမ်းရန်
+    print(share(1));
+E ကို ဖမ်းပါ။
+    print(E);
+ပြီး။
+
+စမ်းရန်
+    print(10 / 0.0);
+E037 ကို ဖမ်းပါ။
+    print("caught " + E037);
+ပြီး။
+
+စမ်းရန်
+    print(7 % 0);
+E038 ကို ဖမ်းပါ။
+    print("caught " + E038);
+နောက်ဆုံးတွင်
+    print("finally");
+ပြီး။
+
+စမ်းရန်
+    print(9 % 0.0);
+E039 ကို ဖမ်းပါ။
+    print("caught " + E039);
+ပြီး။
+
+စမ်းရန်
+    print(1 % 0);
+E178 ကို ဖမ်းပါ။
+    print("wrong E178");
+ပြီး။

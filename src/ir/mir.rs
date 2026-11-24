@@ -106,6 +106,20 @@ pub(crate) enum MirInst {
         lhs: Operand,
         rhs: Operand,
     },
+    /// A zero divisor is an error before the operation runs: the interpreter
+    /// reports `E036`/`E037` for `/` and `E038`/`E039` for `%`, choosing an
+    /// int or a float code by the operand kinds. The check is its own
+    /// instruction so the error unwinds through `target` -- the innermost
+    /// enclosing handler, or the function's escape -- instead of exiting.
+    GuardZero {
+        lhs: Operand,
+        rhs: Operand,
+        /// `/` or `%`
+        op: char,
+        /// The line of the operator, for the interpreter's message text.
+        line: usize,
+        target: BlockId,
+    },
     /// `dest = lhs <op> rhs`, producing a `bool`.
     Compare {
         dest: Temp,
@@ -191,6 +205,13 @@ pub(crate) enum MirInst {
         dest: Temp,
         value: Operand,
     },
+    /// `dest = str(value)`: an int, a float or a bool as its display text, a
+    /// string unchanged. A collection would need its `repr` in a buffer, so
+    /// the analyzer refuses one by name.
+    ToStr {
+        dest: Temp,
+        value: Operand,
+    },
     StoreVar {
         var: VarId,
         /// The operator of a compound assignment, `None` for a plain store.
@@ -220,12 +241,13 @@ pub(crate) enum MirInst {
         prefix: String,
         value: Operand,
     },
-    /// `dest = the pending raise has this identity` -- the catch filter.
+    /// `dest = the pending error has this identity` -- the catch filter.
     ErrorMatches {
         dest: Temp,
         identity: String,
     },
-    /// `var = the pending raise's message`; the catch clause's binding.
+    /// `var = what the catch clause binds`: a raise's message, or the code of
+    /// a run-time panic such as `E036`.
     BindError {
         var: VarId,
     },

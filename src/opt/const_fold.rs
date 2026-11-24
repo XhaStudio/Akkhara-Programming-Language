@@ -191,6 +191,7 @@ fn fold_instruction(instruction: &MirInst, known: &Known) -> Option<Const> {
 
 fn destination(instruction: &MirInst) -> Option<Temp> {
     match instruction {
+        MirInst::GuardZero { .. } => None,
         MirInst::Binary { dest, .. }
         | MirInst::Compare { dest, .. }
         | MirInst::Not { dest, .. }
@@ -207,6 +208,7 @@ fn destination(instruction: &MirInst) -> Option<Temp> {
         | MirInst::IsType { dest, .. }
         | MirInst::Items { dest, .. }
         | MirInst::Len { dest, .. }
+        | MirInst::ToStr { dest, .. }
         | MirInst::ErrorMatches { dest, .. } => Some(*dest),
         MirInst::StoreVar { .. }
         | MirInst::StoreIndex { .. }

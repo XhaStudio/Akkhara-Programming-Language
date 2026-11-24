@@ -1,0 +1,5 @@
+# pop_empty.akk -- popping an empty list is the interpreter's E110 panic.
+xs မှာ [] ဖြစ်၏။
+print("before");
+pop(xs);
+print("after");

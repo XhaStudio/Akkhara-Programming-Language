@@ -85,6 +85,15 @@ pub(crate) enum HirStmt {
     If {
         branches: Vec<HirBranch>,
     },
+    /// `switch (value) { case c: ... default: ... }`. The subject is evaluated
+    /// once, then the case expressions in written order until one equals it;
+    /// the first `default` arm runs only when none did. There is no
+    /// fall-through, so at most one arm's body runs.
+    Switch {
+        subject: HirExpr,
+        arms: Vec<HirArm>,
+        line: usize,
+    },
     /// `while`, and the C-style `for`: `step` runs after each body and before
     /// the next test, so a `continue` still runs it.
     While {
@@ -161,6 +170,14 @@ pub(crate) enum HirStmt {
 }
 
 #[derive(Debug)]
+pub(crate) struct HirArm {
+    /// The `case` value, or `None` for `default:`.
+    pub(crate) case: Option<HirExpr>,
+    pub(crate) body: Vec<HirStmt>,
+    pub(crate) line: usize,
+}
+
+#[derive(Debug)]
 pub(crate) struct HirBranch {
     /// `None` for the final `မဟုတ်လျှင်` / `else` branch.
     pub(crate) cond: Option<HirExpr>,
@@ -184,7 +201,9 @@ pub(crate) enum HirExpr {
     /// A numeric literal the parser could not turn into a number (`1.2.3`).
     /// The interpreter reports `E047`, but only if it is evaluated.
     BadNum(String),
-    Binary(char, Box<HirExpr>, Box<HirExpr>),
+    /// `lhs <op> rhs`; the `usize` is the line of the operator, which a
+    /// division or remainder needs for the interpreter's `E036`-`E039` text.
+    Binary(char, Box<HirExpr>, Box<HirExpr>, usize),
     Compare(String, Box<HirExpr>, Box<HirExpr>),
     /// `&&` / `||`: short-circuiting, both sides `bool`.
     Logical(LogicalOp, Box<HirExpr>, Box<HirExpr>),
@@ -215,6 +234,10 @@ pub(crate) enum HirExpr {
         value: Box<HirExpr>,
         ty: Type,
     },
+    /// `str(value)` and one `{…}` placeholder: the value's display text as a
+    /// string. This is a form of its own rather than a `Call`, so a user
+    /// function named `str` cannot shadow what interpolation means.
+    ToStr(Box<HirExpr>),
     /// A library function named without calling it (`Tools.add`).
     LibFnRef {
         lib: String,

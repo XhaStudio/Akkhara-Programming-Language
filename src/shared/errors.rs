@@ -91,6 +91,25 @@ pub(crate) fn list_needed_detail(kind: &str) -> String {
     format!("စာရင်း လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
 }
 
+/// The interpreter's wording for a list builtin that takes no extra argument
+/// (`pop`, `sort`).
+pub(crate) const LIST_ONLY_NEEDED: &str = "စာရင်း တစ်ခုသာ လိုအပ်ပြီး အခြားအချက် မလိုပါ";
+
+/// The interpreter's wording for `insert` when it does not get a list, an
+/// index and one value.
+pub(crate) fn insert_args_needed_detail(count: usize) -> String {
+    format!(
+        "စာရင်း၊ အညွှန်း နှင့် တန်ဖိုး တစ်ခု လိုအပ်ပါသည်၊ စာရင်းနောက်တွင် အချက် {} ခု ရပါသည်",
+        count
+    )
+}
+
+/// The interpreter's wording for `remove` when it does not get a list and one
+/// index.
+pub(crate) fn remove_index_needed_detail(count: usize) -> String {
+    format!("စာရင်း နှင့် အညွှန်း တစ်ခု လိုအပ်ပါသည်၊ အညွှန်း {} ခု ရပါသည်", count)
+}
+
 /// The interpreter's wording for `reverse` when it is not given exactly one
 /// argument.
 pub(crate) fn reverse_arg_needed_detail(count: usize) -> String {
@@ -120,7 +139,7 @@ pub(crate) const KIND_STR_MM: &str = "စာသား";
 /// diagnostic always says what was not supported.
 pub(crate) fn native_unsupported(what: &str) -> String {
     format!(
-        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
+        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, pop/insert/remove/sort, str conversion နှင့် {{…}} interpolation, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
         what
     )
 }

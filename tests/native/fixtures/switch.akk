@@ -1,0 +1,89 @@
+# switch.akk -- the native switch lowering: the subject is evaluated once, the
+# case expressions run in written order until one matches, the default arm runs
+# only when none did, there is no fall-through, a `break` stops the switch
+# rather than the loop around it, and a `continue` still reaches that loop.
+# The interpreter is the reference for every line.
+n = 9;
+switch (n) {
+    default: print("default-first");
+    case 1: print("one");
+    case 9: print("nine");
+}
+switch (n) {
+    case 1: print("one");
+    case 2: print("two");
+}
+switch (100) {
+    case 1: print("one");
+    default: print("fallback");
+}
+switch (5) {
+    case 1: print("nope");
+}
+print("no-match");
+switch (5) {
+    default: print("only-default");
+}
+
+# Only the arms up to the match are evaluated, in written order.
+fn probe(n) {
+    print(n);
+    return n;
+}
+switch (2) {
+    case probe(1): print("probe-one");
+    case probe(2): print("probe-two");
+    case probe(3): print("probe-three");
+}
+
+# A float subject never equals an int case; 1.0 finds its own arm.
+switch (1.0) {
+    case 1: print("int-one");
+    case 1.0: print("float-one");
+}
+
+switch ("b") {
+    case "a": print("A");
+    case "b":
+        switch (2) {
+            case 2: print("inner");
+            default: print("inner-default");
+        }
+}
+print("after-switch");
+
+switch (true) {
+    case false: print("false");
+    case true: print("true");
+}
+
+# break stops the switch, not the while around it.
+i = 0;
+while (i < 3) {
+    switch (i) {
+        case 1: print("one"); break;
+        default: print("other");
+    }
+    print("tail");
+    i += 1;
+}
+
+# continue inside an arm reaches the enclosing loop.
+i = 0;
+while (i < 4) {
+    switch (i) {
+        case 2: i += 1; continue;
+        default: print(i);
+    }
+    print("after");
+    i += 1;
+}
+
+# The Myanmar spelling.
+x သည် 7 ဖြစ်၏။
+ရွေးရန် (x)
+    7 ဖြစ်ရင်
+        "seven" ကို ပြပါ။
+    မူလ
+        "other" ကို ပြပါ။
+ပြီး။

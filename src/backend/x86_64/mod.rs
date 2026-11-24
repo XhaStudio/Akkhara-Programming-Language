@@ -47,9 +47,16 @@
 //! its own contents) and answers the new length, while `reverse` answers a
 //! fresh list or tuple in the opposite order -- writing it back when the
 //! argument is a list variable, exactly as the interpreter's in-place reversal
-//! does, and leaving a tuple binding alone. Text reverse, and a `push` whose
-//! value does not fit the list's element shape, are refused rather than
-//! guessed. Anything else -- a closure, a class -- is refused with `E177`,
+//! does, and leaving a tuple binding alone. `pop`, `insert`, `remove` and
+//! `sort` complete the list mutators: each works on a copy the runtime builds
+//! and rebinds, `pop`/`remove` answer the element they dropped, `insert`
+//! answers the new length, and `sort` is a stable insertion sort over ints,
+//! floats or strings. A call carries no span, so the run-time failures these
+//! can hit (`E110` for an empty pop, `E049` for a position outside the list)
+//! are written without the interpreter's line clause, the same rule the
+//! arithmetic panics follow. Text reverse, a `push` whose value does not fit
+//! the list's element shape, and a sort of any other element kind are refused
+//! rather than guessed. Anything else -- a closure, a class -- is refused with `E177`,
 //! naming the item. Refusing is what keeps the backend
 //! honest: a construct it cannot emit must never become silently different
 //! code.
@@ -74,8 +81,9 @@ use std::collections::{HashMap, HashSet};
 use crate::ir::mir::*;
 use crate::scope::symbol::VarId;
 use crate::shared::errors::{
-    list_needed_detail, push_value_needed_detail, reverse_arg_needed_detail,
-    reverse_value_needed_detail, PUSH_NEEDS_LIST_VARIABLE,
+    insert_args_needed_detail, list_needed_detail, push_value_needed_detail,
+    remove_index_needed_detail, reverse_arg_needed_detail, reverse_value_needed_detail,
+    LIST_ONLY_NEEDED, PUSH_NEEDS_LIST_VARIABLE,
 };
 
 /// The type of one value in the slice.
@@ -123,6 +131,16 @@ pub(crate) enum Builtin {
     Push,
     /// `reverse`: a fresh descriptor with the elements in the opposite order.
     Reverse,
+    /// `pop`: drop the last element and answer it.
+    Pop,
+    /// `insert`: insert one value at a position and answer the new length.
+    Insert,
+    /// `remove`: drop the element at a position and answer it.
+    Remove,
+    /// `sort`: a fresh list in ascending order.
+    Sort,
+    /// `str`/`စာ`/`စာသား`: an int, float, bool or string as its display text.
+    Str,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -138,6 +156,11 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "len" => Some(Builtin::Len),
         "push" | "append" => Some(Builtin::Push),
         "reverse" => Some(Builtin::Reverse),
+        "pop" => Some(Builtin::Pop),
+        "insert" => Some(Builtin::Insert),
+        "remove" => Some(Builtin::Remove),
+        "sort" => Some(Builtin::Sort),
+        "str" | "စာ" | "စာသား" => Some(Builtin::Str),
         _ => None,
     }
 }
@@ -227,6 +250,7 @@ fn name_instruction(instruction: &MirInst) -> &'static str {
         MirInst::IsType { .. } => "a type test",
         MirInst::Items { .. } => "iteration",
         MirInst::Len { .. } => "len()",
+        MirInst::ToStr { .. } => "str()",
         MirInst::StoreIndex { .. } => "a store into an element",
         MirInst::StoreField { .. } => "a store into a field",
         MirInst::Call { .. }
@@ -242,6 +266,7 @@ fn name_instruction(instruction: &MirInst) -> &'static str {
         | MirInst::ErrorMatches { .. }
         | MirInst::BindError { .. }
         | MirInst::ClearError
+        | MirInst::GuardZero { .. }
         | MirInst::CheckError { .. } => "an expression",
     }
 }
@@ -265,11 +290,10 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
         .iter()
         .map(|function| function.name.clone())
         .collect();
-    // Every identity the program raises. A catch clause may only select one
-    // of these (or the shared `E178`); a clause for a runtime code such as
-    // `E036` could never match here, because a compiled program has no
-    // catchable runtime errors -- a panic exits instead.
-    let raised: HashSet<&str> = program
+    // Every identity the program can produce. A catch clause may only select
+    // one of these (or the shared `E178`); a clause for a code this program
+    // never raises could never match, so it is refused instead.
+    let mut raised: HashSet<&str> = program
         .functions
         .iter()
         .flat_map(|function| &function.blocks)
@@ -279,6 +303,24 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
             _ => None,
         })
         .collect();
+    // A zero-divisor guard reports the interpreter's arithmetic code. Which of
+    // the two codes a `GuardZero` produces is settled later, so both the int
+    // and the float code count as raised.
+    for instruction in program
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.insts)
+    {
+        if let MirInst::GuardZero { op, .. } = instruction {
+            let codes = if *op == '/' {
+                ["E036", "E037"]
+            } else {
+                ["E038", "E039"]
+            };
+            raised.extend(codes);
+        }
+    }
     let functions = program
         .functions
         .iter()
@@ -1209,7 +1251,7 @@ fn learn_instruction(
         MirInst::BindError { var } => {
             changed |= learn_var(&mut typed.vars, *var, Kind::Str)?;
         }
-        MirInst::ClearError | MirInst::CheckError { .. } => {}
+        MirInst::ClearError | MirInst::GuardZero { .. } | MirInst::CheckError { .. } => {}
         // A discarded value is computed and thrown away; nothing to learn.
         MirInst::Eval(_) => {}
         MirInst::Print(_) => {}
@@ -1302,6 +1344,17 @@ fn learn_instruction(
                 }
                 None => {}
             }
+        }
+        // `str(x)`: the display text of an int, float, bool or string. A
+        // collection's display form is its `repr`, which would have to be
+        // rendered into a buffer, so that is refused by name.
+        MirInst::ToStr { dest, value } => {
+            match kind_of(value, typed) {
+                Some(Kind::Int | Kind::Float | Kind::Bool | Kind::Str) => {}
+                Some(other) => return Err(unsupported(&format!("a `str` of a {}", other.name()))),
+                None => {}
+            }
+            changed |= learn_temp(&mut typed.temps, *dest, Kind::Str)?;
         }
         MirInst::Len { dest, value } => match kind_of(value, typed) {
             Some(kind) if kind.is_collection() => {
@@ -1423,6 +1476,22 @@ fn learn_builtin(
             }
             learn_temp(&mut typed.temps, dest, Kind::Int)
         }
+        // `str(x)` (and its Myanmar spellings) is the display text of an int,
+        // float, bool or string. The result is always a string, whatever the
+        // argument turns out to be, so the destination can settle at once.
+        Builtin::Str => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Int | Kind::Float | Kind::Bool | Kind::Str) => {}
+                Some(other) => {
+                    return Err(unsupported(&format!("a `{}` of a {}", name, other.name())))
+                }
+                None => {}
+            }
+            learn_temp(&mut typed.temps, dest, Kind::Str)
+        }
         // `len` over a collection is the descriptor's length word. A string's
         // length is counted in grapheme clusters, which needs the text helper
         // the native runtime does not carry yet, so it is refused.
@@ -1466,6 +1535,121 @@ fn learn_builtin(
                 }
                 Some(other) => Err(builtin_error(name, &list_needed_detail(other.mm_name()))),
                 None => Ok(false),
+            }
+        }
+        // `pop` drops the last element of the list the first argument names
+        // and answers that element. The list has to be a variable (the
+        // interpreter's rule for every mutating builtin) and its elements have
+        // to be known to type the result; a list whose element kind is still
+        // unknown leaves the result untyped, which a *use* of it refuses the
+        // way any unknowable kind is refused.
+        Builtin::Pop => {
+            let Some(base) = args.first() else {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            };
+            if !matches!(base, Operand::Var(_)) {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            }
+            match kind_of(base, typed) {
+                Some(Kind::List) => {}
+                Some(other) => {
+                    return Err(builtin_error(name, &list_needed_detail(other.mm_name())))
+                }
+                None => return Ok(false),
+            }
+            if args.len() != 1 {
+                return Err(builtin_error(name, LIST_ONLY_NEEDED));
+            }
+            match elems_of(base, typed).and_then(|shape| shape.first().copied()) {
+                Some(element) => learn_temp(&mut typed.temps, dest, element),
+                None => Ok(false),
+            }
+        }
+        // `insert(xs, at, v)` puts one value at `at` (which may equal the
+        // length, appending) and answers the new length. The index is an int
+        // and the value joins the element shape, like a `push`.
+        Builtin::Insert => {
+            let Some(base) = args.first() else {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            };
+            if !matches!(base, Operand::Var(_)) {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            }
+            match kind_of(base, typed) {
+                Some(Kind::List) => {}
+                Some(other) => {
+                    return Err(builtin_error(name, &list_needed_detail(other.mm_name())))
+                }
+                None => return Ok(false),
+            }
+            if args.len() != 3 {
+                return Err(builtin_error(
+                    name,
+                    &insert_args_needed_detail(args.len() - 1),
+                ));
+            }
+            let mut changed = learn_operand(&args[1], Kind::Int, typed)?;
+            changed |= learn_stored(base, &args[2], typed)?;
+            changed |= learn_temp(&mut typed.temps, dest, Kind::Int)?;
+            Ok(changed)
+        }
+        // `remove(xs, at)` drops the element at `at` and answers it.
+        Builtin::Remove => {
+            let Some(base) = args.first() else {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            };
+            if !matches!(base, Operand::Var(_)) {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            }
+            match kind_of(base, typed) {
+                Some(Kind::List) => {}
+                Some(other) => {
+                    return Err(builtin_error(name, &list_needed_detail(other.mm_name())))
+                }
+                None => return Ok(false),
+            }
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &remove_index_needed_detail(args.len() - 1),
+                ));
+            }
+            let mut changed = learn_operand(&args[1], Kind::Int, typed)?;
+            if let Some(element) = elems_of(base, typed).and_then(|shape| shape.first().copied()) {
+                changed |= learn_temp(&mut typed.temps, dest, element)?;
+            }
+            Ok(changed)
+        }
+        // `sort` answers an ascending copy and reverses the binding to it. The
+        // runtime compares ints, floats and strings; any other element kind
+        // needs the interpreter's comparison rules for collections (its
+        // `E042`), so it is refused rather than ordered differently.
+        Builtin::Sort => {
+            let Some(base) = args.first() else {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            };
+            if !matches!(base, Operand::Var(_)) {
+                return Err(builtin_error(name, PUSH_NEEDS_LIST_VARIABLE));
+            }
+            match kind_of(base, typed) {
+                Some(Kind::List) => {}
+                Some(other) => {
+                    return Err(builtin_error(name, &list_needed_detail(other.mm_name())))
+                }
+                None => return Ok(false),
+            }
+            if args.len() != 1 {
+                return Err(builtin_error(name, LIST_ONLY_NEEDED));
+            }
+            let Some(shape) = elems_of(base, typed) else {
+                return Err(unsupported("sort of a list whose element kind is unknown"));
+            };
+            match shape.first() {
+                Some(Kind::Int | Kind::Float | Kind::Str) => {
+                    learn_collection(dest, Kind::List, Some(shape), typed)
+                }
+                Some(other) => Err(unsupported(&format!("sort of a list of {}", other.name()))),
+                None => Err(unsupported("sort of a list whose element kind is unknown")),
             }
         }
         // `reverse` answers a list or tuple with its elements in the opposite
@@ -1922,7 +2106,9 @@ fn learn<K: std::hash::Hash + Eq + Copy>(
 
 fn read_operands(instruction: &MirInst) -> Vec<&Operand> {
     match instruction {
-        MirInst::Binary { lhs, rhs, .. } | MirInst::Compare { lhs, rhs, .. } => vec![lhs, rhs],
+        MirInst::Binary { lhs, rhs, .. }
+        | MirInst::Compare { lhs, rhs, .. }
+        | MirInst::GuardZero { lhs, rhs, .. } => vec![lhs, rhs],
         MirInst::Call { args, .. } => args.iter().collect(),
         MirInst::Not { value, .. }
         | MirInst::Neg { value, .. }

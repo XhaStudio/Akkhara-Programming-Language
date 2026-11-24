@@ -157,6 +157,25 @@ fn statement(out: &mut String, stmt: &HirStmt, depth: usize) {
                 let _ = writeln!(out, "{}  }}", pad);
             }
         }
+        HirStmt::Switch {
+            subject,
+            arms,
+            line,
+        } => {
+            let _ = writeln!(out, "{}switch {} {{  (line {})", pad, expr(subject), line);
+            for arm in arms {
+                match &arm.case {
+                    Some(case) => {
+                        let _ = writeln!(out, "{}  case {}:  (line {})", pad, expr(case), arm.line);
+                    }
+                    None => {
+                        let _ = writeln!(out, "{}  default:  (line {})", pad, arm.line);
+                    }
+                }
+                body(out, &arm.body, depth + 2);
+            }
+            let _ = writeln!(out, "{}}}", pad);
+        }
         HirStmt::While {
             cond,
             negate,
@@ -323,7 +342,7 @@ fn expr(value: &HirExpr) -> String {
         HirExpr::Var(var) => var.to_string(),
         HirExpr::Name(name) => name.clone(),
         HirExpr::BadNum(text) => format!("<bad number {:?}>", text),
-        HirExpr::Binary(op, left, right) => {
+        HirExpr::Binary(op, left, right, _) => {
             format!("({} {} {})", expr(left), op, expr(right))
         }
         HirExpr::Compare(op, left, right) => {
@@ -365,6 +384,7 @@ fn expr(value: &HirExpr) -> String {
             format!("({} in {})", expr(needle), expr(haystack))
         }
         HirExpr::IsType { value, ty } => format!("({} is {})", expr(value), ty.name_en()),
+        HirExpr::ToStr(value) => format!("str({})", expr(value)),
         HirExpr::LibFnRef { lib, func } => format!("{}.{}", lib, func),
         HirExpr::HttpGet { lib, url } => format!("{} get {}", lib, expr(url)),
         HirExpr::Opaque(what) => format!("<todo {}>", what),
@@ -466,6 +486,7 @@ fn inst_text(inst: &MirInst) -> String {
         }
         MirInst::Items { dest, value } => format!("t{} = items({})", dest, value),
         MirInst::Len { dest, value } => format!("t{} = len({})", dest, value),
+        MirInst::ToStr { dest, value } => format!("t{} = str({})", dest, value),
         MirInst::StoreVar { var, op, value } => match op {
             Some(op) => format!("{} {}= {}", var, op, value),
             None => format!("{} = {}", var, value),
@@ -487,6 +508,9 @@ fn inst_text(inst: &MirInst) -> String {
         MirInst::ErrorMatches { dest, identity } => {
             format!("t{} = error_matches [{}]", dest, identity)
         }
+        MirInst::GuardZero {
+            op, line, target, ..
+        } => format!("guard_zero '{}' line {} -> bb{}", op, line, target),
         MirInst::BindError { var } => format!("{} = error_message", var),
         MirInst::ClearError => "clear_error".to_string(),
         MirInst::CheckError { target } => format!("check_error -> bb{}", target),

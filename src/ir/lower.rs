@@ -448,7 +448,26 @@ impl Lower {
                 &format!("destructuring into {}", names.join(", ")),
                 *line,
             )),
-            Stmt::Switch { line, .. } => out.push(opaque("switch", *line)),
+            Stmt::Switch {
+                subject,
+                arms,
+                line,
+            } => {
+                let subject = self.expr(subject);
+                let arms = arms
+                    .iter()
+                    .map(|arm| HirArm {
+                        case: arm.case.as_ref().map(|case| self.expr(case)),
+                        body: self.stmts(&arm.body),
+                        line: arm.line,
+                    })
+                    .collect();
+                out.push(HirStmt::Switch {
+                    subject,
+                    arms,
+                    line: *line,
+                });
+            }
             Stmt::EngFor {
                 init,
                 cond,
@@ -494,15 +513,7 @@ impl Lower {
             Expr::NumLit(text) => HirExpr::BadNum(text.clone()),
             Expr::Int(value) => HirExpr::Int(*value),
             Expr::Float(value) => HirExpr::Float(*value),
-            // The interpreter expands `{Name}` placeholders when it evaluates a
-            // string literal. The native backend does not model that yet, so a
-            // string with a placeholder (or an escaped brace, which the
-            // interpreter unescapes) is refused by name rather than printed
-            // with its braces intact.
-            Expr::StrLit(text) if text.contains('{') || text.contains("\\}") => {
-                HirExpr::Opaque("a string with {…} interpolation".to_string())
-            }
-            Expr::StrLit(text) => HirExpr::Str(text.clone()),
+            Expr::StrLit(text) => self.text_literal(text),
             Expr::BoolLit(value) => HirExpr::Bool(*value),
             Expr::NullLit => HirExpr::Null,
             Expr::Ident(name) => match self.resolver.resolve(name) {
@@ -513,9 +524,12 @@ impl Lower {
                     HirExpr::Name(name.to_string())
                 }
             },
-            Expr::Binary(left, op, right, _) => {
-                HirExpr::Binary(*op, Box::new(self.expr(left)), Box::new(self.expr(right)))
-            }
+            Expr::Binary(left, op, right, op_line) => HirExpr::Binary(
+                *op,
+                Box::new(self.expr(left)),
+                Box::new(self.expr(right)),
+                *op_line,
+            ),
             Expr::Compare(left, op, right, _) => HirExpr::Compare(
                 op.clone(),
                 Box::new(self.expr(left)),
@@ -572,6 +586,77 @@ impl Lower {
                 url: Box::new(self.expr(url)),
             },
         }
+    }
+
+    /// A string literal, with the interpreter's `{Name}` placeholders and
+    /// `\{`/`\}` escapes. Every placeholder becomes one `str(name)` piece and
+    /// the pieces are joined left to right with `+`, which is the same text
+    /// `interpolate_text` builds: a value's display form, in source order.
+    ///
+    /// Shapes the interpreter rejects at run time (`E056`/`E057`, a missing
+    /// name, a `{အတု …}` field) are refused by name instead of compiled.
+    fn text_literal(&mut self, text: &str) -> HirExpr {
+        if !text.contains('{') && !text.contains("\\}") {
+            return HirExpr::Str(text.to_string());
+        }
+        let mut pieces: Vec<HirExpr> = Vec::new();
+        let mut literal = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            // `\{` and `\}` are literal braces, exactly as the interpreter
+            // reads them; anything else after a backslash was kept verbatim
+            // by the lexer already.
+            if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
+                literal.push(chars.next().unwrap());
+                continue;
+            }
+            if c != '{' {
+                literal.push(c);
+                continue;
+            }
+            let mut name = String::new();
+            let mut closed = false;
+            for nc in chars.by_ref() {
+                if nc == '}' {
+                    closed = true;
+                    break;
+                }
+                name.push(nc);
+            }
+            if !closed {
+                return HirExpr::Opaque("a string with an unclosed \"{\"".to_string());
+            }
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return HirExpr::Opaque("a string with an empty \"{}\"".to_string());
+            }
+            if trimmed.starts_with(crate::shared::SELF_PREFIX) {
+                return HirExpr::Opaque("a `{အတု …}` self-field placeholder".to_string());
+            }
+            if !literal.is_empty() {
+                pieces.push(HirExpr::Str(std::mem::take(&mut literal)));
+            }
+            let value = match self.resolver.resolve(trimmed) {
+                Some(var) => HirExpr::Var(var),
+                None => {
+                    self.resolver.note_unresolved(trimmed, 0);
+                    HirExpr::Name(trimmed.to_string())
+                }
+            };
+            pieces.push(HirExpr::ToStr(Box::new(value)));
+        }
+        if !literal.is_empty() {
+            pieces.push(HirExpr::Str(literal));
+        }
+        let mut pieces = pieces.into_iter();
+        let Some(mut text) = pieces.next() else {
+            return HirExpr::Str(String::new());
+        };
+        for piece in pieces {
+            // A join cannot fail, so it carries no operator line.
+            text = HirExpr::Binary('+', Box::new(text), Box::new(piece), 0);
+        }
+        text
     }
 
     fn exprs(&mut self, list: &[Expr]) -> Vec<HirExpr> {
@@ -687,6 +772,7 @@ fn lower_fn(function: &HirFn, is_main: bool) -> Result<MirFn, String> {
     let mut builder = Builder::new();
     let mut ctx = Ctx {
         loops: Vec::new(),
+        breaks: Vec::new(),
         handlers: Vec::new(),
         escape: None,
         is_main,
@@ -724,6 +810,11 @@ struct Ctx {
     /// with the `finally` depth the loop was entered at (a `break` that would
     /// leave a `finally` is refused instead of skipping it).
     loops: Vec<(BlockId, BlockId, usize)>,
+    /// Where a `break` leaves, innermost last, with the `finally` depth it
+    /// was entered at. A loop and a `switch` both push here (a `break` in a
+    /// switch arm stops the switch, not the loop around it), while `continue`
+    /// still reads `loops`, because it skips a switch and reaches the loop.
+    breaks: Vec<(BlockId, usize)>,
     /// The dispatch block of every enclosing try, innermost last. A raise
     /// jumps to the innermost one; a call is followed by a check that does.
     handlers: Vec<BlockId>,
@@ -762,6 +853,14 @@ fn raise_target(builder: &mut Builder, ctx: &mut Ctx) -> BlockId {
         Some(handler) => *handler,
         None => escape_block(builder, ctx),
     }
+}
+
+/// Put an operand in a fresh temporary, so a value that is read more than once
+/// (the subject of a `switch`) is evaluated exactly once.
+fn move_to_temp(builder: &mut Builder, value: Operand) -> Temp {
+    let dest = builder.temp();
+    builder.emit(MirInst::Move { dest, value });
+    dest
 }
 
 fn stmts(builder: &mut Builder, ctx: &mut Ctx, list: &[HirStmt]) -> Result<(), String> {
@@ -859,6 +958,54 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
             }
             builder.switch(end);
         }
+        HirStmt::Switch {
+            subject,
+            arms,
+            line,
+        } => {
+            // `interp` evaluates the subject once, then each case expression in
+            // written order until one is equal to it, and stops there; the
+            // `default` arm runs only when none matched, wherever it is written.
+            // A chain of comparisons reproduces that order exactly, including
+            // the side effects of the case expressions that are reached.
+            let subject = operand(builder, ctx, subject, *line)?;
+            let subject = move_to_temp(builder, subject);
+            let end = builder.block();
+            let bodies: Vec<BlockId> = arms.iter().map(|_| builder.block()).collect();
+            for (index, arm) in arms.iter().enumerate() {
+                let Some(case) = &arm.case else { continue };
+                let case = operand(builder, ctx, case, arm.line)?;
+                let matched = builder.temp();
+                builder.emit(MirInst::Compare {
+                    dest: matched,
+                    op: "==".to_string(),
+                    lhs: Operand::Temp(subject),
+                    rhs: case,
+                    line: arm.line,
+                });
+                let next = builder.block();
+                builder.terminate(Terminator::Branch {
+                    cond: Operand::Temp(matched),
+                    then_block: bodies[index],
+                    else_block: next,
+                });
+                builder.switch(next);
+            }
+            match arms.iter().position(|arm| arm.case.is_none()) {
+                Some(index) => builder.terminate(Terminator::Goto(bodies[index])),
+                None => builder.terminate(Terminator::Goto(end)),
+            }
+            for (index, arm) in arms.iter().enumerate() {
+                builder.switch(bodies[index]);
+                // A `break` inside an arm stops the switch; a `continue` still
+                // belongs to the loop the switch sits in.
+                ctx.breaks.push((end, ctx.finally_depth));
+                stmts(builder, ctx, &arm.body)?;
+                ctx.breaks.pop();
+                builder.terminate(Terminator::Goto(end));
+            }
+            builder.switch(end);
+        }
         HirStmt::While {
             cond,
             negate,
@@ -889,7 +1036,9 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
             });
             builder.switch(body_block);
             ctx.loops.push((end, step_block, ctx.finally_depth));
+            ctx.breaks.push((end, ctx.finally_depth));
             stmts(builder, ctx, body)?;
+            ctx.breaks.pop();
             ctx.loops.pop();
             builder.terminate(Terminator::Goto(step_block));
             if let Some(step) = step {
@@ -905,7 +1054,9 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
             builder.terminate(Terminator::Goto(body_block));
             builder.switch(body_block);
             ctx.loops.push((end, body_block, ctx.finally_depth));
+            ctx.breaks.push((end, ctx.finally_depth));
             stmts(builder, ctx, body)?;
+            ctx.breaks.pop();
             ctx.loops.pop();
             builder.terminate(Terminator::Goto(body_block));
             builder.switch(end);
@@ -950,7 +1101,9 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
             });
             builder.switch(body_block);
             ctx.loops.push((exit, next, ctx.finally_depth));
+            ctx.breaks.push((exit, ctx.finally_depth));
             stmts(builder, ctx, body)?;
+            ctx.breaks.pop();
             ctx.loops.pop();
             builder.terminate(Terminator::Goto(next));
             builder.switch(next);
@@ -1017,7 +1170,9 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
                 value: Operand::Temp(item),
             });
             ctx.loops.push((exit, next, ctx.finally_depth));
+            ctx.breaks.push((exit, ctx.finally_depth));
             stmts(builder, ctx, body)?;
+            ctx.breaks.pop();
             ctx.loops.pop();
             builder.terminate(Terminator::Goto(next));
             builder.switch(next);
@@ -1044,8 +1199,8 @@ fn statement(builder: &mut Builder, ctx: &mut Ctx, stmt: &HirStmt) -> Result<(),
             if value.is_some() {
                 return Err(unsupported(*line, "a break that carries a value"));
             }
-            match ctx.loops.last() {
-                Some((exit, _, depth)) if *depth >= ctx.finally_depth => {
+            match ctx.breaks.last() {
+                Some((exit, depth)) if *depth >= ctx.finally_depth => {
                     builder.terminate(Terminator::Goto(*exit))
                 }
                 Some(_) => return Err(unsupported(*line, "a break that would skip a finally")),
@@ -1204,9 +1359,24 @@ fn operand(
         HirExpr::BadNum(text) => {
             return Err(unsupported(line, &format!("the number \"{}\"", text)))
         }
-        HirExpr::Binary(op, left, right) => {
+        HirExpr::Binary(op, left, right, op_line) => {
             let lhs = operand(builder, ctx, left, line)?;
             let rhs = operand(builder, ctx, right, line)?;
+            // A division or a remainder checks its divisor first, the way the
+            // interpreter does, so a zero divisor becomes the `E036`/`E037`
+            // (or `E038`/`E039`) error that unwinds like a raise. The check is
+            // unconditional: which code it reports depends on the operand
+            // kinds, which the backend settles.
+            if *op == '/' || *op == '%' {
+                let target = raise_target(builder, ctx);
+                builder.emit(MirInst::GuardZero {
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                    op: *op,
+                    line: *op_line,
+                    target,
+                });
+            }
             let dest = builder.temp();
             builder.emit(MirInst::Binary {
                 dest,
@@ -1393,6 +1563,12 @@ fn operand(
             });
             Operand::Temp(dest)
         }
+        HirExpr::ToStr(value) => {
+            let value = operand(builder, ctx, value, line)?;
+            let dest = builder.temp();
+            builder.emit(MirInst::ToStr { dest, value });
+            Operand::Temp(dest)
+        }
         HirExpr::LibFnRef { lib, func } => {
             return Err(unsupported(
                 line,
@@ -1467,6 +1643,102 @@ mod tests {
             .blocks
             .iter()
             .any(|block| matches!(block.term, Some(Terminator::Branch { .. }))));
+    }
+
+    #[test]
+    fn mir_lowers_a_switch_to_one_comparison_per_case() {
+        let program = program(
+            "x သည် 2 ဖြစ်၏။\nswitch (x) {\n    default: print(\"other\");\n    case 1: print(\"one\");\n    case 2: print(\"two\");\n}\n",
+        );
+        let mir = mir(&program).expect("lower to mir");
+        let blocks = &mir.functions[0].blocks;
+        // One branch per `case`; the default arm is reached after all of them.
+        let branches = blocks
+            .iter()
+            .filter(|block| matches!(block.term, Some(Terminator::Branch { .. })))
+            .count();
+        assert_eq!(branches, 2);
+        let comparisons = blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .filter(|inst| matches!(inst, MirInst::Compare { op, .. } if op == "=="))
+            .count();
+        assert_eq!(comparisons, 2);
+    }
+
+    #[test]
+    fn a_break_inside_a_switch_needs_no_loop() {
+        let program = program("switch (1) {\n    case 1: break;\n}\n");
+        assert!(mir(&program).is_ok());
+    }
+
+    #[test]
+    fn a_division_guards_its_divisor() {
+        let program = program("x သည် 10 / 2 ဖြစ်၏။\nx ကို ဖော်ပြပါ။");
+        let mir = mir(&program).expect("a division lowers");
+        let guard = mir.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find(|instruction| matches!(instruction, MirInst::GuardZero { .. }))
+            .expect("the divisor is checked first");
+        // No try in the program: the check goes to the function's escape block.
+        let MirInst::GuardZero {
+            op, line, target, ..
+        } = guard
+        else {
+            unreachable!()
+        };
+        assert_eq!(*op, '/');
+        assert_eq!(*line, 1);
+        let escape = mir.functions[0]
+            .blocks
+            .iter()
+            .find(|block| block.id == *target)
+            .expect("the guard's target exists");
+        assert!(matches!(
+            escape.term,
+            Some(Terminator::ReportError) | Some(Terminator::Propagate)
+        ));
+    }
+
+    #[test]
+    fn an_interpolated_literal_becomes_a_str_chain() {
+        let program = program("x သည် 2.5 ဖြစ်၏။\n\"v {x}!\" ကို ဖော်ပြပါ။");
+        let HirStmt::Print { value, .. } = &program.main.body[1] else {
+            panic!("expected a print, got {:?}", &program.main.body[1]);
+        };
+        // `("v " + str(x)) + "!"`, left to right in source order.
+        let HirExpr::Binary('+', head, tail, _) = value else {
+            panic!("expected a concat, got {:?}", value);
+        };
+        assert!(matches!(&**tail, HirExpr::Str(text) if text == "!"));
+        let HirExpr::Binary('+', lead, piece, _) = &**head else {
+            panic!("expected the second concat, got {:?}", head);
+        };
+        assert!(matches!(&**lead, HirExpr::Str(text) if text == "v "));
+        assert!(matches!(
+            &**piece,
+            HirExpr::ToStr(inner) if matches!(&**inner, HirExpr::Var(_))
+        ));
+    }
+
+    #[test]
+    fn an_escaped_brace_pair_stays_literal_text() {
+        let program = program("\"\\{\\}\" ကို ဖော်ပြပါ။");
+        let HirStmt::Print { value, .. } = &program.main.body[0] else {
+            panic!("expected a print, got {:?}", &program.main.body[0]);
+        };
+        assert!(matches!(value, HirExpr::Str(text) if text == "{}"));
+    }
+
+    #[test]
+    fn an_unclosed_placeholder_is_refused_by_name() {
+        let program = program("\"oops {x\" ကို ဖော်ပြပါ။");
+        let HirStmt::Print { value, .. } = &program.main.body[0] else {
+            panic!("expected a print, got {:?}", &program.main.body[0]);
+        };
+        assert!(matches!(value, HirExpr::Opaque(what) if what.contains("unclosed")));
     }
 
     #[test]

@@ -1,0 +1,36 @@
+# stringify.akk -- `str(x)` over every displayable kind, and `{…}`
+# interpolation, which is the same conversion joined with `+`.
+n သည် 42 ဖြစ်၏။
+neg သည် -7 ဖြစ်၏။
+zero သည် 0 ဖြစ်၏။
+f သည် 2.5 ဖြစ်၏။
+whole သည် 3.0 ဖြစ်၏။
+yes သည် မှန် ဖြစ်၏။
+no သည် မှား ဖြစ်၏။
+s သည် "မြန်မာ" ဖြစ်၏။
+
+print(str(n));
+print(str(neg));
+print(str(zero));
+print(str(f));
+print(str(whole));
+print(str(yes));
+print(str(no));
+print(str(s));
+
+print("n = {n}, f = {f}");
+print("yes = {yes}, s = {s}");
+print("brace \{ {n} \}");
+print(str(n) + " " + str(f) + " " + str(no));
+print("sum = " + str(n + 1));
+
+လုပ်ငန်း show အတွက် who ဖြင့်
+    print("Hi, {who}!");
+ပြီး။
+show ကို လုပ်ရန် "World" ဖြင့်။
+show ကို လုပ်ရန် s ဖြင့်။
+
+လုပ်ငန်း show_num အတွက် v ဖြင့်
+    print("num = {v}");
+ပြီး။
+show_num ကို လုပ်ရန် 9 ဖြင့်။

@@ -1,0 +1,37 @@
+# list_edits.akk -- pop, insert, remove and sort, and the value each returns.
+xs မှာ [3, 1, 2] ဖြစ်၏။
+print(pop(xs));
+print(xs);
+print(insert(xs, 1, 9));
+print(xs);
+print(remove(xs, 0));
+print(xs);
+print(sort(xs));
+print(xs);
+
+# A second binding keeps its own contents.
+ys မှာ xs ဖြစ်၏။
+print(pop(xs));
+print(ys);
+print(xs);
+
+# Insert at the front and at the end (the position may equal the length).
+insert(xs, 0, 7);
+print(xs);
+insert(xs, len(xs), 5);
+print(xs);
+
+# Floats and strings sort ascending.
+fs မှာ [2.5, 1.5, 2.0] ဖြစ်၏။
+print(sort(fs));
+print(fs);
+names မှာ ["b", "a", "c"] ဖြစ်၏။
+print(sort(names));
+print(names);
+
+# Discarded results still change the list.
+zs မှာ [4, 2] ဖြစ်၏။
+pop(zs);
+print(zs);
+remove(zs, 0);
+print(zs);
