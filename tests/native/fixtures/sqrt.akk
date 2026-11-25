@@ -1,0 +1,32 @@
+# `sqrt` in compiled programs: an int argument is converted to a double, the
+# answer is always a float, and the value travels through bindings, a function
+# parameter and a collection element.
+print(sqrt(16));
+print(sqrt(2));
+print(sqrt(0));
+print(sqrt(6.25));
+print(sqrt(2.0 * 8.0));
+n သည် 100 ဖြစ်၏။
+print(sqrt(n));
+d သည် 2.25 ဖြစ်၏။
+print(sqrt(d) * 2.0);
+print(sqrt(sqrt(16.0)));
+print(sqrt(-0.0));
+print(sqrt(10000000000));
+print(sqrt(abs(-49)));
+
+fn root_int(v :int) {
+    return sqrt(v);
+}
+
+fn root_float(v :float) {
+    return sqrt(v);
+}
+
+print(root_int(25));
+print(root_float(0.25));
+print(sqrt(root_int(81)));
+
+xs မှာ [4, 9, 16] ဖြစ်၏။
+print(sqrt(xs[2]));
+print(sqrt(sqrt(2)));

@@ -1,0 +1,26 @@
+# `trim` in compiled programs: the text without its leading and trailing
+# Unicode whitespace, whatever the script.
+print(trim("  Akkhara  "));
+print(trim("Akkhara"));
+print(trim(""));
+print(trim("     "));
+print("[" + trim("  abc  ") + "]");
+s သည် "  မြန်မာ  " ဖြစ်၏။
+print(trim(s));
+print(trim("\t tab \n"));
+print("[" + trim("   q   ") + "]");
+
+fn tidy(v :str) {
+    return trim(v);
+}
+
+print(tidy("  x  "));
+print(tidy("y"));
+
+xs မှာ ["  a  ", " b "] ဖြစ်၏။
+print(trim(xs[0]));
+print(trim(xs[1]));
+
+# Unicode whitespace on both sides: a no-break space and an ideographic space.
+print("[" + trim(" x ") + "]");
+print("[" + trim("　ကျန်ရှိ　") + "]");

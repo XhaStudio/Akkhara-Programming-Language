@@ -932,6 +932,255 @@ moving the value word:
   panic's exact sentence. Parity is unchanged: no corpus fixture calls
   `slice`.
 
+### Step 19, `contains` (landed)
+
+`contains(hay, needle)` compiles over a collection and over text, and the
+value word is still where it was:
+
+- A list, tuple or set answers whether one of its elements equals the needle;
+  a dict asks its keys, which is the interpreter's `contains_key`. The scan
+  (`rt_contains_seq`, `rt_contains_dict`) runs every stored `{ tag, word }`
+  pair through `rt_value_eq`, so a heterogeneous collection answers by each
+  element's own tag -- `contains([1, "a"], "a")` is `True` while
+  `contains([1], True)` is `False`.
+- Text is a byte scan (`rt_contains_str`), which is exactly what the
+  interpreter's `str::contains` does: UTF-8 bytes, never characters, so a
+  Myanmar substring is found wherever its bytes appear, an empty needle is
+  found at the start, and a needle longer than the text is never found. No
+  Unicode table is needed, which is why text is supported here while text
+  `reverse`, `slice`, `len` and indexing are still refused.
+- The step also fixed the equality the scan depends on. `rt_value_eq` took the
+  left tag only, so `Int 0` and `Bool False` (and `Float 0.0` against `Int 0`)
+  compared equal whenever their words agreed; the interpreter compares printed
+  forms, which carry the type. The helper now takes the right tag in `rsi`,
+  compares the two tags first, and every call site -- collection equality, the
+  run-time set member and the set write -- passes it. `[0] == [False]` and
+  `[0.0] == [0]` answer `False` again, and a set built at run time keeps both
+  `0` and `False`.
+- The analyzer types the answer `Bool`. For text the needle must settle to a
+  string; for a collection any needle kind fits, because the comparison is the
+  runtime's. A value whose kind is only known at run time (a dynamic read)
+  cannot be told apart as text from a collection, so it is refused with `E177`
+  by name rather than lowered under a guessed rule. A wrong arity, a first
+  argument that is neither text nor a collection, and a text search for a
+  non-text value keep the interpreter's `E110` wording, without the line
+  clause compiled code has no span for.
+- `tests/native/fixtures/contains.akk` compares both optimiser modes with the
+  interpreter for a list, a tuple, a set, a dict (its keys, and a value that
+  is not a key), nested collections, mixed elements (`1`, `2.5`, `True`, with
+  `False` and `1.0` as non-matches), text (a Myanmar substring, empty, longer,
+  a suffix, absent), a run-time needle, a parameter, and the tag rule through
+  `[0] == [False]`, `[0.0] == [0]` and a run-time set; `contains_arity`,
+  `contains_of_int` and `contains_text_needle` pin the `E110` refusals, and
+  `contains_dynamic_value`/`contains_dynamic_needle` the `E177` ones. Parity is
+  unchanged: no corpus fixture calls `contains`.
+
+### Step 20, `join` and `split` (landed)
+
+`join(xs, sep)` and `split(text, sep)` compile, and the value word is still
+where it was. Neither needs a new value kind: `join` reads the descriptor a
+collection already has, and `split` answers an ordinary list of strings.
+
+- `join` walks a list, tuple or set descriptor and spells each element by its
+  stored tag -- `rt_str_int`, `rt_str_float`, `rt_str_bool`, or a string's own
+  bytes -- concatenating the pieces with `rt_concat_str` into one fresh arena
+  string. That is `print`'s spelling, so `join([1, 2.5, True], "-")` is
+  `1-2.5-True` and a Myanmar element keeps its bytes. The tag dispatch is what
+  lets a heterogeneous collection join, and an empty collection answers the
+  empty string. An element that is itself a collection would need the
+  interpreter's nested rendering (`[1, 2]`, strings quoted), which this runtime
+  does not build into text yet: a collection whose static element kind is a
+  collection is refused with `E177`, and a heterogeneous collection that hands
+  the runtime one anyway writes a documented `E177` line and exits 1 instead of
+  a wrong spelling.
+- `split` is a byte scan, exactly the interpreter's `str::split`: it counts the
+  non-overlapping occurrences first, allocates the list at its exact size, then
+  copies one string descriptor per piece. `"a,,b"` keeps its empty middle
+  piece, `"abc"` answers one piece, empty text answers one empty piece, and a
+  Myanmar separator matches wherever its bytes appear.
+- An empty separator asks for grapheme clusters -- one character per piece, so
+  a syllable like `မာ` is never cut in half -- which needs the syllable table
+  this runtime does not carry. A literal empty separator is refused at build
+  time with `E177`; one that only turns out empty at run time (a parameter, say)
+  writes a documented `E177` line and exits 1. Splitting by scalar value
+  instead would be silently different from the interpreter, which is the one
+  thing this backend never does.
+- The interpreter's `E110` wording is kept for both: its two-argument
+  sentence, its separator-first check and its "first argument is a collection"
+  sentence for `join` (a dict included), and its single "text and separator"
+  sentence for `split`, all without the line clause a call cannot carry.
+- `tests/native/fixtures/join_split.akk` compares both optimiser modes with the
+  interpreter for a list, a tuple, a set, an empty list, int/float/bool
+  elements, a separator through a binding and through a parameter, and for
+  `split` with empty pieces, one piece, empty text, repeated spaces, a Myanmar
+  separator and a two-byte separator; `join_arity`, `join_of_int`,
+  `join_of_dict` and `split_of_int` pin the `E110` refusals,
+  `join_of_collections` and `split_empty_separator` the build-time `E177` ones,
+  and `native_only_limits_end_with_a_documented_e177` the two that are only
+  visible at run time. Parity is unchanged: no corpus fixture calls `join` or
+  `split`.
+
+### Step 21, `starts_with` and `ends_with` (landed)
+
+`starts_with(text, part)` and `ends_with(text, part)` compile, and nothing about
+the value word changes -- both answer a `Bool` from bytes that are already in
+the constant pool or the arena.
+
+- A prefix compares the part's bytes with the text's from offset 0; a suffix
+  compares them from `len(text) - len(part)`. That is the interpreter's
+  `str::starts_with`/`str::ends_with` over UTF-8, so a part longer than the
+  text never matches and an empty part always does. The two routines
+  (`rt_starts_str`, `rt_ends_str`) differ only in how that offset is computed.
+- No grapheme table is involved: a byte prefix of a text is still text, so
+  `starts_with("မြန်မာ", "မြ")` is `True` and `ends_with("မြန်မာ", "မာ")` is
+  `True`, while a part that is not at that end (`"န်မာ"`, `"မ"`) is a plain
+  `False` -- the interpreter answers the same, because a match has to start at
+  a boundary the text actually has.
+- The interpreter's `E110` wording is kept: its two-argument sentence, and its
+  single "text and part" sentence when either side is not text. A part whose
+  kind is only known at run time is refused with `E177` by name.
+- `tests/native/fixtures/starts_ends.akk` compares both optimiser modes with
+  the interpreter for a prefix, a suffix, an empty part, a part longer than the
+  text, empty text, Myanmar boundaries, a binding, a parameter and a condition;
+  `starts_with_arity`, `starts_with_of_int` and `ends_with_of_int` pin the
+  `E110` refusals, and `starts_with_dynamic_part` the `E177` one. Parity is
+  unchanged: no corpus fixture calls either builtin.
+
+### Step 22, `replace` (landed)
+
+`replace(text, from, to)` compiles, and nothing about the value word changes: it
+answers one fresh string in the arena, exactly like `join`.
+
+- The runtime counts the non-overlapping occurrences of `from` first, allocates
+  the result at its exact size (`len(text) - count * len(from) + count *
+  len(to)`) and then copies the text around each replacement through
+  `rt_replace_str`. That is the interpreter's `str::replace` over bytes, so a
+  Myanmar piece is replaced wherever its bytes appear -- and no grapheme table
+  is needed, because a replacement never has to find a cluster boundary. Setting
+  `to` empty deletes, and a `from` that is absent leaves the text alone.
+- An empty `from` answers the text unchanged, which is the interpreter's own
+  rule rather than inserting `to` between every character. That is why this
+  step needs no refusal at all: every shape of the interpreter's `replace` is
+  emittable.
+- The interpreter's `E110` wording is kept: its three-argument sentence, and
+  its single "three texts" sentence when any argument is not text. A piece
+  whose kind is only known at run time is refused with `E177` by name.
+- `tests/native/fixtures/replace.akk` compares both optimiser modes with the
+  interpreter for repeated pieces, a piece that is absent, deletion, an empty
+  `from`, empty text, Myanmar pieces (a whole syllable and one inside a word), a
+  binding and a parameter; `replace_arity` and `replace_of_int` pin the `E110`
+  refusals, and `replace_dynamic_from` the `E177` one. Parity is unchanged: no
+  corpus fixture calls `replace`.
+
+### Step 23, `enumerate` (landed)
+
+`enumerate(xs)` compiles for a list, tuple or set, and the value word is still
+where it was: each pair is a descriptor of its own, exactly the shape a tuple
+literal's descriptor has.
+
+- `rt_enumerate_seq` allocates the result list at the source's length, then for
+  each element allocates a two-element tuple `{ TAG_TUPLE, 2, { TAG_INT, i },
+  { tag, word } }`, copying the element's stored tag and word. That is the
+  interpreter's `enumerate`, so a heterogeneous collection enumerates and the
+  pair prints as `(0, "a")`.
+- The result shape is `[Tuple] + widen([Int], elements)`. A tuple's shape was
+  homogeneous at this point, so an int-valued collection kept both halves
+  readable (`pair[0]`, `pair[1]`), while a value of another kind widened the
+  pair to `Dynamic`; Step 24 replaced that with one shape per position. Either
+  way printing, `len` and iteration over the pairs work.
+- `enumerate` of a string counts grapheme clusters, so it is refused with
+  `E177` by name (the reason `len`/index/`slice`/`split(s, "")` are); a dict is
+  not a sequence and keeps the interpreter's `E110`; a value whose kind is only
+  known at run time is refused with `E177`.
+- `tests/native/fixtures/enumerate.akk` compares both optimiser modes with the
+  interpreter for a list of ints (printed, counted, a pair read by index), a
+  list of strings (printed and its first pair read), a loop over the pairs, a
+  tuple, a set and an empty list; `enumerate_arity`, `enumerate_of_dict` and
+  `enumerate_of_int` pin the `E110` refusals, and `enumerate_of_string` and
+  `enumerate_dynamic` the `E177` ones. Parity is unchanged: no corpus fixture
+  calls `enumerate`.
+
+### Step 24, positional tuple shapes (landed)
+
+A tuple no longer has to hold one kind all the way through: the analyzer's
+shape is a tree, and a tuple keeps one shape per position.
+
+- `Shape` replaces the flat `Vec<Kind>`: `Scalar(kind)`, `Seq(kind, inner)` for
+  a list or set, `Dict(inner)`, `Tuple(positions)`, plus `Unsettled` (nothing
+  known yet -- an empty literal) and `Mixed` (more than one kind, decided at
+  run time). `elems`/`var_elems`, a parameter's learned shape and a function's
+  result shape all hold one. `widen_shape` marks a disagreement `Mixed`,
+  `merge_shapes` still lets one side say less, and `Shape::refines` is what
+  lets a later fixpoint round tighten an unsettled shape into a settled one
+  instead of contradicting it.
+- `learn_indexed` now takes the index operand: a constant position picks that
+  position's shape (`pair[0]` the int, `pair[1]` the string), any other index
+  answers what all the positions agree on, and a `Mixed` position is read as
+  `Dynamic` -- the code generator leaves the element's own tag beside its word,
+  so printing it works while a use that needs one kind is refused. An
+  `Unsettled` shape says nothing and so learns nothing, which is what keeps an
+  empty string's `for` loop from typing its variable as dynamic.
+- A store into a tuple updates the position it names (`Shape::stored`), so
+  `pair[1] = "z"` leaves `pair[0]` readable; storing another kind there makes
+  that position `Mixed` rather than silently a different kind.
+- `enumerate(xs)`'s pair is `Tuple([Int, element])` and `entries(d)`'s is
+  `Tuple([Str, value])`, so both positions are readable even when the source
+  mixes kinds -- `enumerate([1, "a"])[0][0]` is the int 0. `reverse` reverses a
+  tuple's positions along with its elements, so `reverse(pair)[0]` is the
+  pair's last position.
+- The runtime is untouched: the descriptor already carries a tag beside every
+  element word, so a positionally typed read is the same word read.
+- `tests/native/fixtures/positional.akk` compares both optimiser modes with the
+  interpreter for a mixed tuple literal, `enumerate` and `entries` pairs read
+  at both positions, a reversed pair, a nested list, and a pair out of a mixed
+  list. `strings_ops` (an empty string's loop) guards the `Unsettled` rule. The
+  corpus parity counts are unchanged.
+
+### Step 25, square root (landed)
+
+`sqrt(x)` was the last numeric builtin the slice listed as outside it, and the
+only reason was its `E111`: that sentence quotes the offending value.
+
+- The analyzer answers `Float` whatever the argument is (`sqrt(16)` is `4.0`,
+  not `4`), and refuses a non-number with the interpreter's `E110` before any
+  code is emitted.
+- The generator converts an int to a double and takes one `sqrtsd`, which is
+  what `f64::sqrt` compiles to, so every result is bit-for-bit the
+  interpreter's. `-0.0` keeps its sign; a NaN is unordered under `ucomisd`,
+  which takes neither branch of the sign test, and its root is a NaN.
+- The quoted value is what blocked this. `rt_sqrt_neg_int` writes the fixed
+  prefix, the int through `rt_write_int_err`, and the fixed suffix, then exits
+  1; `rt_sqrt_neg_float` formats the double with `rt_str_float` -- the same
+  formatter `print` uses, so the digits cannot drift -- and writes that string.
+  The line clause is omitted, the rule every run-time panic in compiled code
+  follows.
+- `tests/native/fixtures/sqrt.akk` compares both optimiser modes with the
+  interpreter, and the `E111` path is pinned for an int, a float and a
+  parameter. The corpus parity counts are unchanged.
+
+### Step 26, trim (landed)
+
+`trim(text)` is the first text builtin the slice takes on that needs Unicode
+rules. `find`/`index_of` were considered first and set aside: their answer is a
+grapheme-cluster index, which needs the syllable table the runtime does not
+carry. `trim` needs only the set of scalars `char::is_whitespace` names.
+
+- That set is about two dozen scalars, so `rt_ws_len` is emitted as byte
+  comparisons generated from the host's own `char::is_whitespace`. Matching
+  the bytes of a scalar is the same test `str::trim` makes, so a no-break
+  space or an ideographic space is trimmed exactly where the interpreter trims
+  it, and nothing has to be trusted from memory.
+- `rt_trim_str` walks forwards one scalar at a time and backwards to the lead
+  byte (`< 0xC0` is not a continuation byte), dropping a scalar only when its
+  own bytes end exactly at the current hi. A multi-byte scalar is never split,
+  so a Myanmar syllable survives or goes whole, and the bytes between the two
+  ends are copied unchanged with `rep movsb`.
+- A text that needs no trimming answers itself: strings are immutable in the
+  generated code, so sharing the descriptor is exact and allocates nothing.
+- `tests/native/fixtures/trim.akk` compares both optimiser modes with the
+  interpreter, including a no-break space and an ideographic space, and
+  `trim_arity`/`trim_of_int` pin the `E110` refusals.
+
 A single NaN-boxed word is still the longer-term shape (it would also make
 `str`/arithmetic on a dynamic value dispatchable), but the pair address needs
 no change to the element storage, the ABI or the static kinds every other

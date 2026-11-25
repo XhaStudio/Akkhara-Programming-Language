@@ -119,6 +119,62 @@ pub(crate) fn slice_args_needed_detail(count: usize) -> String {
     )
 }
 
+/// The interpreter's wording for `contains` when it is not given the value to
+/// search and the value to look for.
+pub(crate) fn contains_args_needed_detail(count: usize) -> String {
+    format!("အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်", count)
+}
+
+/// The interpreter's wording for `contains` when the first argument is
+/// neither text nor a collection.
+pub(crate) fn contains_haystack_needed_detail(kind: &str) -> String {
+    format!("ပထမ အချက်သည် စာသား သို့မဟုတ် စုစည်းမှု ဖြစ်ရပါမည်၊ {} ရပါသည်", kind)
+}
+
+/// The interpreter's wording for `contains` over text when the value to look
+/// for is not text.
+pub(crate) fn contains_needle_needed_detail(kind: &str) -> String {
+    format!("ရှာဖွေမည့် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
+}
+
+/// The interpreter's wording for `join` or `split` when it is not given two
+/// arguments. The sentence is the one `contains` uses for the same count.
+pub(crate) fn two_args_needed_detail(count: usize) -> String {
+    format!("အချက် နှစ်ခု လိုအပ်ပါသည်၊ {} ရပါသည်", count)
+}
+
+/// The interpreter's wording for `join` when the separator is not text.
+pub(crate) fn join_separator_needed_detail(kind: &str) -> String {
+    format!("ခွဲခြားမည့် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", kind)
+}
+
+/// The interpreter's wording for `join` when the first argument is not a
+/// list, tuple or set (a dict included).
+pub(crate) fn join_collection_needed_detail(kind: &str) -> String {
+    format!("ပထမ အချက်သည် စုစည်းမှု ဖြစ်ရပါမည်၊ {} ရပါသည်", kind)
+}
+
+/// The interpreter's wording for `split` when either argument is not text. It
+/// is one fixed sentence, because the interpreter matches the pair together.
+pub(crate) const SPLIT_PAIR_NEEDED: &str = "ခွဲရမည့် စာသား နှင့် ခွဲခြားမည့် စာသား နှစ်ခု လိုအပ်ပါသည်";
+
+/// The interpreter's wording for `replace` when it is not given three
+/// arguments.
+pub(crate) fn three_args_needed_detail(count: usize) -> String {
+    format!("အချက် သုံးခု လိုအပ်ပါသည်၊ {} ရပါသည်", count)
+}
+
+/// The interpreter's wording for `replace` when any of its three arguments is
+/// not text. It is one fixed sentence, because the interpreter matches the
+/// triple together.
+pub(crate) const REPLACE_TEXT_NEEDED: &str =
+    "စာသား သုံးခု လိုအပ်ပါသည် — မူရင်းစာသား၊ ရှာရမည့် စာသား၊ အစားထိုးမည့် စာသား";
+
+/// The interpreter's wording for `starts_with`/`ends_with` when either
+/// argument is not text. One sentence covers both names, as the interpreter's
+/// pair match does.
+pub(crate) const TEXT_PAIR_NEEDED: &str = "စာသား နှင့် ရှာရမည့် စာသား နှစ်ခု လိုအပ်ပါသည်";
+
 /// The interpreter's wording for `reverse` when it is not given exactly one
 /// argument.
 pub(crate) fn reverse_arg_needed_detail(count: usize) -> String {
@@ -148,7 +204,7 @@ pub(crate) const KIND_STR_MM: &str = "စာသား";
 /// diagnostic always says what was not supported.
 pub(crate) fn native_unsupported(what: &str) -> String {
     format!(
-        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/floor/ceil/round, push/append, reverse, pop/insert/remove/sort, slice, str conversion နှင့် {{…}} interpolation, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
+        "E177 native backend တွင် {} ကို မထောက်ပံ့သေးပါ။ (int, float, bool, string literal, list/tuple/set/dict literal နှင့် ၎င်းတို့၏ index/len/print/iteration/store/equality, အခြေခံ တွက်ချက်မှု, နှိုင်းယှဉ်ချက်, abs/min/max/sqrt/floor/ceil/round, push/append, reverse, pop/insert/remove/sort, slice, contains, join/split, starts_with/ends_with, replace, enumerate, trim, str conversion နှင့် {{…}} interpolation, print, လုပ်ဆောင်ချက် ခေါ်ခြင်း, return, ပစ်ပါ နှင့် try/catch သာ ရပါသည်)",
         what
     )
 }

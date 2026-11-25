@@ -1,0 +1,35 @@
+# starts_ends.akk -- `starts_with(text, part)` and `ends_with(text, part)`.
+print(starts_with("abc", "ab"));
+print(starts_with("abc", "bc"));
+print(starts_with("abc", ""));
+print(starts_with("abc", "abcd"));
+print(starts_with("", ""));
+
+print(ends_with("abc", "bc"));
+print(ends_with("abc", "ab"));
+print(ends_with("abc", ""));
+print(ends_with("abc", "zabc"));
+
+# A prefix or suffix of a Myanmar word matches by its bytes; a piece that is
+# not at that end, or that cuts into the text, does not.
+print(starts_with("မြန်မာ", "မြ"));
+print(ends_with("မြန်မာ", "မာ"));
+print(starts_with("မြန်မာ", "န်မာ"));
+print(ends_with("မြန်မာ", "မ"));
+
+# Through a binding, a parameter and a condition.
+word မှာ "hello.akk" ဖြစ်၏။
+print(starts_with(word, "hello"));
+print(ends_with(word, ".akk"));
+
+fn head(s, p) {
+    return starts_with(s, p);
+}
+print(head("prefix-body", "prefix"));
+
+if (ends_with(word, ".akk")) {
+    print("akk file");
+}
+
+# Case matters.
+print(starts_with("Abc", "a"));

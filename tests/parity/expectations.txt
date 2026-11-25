@@ -41,7 +41,9 @@ defaults	refuse	E177	the run-time name "seen"
 destructure_forms	refuse	E176	destructuring into
 div_zero	match
 eng_break_error	refuse	E176	a break outside a loop
-eng_builtin	refuse	E177	a function call to "sqrt"
+# `sqrt` is compiled now, so the first refusal this fixture reaches is the
+# `find` call after it (and the `E111` catch clause after that).
+eng_builtin	refuse	E177	a function call to "find"
 eng_catch	refuse	E177	a catch clause for `E104`
 eng_fn	refuse	E177	returning a value on one path and nothing
 eng_input	refuse	E177	a function call to "input"

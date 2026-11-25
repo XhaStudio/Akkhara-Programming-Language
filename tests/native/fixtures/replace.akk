@@ -1,0 +1,24 @@
+# replace.akk -- `replace(text, from, to)`.
+print(replace("a-b-c", "-", "+"));
+print(replace("abc", "b", "XY"));
+print(replace("abc", "z", "!"));
+print(replace("aaa", "a", "b"));
+print(replace("abc", "abc", ""));
+
+# An empty `from` answers the text unchanged, the interpreter's own rule.
+print(replace("hello", "", "X"));
+print(replace("", "a", "b"));
+
+# A Myanmar piece is replaced by its bytes, whether it is a whole syllable or
+# one that sits inside a word.
+print(replace("မြန်မာ", "မာ", "ပါ"));
+print(replace("မြန်မာ", "န်", "+"));
+
+# A binding and a parameter.
+s မှာ "one two one" ဖြစ်၏။
+print(replace(s, "one", "1"));
+
+fn swap(text, from, to) {
+    return replace(text, from, to);
+}
+print(swap("x.y.z", ".", "/"));

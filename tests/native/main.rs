@@ -62,6 +62,52 @@ const CASES: &[Case] = &[
         name: "builtins",
         stdout: &["7", "2.5", "1", "3", "2.5", "-2.5", "4", "1.5"],
     },
+    // The square root: an int argument becomes a double first (`sqrt(16)` is
+    // `4.0`, not `4`), a float stays a float, and the answer travels through a
+    // binding, a parameter and a collection element.
+    Case {
+        name: "sqrt",
+        stdout: &[
+            "4.0",
+            "1.4142135623730951",
+            "0.0",
+            "2.5",
+            "4.0",
+            "10.0",
+            "3.0",
+            "2.0",
+            "-0.0",
+            "100000.0",
+            "7.0",
+            "5.0",
+            "0.5",
+            "3.0",
+            "4.0",
+            "1.189207115002721",
+        ],
+    },
+    // `trim`: the Unicode whitespace at either end removed -- ASCII spaces and
+    // tabs, a no-break space and an ideographic space -- with the text between
+    // them untouched, so a Myanmar syllable is never cut.
+    Case {
+        name: "trim",
+        stdout: &[
+            "Akkhara",
+            "Akkhara",
+            "",
+            "",
+            "[abc]",
+            "မြန်မာ",
+            "tab",
+            "[q]",
+            "x",
+            "y",
+            "a",
+            "b",
+            "[x]",
+            "[ကျန်ရှိ]",
+        ],
+    },
     // Heterogeneous collections: a mixed literal printed, counted and
     // compared; a store and a `push` that widen the element shape; a nested
     // widening; a set with a run-time member deduplicated at run time; and a
@@ -318,6 +364,152 @@ const CASES: &[Case] = &[
             "[[3, 4], [5]]",
             "4",
             "[\"b\", \"c\"]",
+        ],
+    },
+    // `contains(hay, needle)`: a collection answers by each element's own tag
+    // (a dict, by its keys), text by a byte scan, and the answer is the same
+    // `True`/`False` the interpreter prints -- including the tag rule that
+    // `1`, `1.0` and `True` are three different values.
+    Case {
+        name: "contains",
+        stdout: &[
+            "True",
+            "False",
+            "False",
+            "True",
+            "has ten",
+            "True",
+            "True",
+            "False",
+            "True",
+            "True",
+            "True",
+            "False",
+            "False",
+            "True",
+            "False",
+            "True",
+            "True",
+            "True",
+            "False",
+            "False",
+            "True",
+            "False",
+            "False",
+            "{0, False}",
+            "2",
+            "True",
+            "True",
+            "False",
+            "True",
+            "True",
+            "False",
+            "True",
+            "False",
+        ],
+    },
+    // `join(xs, sep)` and `split(text, sep)`: a list, tuple or set joins by
+    // each element's printed spelling (an empty one joins to the empty string),
+    // and text splits on a separator's bytes -- empty pieces kept, one piece
+    // for text without the separator, a Myanmar separator included -- with a
+    // separator through a binding and a parameter reaching both.
+    Case {
+        name: "join_split",
+        stdout: &[
+            "a-b-c",
+            "abc",
+            "",
+            "1, 2, 3",
+            "1.5|2.0",
+            "True/False",
+            "1+2",
+            "123",
+            "4,5",
+            "[\"a\", \"b\", \"c\"]",
+            "[\"a\", \"\", \"b\"]",
+            "[\"abc\"]",
+            "[\"\"]",
+            "[\"one\", \"two\", \"\", \"three\"]",
+            "[\"မြန်မာ\", \"ပါ\"]",
+            "[\"a\", \"b\", \"c\"]",
+            "3",
+            "b",
+            "[\"x\", \"y\"]",
+            "x|y",
+            "မြ,န်,မာ",
+        ],
+    },
+    // `starts_with`/`ends_with`: a byte prefix or suffix, an empty part as
+    // `True`, a part longer than the text as `False`, Myanmar boundaries, a
+    // binding, a parameter and a condition.
+    Case {
+        name: "starts_ends",
+        stdout: &[
+            "True", "False", "True", "False", "True", "True", "False", "True", "False", "True",
+            "True", "False", "False", "True", "True", "True", "akk file", "False",
+        ],
+    },
+    // `replace(text, from, to)`: every non-overlapping occurrence replaced, a
+    // `from` that is absent leaving the text alone, deletion with an empty
+    // `to`, an empty `from` answering the text unchanged, Myanmar pieces, a
+    // binding and a parameter.
+    Case {
+        name: "replace",
+        stdout: &[
+            "a+b+c",
+            "aXYc",
+            "abc",
+            "bbb",
+            "",
+            "hello",
+            "",
+            "မြန်ပါ",
+            "မြ+မာ",
+            "1 two 1",
+            "x/y/z",
+        ],
+    },
+    // `enumerate(xs)`: one `(index, value)` tuple per element, in order, for a
+    // list, a tuple, a set and an empty list; a pair read back by index, a
+    // loop over the pairs, and the count.
+    Case {
+        name: "enumerate",
+        stdout: &[
+            "[(0, 10), (1, 20), (2, 30)]",
+            "3",
+            "0",
+            "10",
+            "[(0, \"a\"), (1, \"b\")]",
+            "(0, \"a\")",
+            "(0, 5)",
+            "(1, 6)",
+            "[(0, 7), (1, 8)]",
+            "[(0, 4), (1, 9)]",
+            "[]",
+            "0",
+        ],
+    },
+    // A tuple keeps one shape per position, so a pair of an int and a string
+    // is readable at both positions -- in a literal, out of `enumerate`, out
+    // of `entries`, and after `reverse` puts the positions the other way
+    // round.
+    Case {
+        name: "positional",
+        stdout: &[
+            "1",
+            "a",
+            "(1, \"a\")",
+            "a",
+            "1",
+            "0",
+            "x",
+            "b",
+            "2",
+            "(\"a\", 1)",
+            "a",
+            "3",
+            "0",
+            "1",
         ],
     },
     // `switch`: the default arm runs only when no case matched wherever it is
@@ -968,6 +1160,145 @@ fn a_slice_with_a_negative_bound_panics_like_the_interpreter() {
     assert_eq!(native.status.code(), reference.status.code());
 }
 
+/// A negative square root is the interpreter's `E111`, and that sentence quotes
+/// the value. The executable renders the same number through the writer `print`
+/// uses, writes the sentence without the line (a compiled call carries no
+/// span) and exits 1, without reaching the statement after the call.
+#[test]
+fn a_negative_square_root_panics_like_the_interpreter() {
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
+    let cases = [
+        (
+            "sqrt_negative_int",
+            "print(\"before\");\nprint(sqrt(-4));\n",
+            "-4",
+        ),
+        (
+            "sqrt_negative_float",
+            "print(\"before\");\nprint(sqrt(-1.5));\n",
+            "-1.5",
+        ),
+        (
+            "sqrt_negative_parameter",
+            "fn root(v :int) {\n    return sqrt(v);\n}\nprint(\"before\");\nprint(root(-9));\n",
+            "-9",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, source, value) in cases {
+        let dir = work_dir(name, "sqrt-negative");
+        let file = dir.join(format!("{name}.akk"));
+        fs::write(&file, source).expect("the source");
+
+        let reference = interpret(&file);
+        let reference_stderr = text(&reference.stderr);
+        if reference.status.code() != Some(1) || !reference_stderr.contains("E111") {
+            failures.push(format!(
+                "{name}: the interpreter should exit 1 with E111, got {}\n    stderr: {}",
+                reference.status,
+                reference_stderr.trim()
+            ));
+            continue;
+        }
+
+        let built = build(&file, true);
+        if !built.status.success() {
+            failures.push(format!(
+                "{name}: `akk build` failed: {}",
+                text(&built.stderr).trim()
+            ));
+            continue;
+        }
+
+        let native = execute(&executable_for(&file));
+        let want_stderr = format!("E111 sqrt() သည် အနုတ်မဟုတ်သော ကိန်း လိုအပ်ပါသည်၊ {value} ရပါသည်။");
+        if text(&native.stderr).trim_end() != want_stderr {
+            failures.push(format!(
+                "{name}: stderr was {:?}, expected {want_stderr:?}",
+                text(&native.stderr).trim_end()
+            ));
+        }
+        if text(&native.stdout) != text(&reference.stdout) {
+            failures.push(format!(
+                "{name}: stdout was {:?}, the interpreter printed {:?}",
+                text(&native.stdout),
+                text(&reference.stdout)
+            ));
+        }
+        if native.status.code() != Some(1) || native.status.code() != reference.status.code() {
+            failures.push(format!(
+                "{name}: exited {:?}, the interpreter exited {:?}",
+                native.status.code(),
+                reference.status.code()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} negative square root check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Two native limits are only known once the program runs: a separator that
+/// turns out empty (splitting on it means grapheme clusters, which needs the
+/// syllable table) and a heterogeneous collection that hands `join` a
+/// collection element. Both end with a documented `E177` line and exit 1
+/// instead of producing a value the interpreter never would.
+#[test]
+fn native_only_limits_end_with_a_documented_e177() {
+    let cases = [
+        (
+            "split_empty_at_run_time",
+            "fn parts(s, d) {\n    return split(s, d);\n}\nprint(parts(\"abc\", \"\"));\n",
+        ),
+        (
+            "join_collection_element",
+            "fn blend(xs) {\n    return join(xs, \",\");\n}\nprint(blend([1, [2]]));\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, source) in cases {
+        let dir = work_dir(name, "runtime-limit");
+        let file = dir.join(format!("{name}.akk"));
+        fs::write(&file, source).expect("the source");
+        let built = build(&file, true);
+        // A refusal at build time is the same limit reported earlier; either
+        // way the program never runs to a value.
+        if built.status.code() == Some(1) {
+            let stderr = text(&built.stderr);
+            if !stderr.contains("E177") {
+                failures.push(format!("{name}: build stderr was {stderr:?}"));
+            }
+            continue;
+        }
+        if !built.status.success() {
+            failures.push(format!("{name}: `akk build` exited {}", built.status));
+            continue;
+        }
+        let native = execute(&executable_for(&file));
+        let stderr = text(&native.stderr);
+        if native.status.code() != Some(1) {
+            failures.push(format!(
+                "{name}: exited {:?}, expected 1 (stderr {stderr:?})",
+                native.status.code()
+            ));
+        }
+        if !stderr.contains("E177") {
+            failures.push(format!("{name}: expected an E177 line, got {stderr:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} native-limit check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
 /// A construct is outside the slice, with the word the message should name it
 /// by. The program itself is valid: the interpreter runs it before `akk build`
 /// is asked to, so the refusal is about the slice and not about the syntax.
@@ -1031,6 +1362,63 @@ const REFUSED: &[Refused] = &[
         mentions: "slice of a string",
         source: "fn part(s) {\n    return slice(s, 0, 1);\n}\nprint(part(\"abc\"));\n",
     },
+    // `contains` compares a value with an element through the runtime's
+    // equality, which needs each side's tag. A value that only carries a tag
+    // at run time cannot be told apart as text from a collection, and a text
+    // needle has to be text, so both are refused by name instead of lowered
+    // under a guessed rule.
+    Refused {
+        name: "contains_dynamic_value",
+        mentions: "contains",
+        source: "xs မှာ [\"ab\", 1] ဖြစ်၏။\nprint(contains(xs[0], \"a\"));\n",
+    },
+    Refused {
+        name: "contains_dynamic_needle",
+        mentions: "contains",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(contains(\"abc\", xs[1]));\n",
+    },
+    // `join` of a collection of collections would need the interpreter's
+    // nested rendering, which the native runtime has no string builder for.
+    Refused {
+        name: "join_of_collections",
+        mentions: "join",
+        source: "grid မှာ [[1, 2], [3]] ဖြစ်၏။\nprint(join(grid, \";\"));\n",
+    },
+    // Splitting on an empty separator means grapheme clusters, which needs the
+    // syllable table; a literal separator is refused at build time.
+    Refused {
+        name: "split_empty_separator",
+        mentions: "split",
+        source: "print(split(\"abc\", \"\"));\n",
+    },
+    // A part that only carries a tag at run time cannot be promised to be
+    // text, so the build refuses it by name.
+    Refused {
+        name: "starts_with_dynamic_part",
+        mentions: "starts_with",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(starts_with(\"abc\", xs[1]));\n",
+    },
+    // The same rule for `replace`: a piece whose kind is only known at run
+    // time cannot be promised to be text.
+    Refused {
+        name: "replace_dynamic_from",
+        mentions: "replace",
+        source: "xs မှာ [1, \"a\"] ဖြစ်၏။\nprint(replace(\"abc\", xs[1], \"x\"));\n",
+    },
+    // `enumerate` of a string counts grapheme clusters, which needs the
+    // syllable table; a value that only carries a tag at run time is refused
+    // by name too.
+    Refused {
+        name: "enumerate_of_string",
+        mentions: "enumerate",
+        source: "print(enumerate(\"abc\"));\n",
+    },
+    Refused {
+        name: "enumerate_dynamic",
+        mentions: "enumerate",
+        source: "xs မှာ [[1, 2], \"a\"] ဖြစ်၏။\nprint(enumerate(xs[0]));\n",
+    },
+
     // One function's parameter sees one element shape: a caller passing a
     // list of strings and another passing a list of ints cannot both describe
     // the same statically typed parameter.
@@ -1095,6 +1483,30 @@ const MISUSE: &[Misuse] = &[
         mentions: "abs",
         source: "x သည် abs(\"a\") ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
     },
+    // `sqrt` keeps the interpreter's one-number rule: a wrong arity and a
+    // non-number argument are its `E110`.
+    Misuse {
+        name: "sqrt_arity",
+        mentions: "sqrt",
+        source: "x သည် sqrt() ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "sqrt_of_string",
+        mentions: "sqrt",
+        source: "x သည် sqrt(\"a\") ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    // `trim` keeps the interpreter's one-text rule: a wrong arity and a
+    // non-text argument are its `E110`.
+    Misuse {
+        name: "trim_arity",
+        mentions: "trim",
+        source: "x သည် trim() ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
+    Misuse {
+        name: "trim_of_int",
+        mentions: "trim",
+        source: "x သည် trim(1) ဖြစ်၏။\nx ကို ဖော်ပြပါ။\n",
+    },
     Misuse {
         name: "min_arity",
         mentions: "min",
@@ -1155,6 +1567,92 @@ const MISUSE: &[Misuse] = &[
         name: "entries_arity",
         mentions: "entries",
         source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(entries(d, d));\n",
+    },
+    // `contains` keeps the interpreter's two-argument `E110`, its
+    // first-argument rule and its text-needle rule.
+    Misuse {
+        name: "contains_arity",
+        mentions: "contains",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(contains(xs));\n",
+    },
+    Misuse {
+        name: "contains_of_int",
+        mentions: "contains",
+        source: "print(contains(1, 1));\n",
+    },
+    Misuse {
+        name: "contains_text_needle",
+        mentions: "contains",
+        source: "print(contains(\"abc\", 1));\n",
+    },
+    // `join` and `split` keep the interpreter's `E110`: its two-argument
+    // sentence, its separator-first check for `join`, and its single sentence
+    // for a `split` whose arguments are not text.
+    Misuse {
+        name: "join_arity",
+        mentions: "join",
+        source: "xs မှာ [1, 2] ဖြစ်၏။\nprint(join(xs));\n",
+    },
+    Misuse {
+        name: "join_of_int",
+        mentions: "join",
+        source: "print(join(1, \",\"));\n",
+    },
+    Misuse {
+        name: "join_of_dict",
+        mentions: "join",
+        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(join(d, \",\"));\n",
+    },
+    Misuse {
+        name: "split_of_int",
+        mentions: "split",
+        source: "print(split(1, \",\"));\n",
+    },
+    // `starts_with`/`ends_with` keep the interpreter's two-argument sentence
+    // and its one "text and part" sentence.
+    Misuse {
+        name: "starts_with_arity",
+        mentions: "starts_with",
+        source: "print(starts_with(\"abc\"));\n",
+    },
+    Misuse {
+        name: "starts_with_of_int",
+        mentions: "starts_with",
+        source: "print(starts_with(1, \"a\"));\n",
+    },
+    Misuse {
+        name: "ends_with_of_int",
+        mentions: "ends_with",
+        source: "print(ends_with(\"abc\", 1));\n",
+    },
+    // `replace` keeps the interpreter's three-argument sentence and its one
+    // "three texts" sentence.
+    Misuse {
+        name: "replace_arity",
+        mentions: "replace",
+        source: "print(replace(\"abc\", \"b\"));\n",
+    },
+    Misuse {
+        name: "replace_of_int",
+        mentions: "replace",
+        source: "print(replace(1, \"a\", \"b\"));\n",
+    },
+    // `enumerate` keeps the interpreter's one-argument rule and its "collection
+    // or text" sentence; a dict is not a sequence.
+    Misuse {
+        name: "enumerate_arity",
+        mentions: "enumerate",
+        source: "print(enumerate());\n",
+    },
+    Misuse {
+        name: "enumerate_of_dict",
+        mentions: "enumerate",
+        source: "d မှာ { \"a\" သည် 1 ဖြစ်၏။ } ဖြစ်၏။\nprint(enumerate(d));\n",
+    },
+    Misuse {
+        name: "enumerate_of_int",
+        mentions: "enumerate",
+        source: "print(enumerate(1));\n",
     },
 ];
 

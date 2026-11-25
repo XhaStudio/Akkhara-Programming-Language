@@ -358,14 +358,37 @@ error.
   a start past the end empty, exactly as the interpreter has it; a tuple or a
   set slices into a list, and a negative bound is its `E110`. Popping an empty
   list and a position outside the list are the interpreter's `E110`/`E049`,
-  without the line clause a compiled call cannot carry. A write builds a fresh collection and
+  without the line clause a compiled call cannot carry. `contains(hay, needle)`
+  asks whether a collection holds a value (a dict, a key) or whether text
+  holds a substring, with the tag-aware equality `==` uses, so `1`, `1.0` and
+  `True` stay three values; text is matched by its bytes, as the interpreter
+  does. `join(xs, sep)` spells every element the way `print` does and puts the
+  separator between them (an empty collection joins to the empty string), and
+  `split(text, sep)` answers the pieces between a separator's bytes as a list of
+  text, keeping empty pieces; an empty separator means grapheme clusters, so a
+  literal one is refused and a run-time one ends with a documented `E177`.
+  `starts_with(text, part)` and `ends_with(text, part)` compare the part's
+  bytes with the front or back of the text, and `replace(text, from, to)`
+  replaces every occurrence of a piece (an empty piece leaves the text alone).
+  `enumerate(xs)` answers one `(index, value)` tuple per element. `sqrt(x)`
+  answers the square root as a float -- an int is converted to a double first,
+  so `sqrt(16)` is `4.0` -- and a negative value is the interpreter's `E111`,
+  whose sentence quotes the number and is written without the line a compiled
+  call cannot carry. `trim(text)` drops the Unicode whitespace at either end --
+  spaces, tabs, a no-break space, an ideographic space, whatever
+  `str::trim` trims -- and leaves the text between them byte for byte, so a
+  Myanmar syllable is never cut. A write builds
+  a fresh collection and
   rebinds the name, so another binding keeps its own contents, exactly as the
   interpreter's value semantics do. Equality (`==`/`!=`) is structural and
   order-sensitive, like the printed form: same kind, length and elements, and
   a dict compares its keys and values in insertion order. A collection of
   collections works at any depth: `grid[0][1]`, `deep[0][1][0]`, a list inside
   a dict, a `for` over rows and then over cells, and printing or comparing the
-  nested value all type from a per-binding element shape. That shape crosses
+  nested value all type from a per-binding element shape. A tuple's shape is
+  per position, so `(1, "a")` has an int at `t[0]` and a string at `t[1]`, and
+  the same holds for an `enumerate` pair and an `entries` entry, even when the
+  source mixes kinds. That shape crosses
   a call too: a list, tuple, set or dict parameter is typed from what its
   call sites pass and from what its body does with it, and a returned
   collection's shape reaches the caller, so indexing a call's result works.

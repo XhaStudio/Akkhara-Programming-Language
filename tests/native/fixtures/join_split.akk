@@ -1,0 +1,45 @@
+# join_split.akk -- `join(xs, sep)` and `split(text, sep)`.
+names မှာ ["a", "b", "c"] ဖြစ်၏။
+print(join(names, "-"));
+print(join(names, ""));
+
+# An empty collection joins to the empty string.
+empty မှာ [] ဖြစ်၏။
+print(join(empty, ","));
+
+# Every element is spelled the way `print` spells it.
+print(join([1, 2, 3], ", "));
+print(join([1.5, 2.0], "|"));
+print(join([True, False], "/"));
+
+t မှာ (1, 2) ဖြစ်၏။
+print(join(t, "+"));
+s မှာ {1, 2, 3} ဖြစ်၏။
+print(join(s, ""));
+
+# A separator through a binding.
+d မှာ "," ဖြစ်၏။
+print(join([4, 5], d));
+
+# Splitting keeps an empty piece, answers one piece when nothing matches, and
+# answers one empty piece for empty text.
+print(split("a,b,c", ","));
+print(split("a,,b", ","));
+print(split("abc", ","));
+print(split("", ","));
+print(split("one two  three", " "));
+print(split("မြန်မာ,ပါ", ","));
+print(split("a->b->c", "->"));
+
+# The pieces are an ordinary list: counted and indexed.
+pieces မှာ split("a,b,c", ",") ဖြစ်၏။
+print(len(pieces));
+print(pieces[1]);
+
+# A separator through a parameter, and joining what was split.
+fn parts(text, sep) {
+    return split(text, sep);
+}
+print(parts("x:y", ":"));
+print(join(parts("x:y", ":"), "|"));
+print(join(split("မြ,န်,မာ", ","), ","));

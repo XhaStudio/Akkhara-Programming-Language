@@ -498,6 +498,13 @@ impl Code {
         self.sse_arith(0x5E, dst, src);
     }
 
+    /// `sqrtsd dst, src` -- the square root of the low double into `dst`.
+    /// A negative operand is invalid and gives the quiet NaN the hardware
+    /// defines; the caller checks the sign first, so it never reaches here.
+    pub(crate) fn sqrtsd(&mut self, dst: u8, src: u8) {
+        self.sse_arith(0x51, dst, src);
+    }
+
     /// `xorpd dst, src` -- a register against itself clears it.
     pub(crate) fn xorpd(&mut self, dst: u8, src: u8) {
         self.byte(0x66);

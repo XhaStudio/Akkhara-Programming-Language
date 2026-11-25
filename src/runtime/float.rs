@@ -27,6 +27,7 @@
 //! followed by a digit-by-digit compare with zero padding.
 
 use crate::backend::x86_64::encode::*;
+use crate::backend::x86_64::Data;
 
 /// Scratch slots and buffers. The buffers hold 800 digits, which covers the
 /// 767-digit exact expansion of the smallest subnormal.
@@ -217,6 +218,42 @@ fn emit_copy(code: &mut Code, from: i32, to: i32) {
 /// `str_mode` is the `.data` word that turns the formatter into a string
 /// builder: non-zero means `rt_str_float` is running, so the rendered bytes
 /// are copied into a fresh arena string instead of written to stdout.
+/// `rt_sqrt_neg_int` and `rt_sqrt_neg_float`: the interpreter's `E111` for a
+/// negative square root, whose sentence quotes the value (`display(v)`). `rax`
+/// holds the int, or the float's bits; the routine writes the sentence's two
+/// fixed parts around that number -- through the same writer `print` uses, so
+/// the digits cannot differ -- and exits 1. A compiled call carries no span,
+/// so the line clause is left out, the rule the run-time panics follow.
+pub(crate) fn emit_sqrt_errors(code: &mut Code, data: &mut Data) {
+    let prefix = data.intern("E111 sqrt() သည် အနုတ်မဟုတ်သော ကိန်း လိုအပ်ပါသည်၊ ");
+    let suffix = data.intern(" ရပါသည်။\n");
+
+    for (label, number) in [
+        ("rt_sqrt_neg_int", "rt_write_int_err"),
+        ("rt_sqrt_neg_float", "rt_str_float"),
+    ] {
+        code.label(label);
+        code.push(RBP);
+        code.mov_rbp_rsp();
+        // The value waits in a frame slot while the prefix is written.
+        code.sub_rsp(32);
+        code.store(-8, RAX);
+        code.mov_data_address(RAX, prefix);
+        code.call("rt_write_str_err");
+        code.load(RAX, -8);
+        code.call(number);
+        if number == "rt_str_float" {
+            // A float is rendered into a fresh string first, then written.
+            code.call("rt_write_str_err");
+        }
+        code.mov_data_address(RAX, suffix);
+        code.call("rt_write_str_err");
+        code.mov_imm32_zero(RAX, 1);
+        code.call("rt_exit");
+        code.ud2();
+    }
+}
+
 pub(crate) fn emit(code: &mut Code, str_mode: u32) {
     code.label("rt_str_float");
     // `rax` holds the float bits; the flag is set around the call and cleared

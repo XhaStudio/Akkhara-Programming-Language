@@ -1,0 +1,32 @@
+# positional.akk -- a tuple keeps one shape per position.
+t မှာ (1, "a") ဖြစ်၏။
+print(t[0]);
+print(t[1]);
+print(t);
+
+pairs မှာ enumerate(["a", "b"]) ဖြစ်၏။
+print(pairs[0][1]);
+print(pairs[1][0]);
+
+first မှာ enumerate(["x", "y"])[0] ဖြစ်၏။
+print(first[0]);
+print(first[1]);
+
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+e မှာ entries(d)[1] ဖြစ်၏။
+print(e[0]);
+print(e[1]);
+
+r မှာ reverse((1, "a")) ဖြစ်၏။
+print(r);
+print(r[0]);
+
+grid မှာ [[1, 2], [3]] ဖြစ်၏။
+print(grid[1][0]);
+
+# A pair from a mixed list keeps its index position; the value position is
+# decided at run time and still prints.
+mixed မှာ [1, "a"] ဖြစ်၏။
+mp မှာ enumerate(mixed)[0] ဖြစ်၏။
+print(mp[0]);
+print(mp[1]);

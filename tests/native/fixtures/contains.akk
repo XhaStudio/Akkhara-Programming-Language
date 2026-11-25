@@ -1,0 +1,66 @@
+# contains.akk -- `contains(hay, needle)` over collections and text.
+xs မှာ [10, 20, 30] ဖြစ်၏။
+print(contains(xs, 20));
+print(contains(xs, 21));
+print(contains(xs, 20.0));
+found မှာ contains(xs, 30) ဖြစ်၏။
+print(found);
+if (contains(xs, 10)) {
+    print("has ten");
+}
+n သည် 20 ဖြစ်၏။
+print(contains(xs, n));
+
+names မှာ ["a", "b"] ဖြစ်၏။
+print(contains(names, "b"));
+print(contains(names, "c"));
+
+t မှာ (1, 2) ဖြစ်၏။
+print(contains(t, 1));
+
+s မှာ {3, 1, 2} ဖြစ်၏။
+print(contains(s, 2));
+
+d မှာ { "a" သည် 1 ဖြစ်၏။ "b" သည် 2 ဖြစ်၏။ } ဖြစ်၏။
+print(contains(d, "b"));
+print(contains(d, "c"));
+print(contains(d, 1));
+
+# A nested collection is compared by its contents, not by its address.
+grid မှာ [[1, 2], [3, 4]] ဖြစ်၏။
+print(contains(grid, [3, 4]));
+print(contains(grid, [4, 3]));
+
+# Mixed elements compare with their own tags: 1, 1.0 and True are three
+# different values, exactly as the interpreter's printed-form rule has it.
+mix မှာ [1, "a", 2.5, True] ဖြစ်၏။
+print(contains(mix, "a"));
+print(contains(mix, 2.5));
+print(contains(mix, True));
+print(contains(mix, False));
+print(contains(mix, 1.0));
+print(contains(mix, 1));
+
+# The same tag rule decides equality and a run-time set's deduplication.
+print([0] == [False]);
+print([0.0] == [0]);
+a သည် 0 ဖြစ်၏။
+b သည် False ဖြစ်၏။
+pair မှာ {a, b} ဖြစ်၏။
+print(pair);
+print(len(pair));
+
+# Text is matched by its bytes, so a Myanmar substring inside a word is found.
+print(contains("မြန်မာ", "န်မ"));
+print(contains("abc", ""));
+print(contains("abc", "abcd"));
+print(contains("abc", "c"));
+print(contains("abc", "bc"));
+print(contains("abc", "d"));
+
+# A needle through a parameter, inside a function.
+fn has(xs, v) {
+    return contains(xs, v);
+}
+print(has(xs, 30));
+print(has(xs, 31));

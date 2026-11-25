@@ -1,0 +1,27 @@
+# enumerate.akk -- `enumerate(xs)`.
+xs မှာ [10, 20, 30] ဖြစ်၏။
+print(enumerate(xs));
+print(len(enumerate(xs)));
+
+# Reading a pair back: the index and the value.
+p0 မှာ enumerate(xs)[0] ဖြစ်၏။
+print(p0[0]);
+print(p0[1]);
+
+pairs မှာ enumerate(["a", "b"]) ဖြစ်၏။
+print(pairs);
+first မှာ pairs[0] ဖြစ်၏။
+print(first);
+
+# A loop walks the pairs like any list.
+p သည် enumerate([5, 6]) ထဲမှ တစ်ခုစီ
+    print(p);
+ပြီး။
+
+print(enumerate((7, 8)));
+
+s မှာ {4, 9} ဖြစ်၏။
+print(enumerate(s));
+
+print(enumerate([]));
+print(len(enumerate([])));

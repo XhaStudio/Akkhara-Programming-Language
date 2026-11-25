@@ -1,5 +1,139 @@
 # Changelog
 
+## 3.1.4-alpha.3
+
+### Added
+
+- `trim(text)` in compiled programs: the text without the Unicode whitespace at
+  either end, which is the interpreter's `str::trim`. The runtime walks the
+  UTF-8 forwards and backwards one scalar at a time through `rt_trim_str`, and
+  `rt_ws_len` recognises the scalars `char::is_whitespace` names -- generated
+  at build time from the host's own table, so the set is the interpreter's
+  exactly (an ASCII space or tab, a no-break space, an ideographic space, and
+  the rest) with no Unicode data of its own. A multi-byte scalar is only ever
+  dropped whole, so a Myanmar syllable is never cut; the bytes between the two
+  ends are copied unchanged into a fresh arena string, and a text with nothing
+  to trim answers itself. A wrong arity and a non-text argument keep the
+  interpreter's `E110`. `tests/native/fixtures/trim.akk` covers both optimiser
+  modes (spaces, a tab and a newline, an empty text, a text of spaces, a
+  binding, a parameter, a list element, a no-break space and an ideographic
+  space), and `trim_arity`/`trim_of_int` pin the `E110` refusals.
+
+### Changed
+
+- Version bumped to `3.1.4-alpha.3`.
+- The `E177` summary now names `trim`.
+
+## 3.1.3-alpha.3
+
+### Added
+
+- `sqrt(x)` in compiled programs: the square root as a float, whatever the
+  argument is. An int is converted to a double first, the way the interpreter's
+  `as_f64` does, so `sqrt(16)` prints `4.0` and `sqrt(6.25)` is `2.5`. The
+  routine is one `sqrtsd`, the instruction `f64::sqrt` compiles to, so every
+  result is bit-for-bit the interpreter's, `-0.0` keeps its sign and a NaN is
+  only a NaN (an unordered `ucomisd` is never a negative). A negative value is
+  the interpreter's `E111`, whose sentence quotes the offending number: the
+  runtime renders it with the writer `print` uses (the int writer for an int,
+  the float formatter for a float), writes the sentence without the line
+  clause a compiled call cannot carry, and exits 1, so a compiled program never
+  goes on with a value the interpreter refuses to produce. A wrong arity or a
+  non-number argument keeps the interpreter's `E110`.
+  `tests/native/fixtures/sqrt.akk` covers both optimiser modes, and
+  `a_negative_square_root_panics_like_the_interpreter` pins the `E111` line of
+  an int, a float and a parameter.
+- A tuple's shape is now per position. The analyzer's flat element shape (a
+  chain of kinds) became a tree -- `Shape::Scalar`, `Seq` (a list or set),
+  `Dict` and `Tuple(positions)`, plus `Unsettled` and `Mixed` -- so a tuple no
+  longer has to be one kind all the way through. `t[0]` is the int and `t[1]`
+  the string of `(1, "a")`, an `enumerate` pair is read at both positions even
+  when the source mixes kinds, and `entries(d)`'s key and value are both typed.
+  An indexing step resolves a constant position; any other index answers what
+  all the positions agree on, and a mixed position is the usual run-time read.
+  A store into a tuple updates the position it names, `reverse` reverses them
+  with the elements, and a parameter or a returned tuple keeps them across a
+  call (`Shape::refines` lets a later round tighten an unsettled shape). The
+  runtime is untouched: every element word already carries its tag, so a
+  positionally typed read is the same word read.
+  `tests/native/fixtures/positional.akk` covers both optimiser modes.
+- `enumerate(xs)` in compiled programs: one `(index, value)` tuple per element
+  of a list, tuple or set, in order, through `rt_enumerate_seq`. The index is an
+  int and the value keeps its own stored tag, so a heterogeneous collection
+  enumerates too, and an empty list answers an empty list. A pair is an ordinary
+  tuple, so it prints, compares and iterates, and (since the shape became
+  positional) both halves of a pair are read by index. `enumerate` of a string
+  counts grapheme clusters, which needs the syllable table, so it is refused
+  with `E177`; a dict keeps the interpreter's `E110`.
+  `tests/native/fixtures/enumerate.akk` covers both optimiser modes.
+- `replace(text, from, to)` in compiled programs: the text with every
+  non-overlapping occurrence of `from` replaced by `to`. The runtime counts the
+  occurrences, allocates the exact result
+  (`len(text) - count * len(from) + count * len(to)`) and copies the pieces
+  around each replacement through `rt_replace_str`, which is the interpreter's
+  `str::replace`. An empty `from` answers the text unchanged, the interpreter's
+  own rule, so no Unicode table is needed; a Myanmar piece is replaced wherever
+  its bytes appear. The interpreter's `E110` is kept for a wrong arity and for
+  a non-text argument, and a value whose kind is only known at run time is
+  refused with `E177`. `tests/native/fixtures/replace.akk` covers both
+  optimiser modes.
+- `starts_with(text, part)` and `ends_with(text, part)` in compiled programs:
+  the part's bytes are compared with the front (or back) of the text through
+  `rt_starts_str`/`rt_ends_str`, which is the interpreter's
+  `str::starts_with`/`str::ends_with`. An empty part is `True`, a part longer
+  than the text is `False`, and no Unicode table is needed -- a prefix of a text
+  is still text, so a Myanmar prefix matches while a piece that cuts into the
+  text does not. The interpreter's `E110` is kept for a wrong arity and a
+  non-text argument, and a part whose kind is only known at run time is refused
+  with `E177`. `tests/native/fixtures/starts_ends.akk` covers both optimiser
+  modes.
+- `join(xs, sep)` and `split(text, sep)` in compiled programs. `join` spells
+  each element of a list, tuple or set the way `print` does -- by the element's
+  stored tag, so a heterogeneous collection joins -- and concatenates the
+  pieces with the separator into one fresh arena string, through `rt_join_seq`;
+  an empty collection is the empty string. `split` is the interpreter's
+  byte-wise `str::split`: it counts the non-overlapping occurrences, allocates
+  the list at its exact size and copies one string per piece, through
+  `rt_split_str`, so `"a,,b"` keeps its empty middle piece and a Myanmar
+  separator matches wherever its bytes appear. A `join` of a collection of
+  collections (which would need the interpreter's nested rendering) and a
+  `split` on an empty separator (which means grapheme clusters) are refused
+  with `E177`: a literal empty separator at build time, one that only turns out
+  empty at run time with a documented `E177` exit. The interpreter's `E110`
+  wording is kept for a wrong arity, a non-text separator, a first argument
+  that is not a list/tuple/set, and a `split` of non-text.
+  `tests/native/fixtures/join_split.akk` covers both optimiser modes.
+- `contains(hay, needle)` in compiled programs: over a list, tuple or set it
+  asks whether any element equals the needle, over a dict whether it is a key,
+  and over text whether the needle's bytes are a substring. The collection scan
+  runs through the runtime's own `rt_value_eq` (`rt_contains_seq`,
+  `rt_contains_dict`), so a heterogeneous collection answers by each element's
+  stored tag; text is a byte scan (`rt_contains_str`), which is what the
+  interpreter's `str::contains` does, so a Myanmar substring is found wherever
+  its UTF-8 bytes appear and an empty needle is found. `contains` of something
+  that is neither text nor a collection, a text search for a non-text value and
+  a wrong arity keep the interpreter's `E110`; a value whose kind is only known
+  at run time is refused with `E177` by name.
+  `tests/native/fixtures/contains.akk` covers both optimiser modes, and
+  `contains_arity`/`contains_of_int`/`contains_text_needle` pin the `E110`
+  refusals.
+
+### Changed
+
+- Version bumped to `3.1.3-alpha.3`.
+- The `E177` summary now names `sqrt` beside `abs`/`min`/`max` and the
+  rounding builtins.
+
+### Fixed
+
+- Element equality now compares both tags. `rt_value_eq` used to look at the
+  left tag only, so `[0] == [False]` and `[0.0] == [0]` answered `True` where
+  the interpreter answers `False`, and a set built at run time from `0` and
+  `False` dropped one of them. The helper takes the right tag in `rsi` and all
+  five call sites (collection equality, the run-time set member and the set
+  write) pass it, so a value of another kind is never equal however its word
+  looks.
+
 ## 3.1.2-alpha.3
 
 ### Added

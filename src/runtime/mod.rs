@@ -62,11 +62,13 @@ pub(crate) fn emit(
     print::emit_write_and_exit(code, &platform);
     print::emit_int(code, data);
     float::emit(code, str_mode);
+    float::emit_sqrt_errors(code, data);
     print::emit_bool(code, data);
     print::emit_str(code, data);
     strconv::emit(code, data);
     string::emit_cmp(code);
     string::emit_cat(code);
+    string::emit_trim(code);
     panic::emit_zero(code, data);
     rem::emit(code, data);
     raise::emit_report(code, data, error_prefix, error_payload);

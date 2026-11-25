@@ -37,9 +37,12 @@
 //! and anything at or past the ends of `i64` is `i64::MIN`/`i64::MAX`. A
 //! builtin called with the wrong kind or number of arguments is refused with
 //! the interpreter's own `E110`, because that is a broken program rather than a
-//! construct outside the slice. `sqrt` is still outside the slice: its error
-//! message quotes the offending value, which compiled code has no way to
-//! render into a diagnostic. A collection literal (`list`/`tuple`/`set`/`dict`)
+//! construct outside the slice. `sqrt` is in too: it answers a float whatever
+//! its argument is (an int is converted to a double first, the way the
+//! interpreter's `as_f64` does), and a negative value is the interpreter's
+//! `E111` -- its sentence quotes the offending number, so the runtime renders
+//! that number with the writer `print` uses, writes the sentence and exits 1,
+//! without the line clause a compiled call cannot carry. A collection literal (`list`/`tuple`/`set`/`dict`)
 //! is in the slice, with indexing, `len`, printing, writing into an element and
 //! iterating, all through the native collection runtime. `push`/`append` and
 //! `reverse` are in too: `push` appends one value to the list a variable names
@@ -57,7 +60,11 @@
 //! arithmetic panics follow. `slice(xs, start[, end])` answers a fresh list of
 //! the elements between two positions: both ends clamp to the length, a start
 //! past the end is an empty result, and a negative end is the interpreter's
-//! `E110` panic (without the line clause a call cannot carry). Text reverse, a
+//! `E110` panic (without the line clause a call cannot carry). `trim(text)`
+//! drops the Unicode whitespace at either end: the runtime's `rt_trim_str`
+//! walks the UTF-8 backwards and forwards and `rt_ws_len` recognises the
+//! scalars `char::is_whitespace` names, so the interpreter's `str::trim` is
+//! reproduced exactly and a Myanmar syllable is never cut. Text reverse, a
 //! `push` whose value does not fit the list's element shape, a sort of any
 //! other element kind, and a slice of text (its characters need the Unicode
 //! tables) are refused rather than guessed. Anything else -- a closure, a class -- is refused with `E177`,
@@ -138,6 +145,8 @@ pub(crate) enum Builtin {
     Floor,
     Ceil,
     Round,
+    /// `sqrt`: a number's square root, always as a float.
+    Sqrt,
     Len,
     /// `push`/`append`: append one value to a list variable's descriptor and
     /// answer the new length.
@@ -165,6 +174,25 @@ pub(crate) enum Builtin {
     Sum,
     /// `slice`: a fresh list of a collection's elements between two positions.
     Slice,
+    /// `contains`: whether text holds a substring, or a collection holds a
+    /// value (for a dict, whether it holds a key).
+    Contains,
+    /// `join`: a collection's elements spelled as text, with a separator
+    /// between them.
+    Join,
+    /// `split`: the pieces of text between its separators, as a list.
+    Split,
+    /// `starts_with`/`ends_with`: whether text begins (or ends) with another
+    /// piece of text.
+    StartsWith,
+    EndsWith,
+    /// `replace`: the text with every occurrence of one piece replaced by
+    /// another.
+    Replace,
+    /// `enumerate`: one `(index, value)` tuple per element, as a list.
+    Enumerate,
+    /// `trim`: text without its leading and trailing Unicode whitespace.
+    Trim,
 }
 
 /// The builtin called `name`, if the slice emits it. A user function of the
@@ -177,6 +205,7 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "floor" => Some(Builtin::Floor),
         "ceil" => Some(Builtin::Ceil),
         "round" => Some(Builtin::Round),
+        "sqrt" => Some(Builtin::Sqrt),
         "len" => Some(Builtin::Len),
         "push" | "append" => Some(Builtin::Push),
         "reverse" => Some(Builtin::Reverse),
@@ -190,6 +219,14 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "entries" => Some(Builtin::Entries),
         "sum" => Some(Builtin::Sum),
         "slice" => Some(Builtin::Slice),
+        "contains" => Some(Builtin::Contains),
+        "join" => Some(Builtin::Join),
+        "split" => Some(Builtin::Split),
+        "starts_with" => Some(Builtin::StartsWith),
+        "ends_with" => Some(Builtin::EndsWith),
+        "replace" => Some(Builtin::Replace),
+        "enumerate" => Some(Builtin::Enumerate),
+        "trim" => Some(Builtin::Trim),
         _ => None,
     }
 }
@@ -227,29 +264,28 @@ fn number_error(name: &str, kind: Kind) -> String {
 pub(crate) struct Typed {
     pub(crate) temps: HashMap<Temp, Kind>,
     pub(crate) vars: HashMap<VarId, Kind>,
-    /// The element shape of a list/tuple/set (the value shape of a dict),
-    /// starting with the element itself: `[Int]` is a list of ints,
-    /// `[List, Int]` a list of int lists, `[Dict, Str]` a dict of string
-    /// values. Absence means the collection is empty or not settled yet.
-    pub(crate) elems: HashMap<Temp, Vec<Kind>>,
-    pub(crate) var_elems: HashMap<VarId, Vec<Kind>>,
+    /// The shape of what a collection holds (see [`Shape`]): a list's or a
+    /// set's elements, a dict's values, or a tuple's positions. Absence means
+    /// nothing is settled yet.
+    pub(crate) elems: HashMap<Temp, Shape>,
+    pub(crate) var_elems: HashMap<VarId, Shape>,
     /// What callers have told each parameter, while the fixpoint runs.
     learned: Vec<Option<Kind>>,
     /// The element shape callers have told each parameter, while the fixpoint
     /// runs.
-    learned_elems: Vec<Option<Vec<Kind>>>,
+    learned_elems: Vec<Option<Shape>>,
     /// The binding of each declared parameter, in order.
     pub(crate) param_vars: Vec<VarId>,
     /// One settled kind per declared parameter, in order.
     pub(crate) params: Vec<Kind>,
     /// One settled element shape per declared parameter, in order. `None` when
     /// the parameter is not a collection or its elements are unknown.
-    pub(crate) param_elems: Vec<Option<Vec<Kind>>>,
+    pub(crate) param_elems: Vec<Option<Shape>>,
     /// `Some` when the function returns a value, `None` for unit.
     pub(crate) result: Option<Kind>,
     /// The element shape of the returned collection, when the function returns
     /// a collection whose elements are known.
-    pub(crate) result_elems: Option<Vec<Kind>>,
+    pub(crate) result_elems: Option<Shape>,
 }
 
 /// Every function of a program, typed, plus the name of each.
@@ -443,7 +479,7 @@ pub(crate) fn analyze(program: &MirProgram) -> Result<TypedProgram, String> {
                             let result = &mut typed.functions[index];
                             match result.result_elems.clone() {
                                 Some(existing) => match merge_shapes(&existing, &shape) {
-                                    Some(merged) if merged.len() > existing.len() => {
+                                    Some(merged) if merged != existing => {
                                         result.result_elems = Some(merged);
                                         changed = true;
                                     }
@@ -746,7 +782,7 @@ fn callee_param_elems(
     callee: usize,
     index: usize,
     position: usize,
-) -> Option<Vec<Kind>> {
+) -> Option<Shape> {
     let function = if callee == index {
         Some(typed)
     } else {
@@ -766,7 +802,7 @@ fn set_callee_param_elems(
     callee: usize,
     index: usize,
     position: usize,
-    shape: Vec<Kind>,
+    shape: Shape,
     name: &str,
 ) -> Result<bool, String> {
     let slot = if callee == index {
@@ -776,7 +812,7 @@ fn set_callee_param_elems(
     };
     if let Some(existing) = slot.clone() {
         match merge_shapes(&existing, &shape) {
-            Some(merged) if merged.len() > existing.len() => {
+            Some(merged) if merged != existing => {
                 *slot = Some(merged);
                 Ok(true)
             }
@@ -801,7 +837,7 @@ fn callee_result_elems(
     typed: &Typed,
     callee: usize,
     index: usize,
-) -> Option<Vec<Kind>> {
+) -> Option<Shape> {
     if callee == index {
         typed.result_elems.clone()
     } else {
@@ -814,7 +850,7 @@ fn set_callee_result_elems(
     typed: &mut Typed,
     callee: usize,
     index: usize,
-    shape: Vec<Kind>,
+    shape: Shape,
     name: &str,
 ) -> Result<bool, String> {
     let slot = if callee == index {
@@ -824,7 +860,7 @@ fn set_callee_result_elems(
     };
     if let Some(existing) = slot.clone() {
         match merge_shapes(&existing, &shape) {
-            Some(merged) if merged.len() > existing.len() => {
+            Some(merged) if merged != existing => {
                 *slot = Some(merged);
                 Ok(true)
             }
@@ -878,7 +914,7 @@ fn default_numbers(program: &MirProgram, typed: &mut TypedProgram) -> bool {
                 match typed.functions[index].var_elems.get(param).cloned() {
                     Some(existing) => {
                         if let Some(merged) = merge_shapes(&existing, &shape) {
-                            if merged.len() > existing.len() {
+                            if merged != existing {
                                 typed.functions[index].var_elems.insert(*param, merged);
                                 changed = true;
                             }
@@ -1287,23 +1323,28 @@ fn learn_instruction(
         MirInst::Eval(_) => {}
         MirInst::Print(_) => {}
         MirInst::List { dest, items } => {
-            let shape = items_shape(items, typed);
-            changed |= learn_collection(*dest, Kind::List, shape, typed)?;
+            let shape = items_shape(items, typed).unwrap_or(Shape::Unsettled);
+            changed |= learn_collection(*dest, Shape::list(shape), typed)?;
         }
+        // A tuple keeps one shape per position, which is what lets a pair of
+        // an int and a string be read at both of its positions.
         MirInst::Tuple { dest, items } => {
-            let shape = items_shape(items, typed);
-            changed |= learn_collection(*dest, Kind::Tuple, shape, typed)?;
+            let positions = items
+                .iter()
+                .map(|item| shape_of(item, typed).unwrap_or(Shape::Unsettled))
+                .collect();
+            changed |= learn_collection(*dest, Shape::Tuple(positions), typed)?;
         }
         MirInst::Set { dest, items } => {
             // A set drops duplicates. Literal members are deduplicated here,
             // exactly as the interpreter's insertion-ordered set does; a
             // run-time member is deduplicated by `rt_store_set`, which the
             // code generator appends it through.
-            let shape = items_shape(items, typed);
-            changed |= learn_collection(*dest, Kind::Set, shape, typed)?;
+            let shape = items_shape(items, typed).unwrap_or(Shape::Unsettled);
+            changed |= learn_collection(*dest, Shape::Seq(Kind::Set, Box::new(shape)), typed)?;
         }
         MirInst::Dict { dest, pairs } => {
-            let mut value_shape: Option<Vec<Kind>> = None;
+            let mut value_shape: Option<Shape> = None;
             for (key, value) in pairs {
                 // A key is a string: the descriptor stores string keys and the
                 // runtime looks a key up by content. A literal key is
@@ -1328,7 +1369,8 @@ fn learn_instruction(
                     });
                 }
             }
-            changed |= learn_collection(*dest, Kind::Dict, value_shape, typed)?;
+            let values = value_shape.unwrap_or(Shape::Unsettled);
+            changed |= learn_collection(*dest, Shape::Dict(Box::new(values)), typed)?;
         }
         MirInst::Index {
             dest,
@@ -1345,11 +1387,11 @@ fn learn_instruction(
             match kind_of(base, typed) {
                 Some(Kind::List | Kind::Tuple | Kind::Set) => {
                     changed |= learn_operand(index, Kind::Int, typed)?;
-                    changed |= learn_indexed(*dest, base, typed)?;
+                    changed |= learn_indexed(*dest, base, index, typed)?;
                 }
                 Some(Kind::Dict) => {
                     changed |= learn_operand(index, Kind::Str, typed)?;
-                    changed |= learn_indexed(*dest, base, typed)?;
+                    changed |= learn_indexed(*dest, base, index, typed)?;
                 }
                 Some(Kind::Str) => return Err(unsupported("an index into a string")),
                 Some(other) => {
@@ -1401,11 +1443,11 @@ fn learn_instruction(
             match kind_of(base, typed) {
                 Some(Kind::List | Kind::Tuple | Kind::Set) => {
                     changed |= learn_operand(index, Kind::Int, typed)?;
-                    changed |= learn_stored(base, value, typed)?;
+                    changed |= learn_stored(base, value, const_position(index), typed)?;
                 }
                 Some(Kind::Dict) => {
                     changed |= learn_operand(index, Kind::Str, typed)?;
-                    changed |= learn_stored(base, value, typed)?;
+                    changed |= learn_stored(base, value, const_position(index), typed)?;
                 }
                 Some(Kind::Str) => return Err(unsupported("a write into a string")),
                 Some(other) => {
@@ -1419,25 +1461,26 @@ fn learn_instruction(
             // `Len`/`Index` read, so the loop walks the collection itself and
             // its element kind travels with it.
             Some(kind @ (Kind::List | Kind::Tuple | Kind::Set)) => {
-                if elems_of(value, typed).and_then(|shape| shape.first().copied())
-                    == Some(Kind::Dynamic)
-                {
+                let elements = elems_of(value, typed)
+                    .map(|shape| shape.element())
+                    .unwrap_or(Shape::Unsettled);
+                if elements.is_mixed() {
                     return Err(unsupported(
                         "iteration over a collection whose elements have more than one kind",
                     ));
                 }
-                changed |= learn_collection(*dest, kind, elems_of(value, typed), typed)?;
+                changed |= learn_collection(*dest, Shape::Seq(kind, Box::new(elements)), typed)?;
             }
             // A dict yields its keys, in the order they were first inserted;
             // the native runtime copies them into a fresh list of strings.
             Some(Kind::Dict) => {
-                changed |= learn_collection(*dest, Kind::List, Some(vec![Kind::Str]), typed)?;
+                changed |= learn_collection(*dest, Shape::list(Shape::Scalar(Kind::Str)), typed)?;
             }
             Some(Kind::Str) => return Err(unsupported("iteration over a string")),
             // The interpreter's auto-range: a numeric source walks the ints
             // `0, 1, ...` below it, so the loop variable is always an int.
             Some(Kind::Int | Kind::Float) => {
-                changed |= learn_collection(*dest, Kind::List, Some(vec![Kind::Int]), typed)?;
+                changed |= learn_collection(*dest, Shape::list(Shape::Scalar(Kind::Int)), typed)?;
             }
             Some(other) => return Err(unsupported(&format!("iteration over a {}", other.name()))),
             None => {}
@@ -1474,8 +1517,8 @@ fn learn_builtin(
     ) && args
         .first()
         .and_then(|arg| elems_of(arg, typed))
-        .and_then(|shape| shape.first().copied())
-        == Some(Kind::Dynamic)
+        .map(|shape| shape.element().is_mixed())
+        .unwrap_or(false)
     {
         return Err(unsupported(
             "a builtin over a collection whose elements have more than one kind",
@@ -1511,6 +1554,37 @@ fn learn_builtin(
                 }
             }
             learn_temp(&mut typed.temps, dest, Kind::Int)
+        }
+        // `trim` takes one text and answers text with its leading and trailing
+        // Unicode whitespace removed. The runtime compares the bytes of the
+        // scalars `char::is_whitespace` names, so the rule is the
+        // interpreter's `str::trim` exactly, whatever the script.
+        Builtin::Trim => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Str) => learn_temp(&mut typed.temps, dest, Kind::Str),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `sqrt` takes one number and answers a float whatever the argument
+        // is: the interpreter converts an int to a double and takes its root,
+        // so `sqrt(16)` is `4.0` rather than `4`.
+        Builtin::Sqrt => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            if let Some(kind) = kind_of(&args[0], typed) {
+                if !kind.is_number() {
+                    return Err(number_error(name, kind));
+                }
+            }
+            learn_temp(&mut typed.temps, dest, Kind::Float)
         }
         // `str(x)` (and its Myanmar spellings) is the display text of an int,
         // float, bool or string. The result is always a string, whatever the
@@ -1550,7 +1624,7 @@ fn learn_builtin(
             }
             match kind_of(&args[0], typed) {
                 Some(Kind::Dict) => {
-                    learn_collection(dest, Kind::List, Some(vec![Kind::Str]), typed)
+                    learn_collection(dest, Shape::list(Shape::Scalar(Kind::Str)), typed)
                 }
                 // The interpreter reports `E110` for anything else; the build
                 // refuses with the same code and wording (no line).
@@ -1571,7 +1645,10 @@ fn learn_builtin(
             }
             match kind_of(&args[0], typed) {
                 Some(Kind::Dict) => {
-                    learn_collection(dest, Kind::List, elems_of(&args[0], typed), typed)
+                    let values = elems_of(&args[0], typed)
+                        .map(|shape| shape.element())
+                        .unwrap_or(Shape::Unsettled);
+                    learn_collection(dest, Shape::list(values), typed)
                 }
                 Some(other) => Err(builtin_error(
                     name,
@@ -1581,22 +1658,19 @@ fn learn_builtin(
             }
         }
         // `entries(d)` is one `(key, value)` tuple per pair, in insertion
-        // order. A tuple's shape is homogeneous in this slice, so a string key
-        // beside a value of another kind widens it to `Dynamic`: the entries
-        // print, compare and iterate, while a read inside one is refused the
-        // way any dynamic read is.
+        // order. A tuple keeps one shape per position, so `entry[0]` is the
+        // string key and `entry[1]` whatever the dict's values are.
         Builtin::Entries => {
             if args.len() != 1 {
                 return Err(one_arg_error(name, args.len()));
             }
             match kind_of(&args[0], typed) {
                 Some(Kind::Dict) => {
-                    let shape = elems_of(&args[0], typed).map(|values| {
-                        let mut shape = vec![Kind::Tuple];
-                        shape.extend(widen_shape(&[Kind::Str], &values));
-                        shape
-                    });
-                    learn_collection(dest, Kind::List, shape, typed)
+                    let values = elems_of(&args[0], typed)
+                        .map(|shape| shape.element())
+                        .unwrap_or(Shape::Unsettled);
+                    let pair = Shape::Tuple(vec![Shape::Scalar(Kind::Str), values]);
+                    learn_collection(dest, Shape::list(pair), typed)
                 }
                 Some(other) => Err(builtin_error(
                     name,
@@ -1615,17 +1689,19 @@ fn learn_builtin(
             }
             match kind_of(&args[0], typed) {
                 Some(kind) if kind.is_collection() => {
-                    let shape = elems_of(&args[0], typed).unwrap_or_default();
-                    match shape.first() {
-                        Some(Kind::Int) => learn_temp(&mut typed.temps, dest, Kind::Int),
-                        Some(Kind::Float) => learn_temp(&mut typed.temps, dest, Kind::Float),
-                        // The interpreter's per-item `E110`, word for word.
-                        Some(other) => Err(builtin_error(
-                            name,
-                            &format!("ကိန်းများ လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
-                        )),
+                    let element = elems_of(&args[0], typed).map(|shape| shape.element());
+                    match element {
+                        Some(element) if !element.is_unknown() => match element.kind() {
+                            Kind::Int => learn_temp(&mut typed.temps, dest, Kind::Int),
+                            Kind::Float => learn_temp(&mut typed.temps, dest, Kind::Float),
+                            // The interpreter's per-item `E110`, word for word.
+                            other => Err(builtin_error(
+                                name,
+                                &format!("ကိန်းများ လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                            )),
+                        },
                         // Nothing to add: the interpreter answers the int 0.
-                        None => learn_temp(&mut typed.temps, dest, Kind::Int),
+                        _ => learn_temp(&mut typed.temps, dest, Kind::Int),
                     }
                 }
                 Some(other) => Err(builtin_error(
@@ -1654,8 +1730,10 @@ fn learn_builtin(
                     for arg in &args[1..] {
                         changed |= learn_operand(arg, Kind::Int, typed)?;
                     }
-                    changed |=
-                        learn_collection(dest, Kind::List, elems_of(&args[0], typed), typed)?;
+                    let elements = elems_of(&args[0], typed)
+                        .map(|shape| shape.element())
+                        .unwrap_or(Shape::Unsettled);
+                    changed |= learn_collection(dest, Shape::list(elements), typed)?;
                     Ok(changed)
                 }
                 Some(Kind::Str) => Err(unsupported(
@@ -1664,6 +1742,236 @@ fn learn_builtin(
                 Some(other) => Err(builtin_error(
                     name,
                     &format!("စာသား သို့မဟုတ် စုစည်းမှု လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `contains(hay, needle)`: text asks whether the needle is a
+        // substring of it; a list, tuple or set asks whether the needle equals
+        // one of its elements, and a dict whether it is a key. The comparison
+        // is the runtime's own equality, so any needle kind fits a collection
+        // and a heterogeneous collection answers by each element's own tag.
+        Builtin::Contains => {
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::contains_args_needed_detail(args.len()),
+                ));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::Str) => {
+                    match kind_of(&args[1], typed) {
+                        Some(Kind::Str) => {}
+                        // A run-time read's tag is not known here, so the
+                        // build cannot promise this needle is text.
+                        Some(Kind::Dynamic) => {
+                            return Err(unsupported(
+                                "a `contains` over text whose needle is only known at run time",
+                            ))
+                        }
+                        Some(other) => {
+                            return Err(builtin_error(
+                                name,
+                                &crate::shared::errors::contains_needle_needed_detail(
+                                    other.mm_name(),
+                                ),
+                            ))
+                        }
+                        None => return Ok(false),
+                    }
+                    learn_temp(&mut typed.temps, dest, Kind::Bool)
+                }
+                Some(Kind::List | Kind::Tuple | Kind::Set | Kind::Dict) => {
+                    learn_temp(&mut typed.temps, dest, Kind::Bool)
+                }
+                // The runtime tag decides between text and a collection, so a
+                // value that only carries a tag at run time is refused by name
+                // rather than lowered under a guessed rule.
+                Some(Kind::Dynamic) => Err(unsupported(
+                    "a `contains` over a value whose kind is only known at run time",
+                )),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &crate::shared::errors::contains_haystack_needed_detail(other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `join(xs, sep)` spells every element the way `print` does and puts
+        // the separator between them, for a list, tuple or set. The
+        // interpreter checks the separator first, so this does too, and its
+        // `E110` for a first argument that is not a collection is kept word
+        // for word. An element that is itself a collection would need the
+        // interpreter's nested rendering, which the runtime has no string
+        // builder for, so such a collection is refused by name; a
+        // heterogeneous collection that hands the runtime one anyway ends in a
+        // documented `E177` instead of a wrong spelling.
+        Builtin::Join => {
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::two_args_needed_detail(args.len()),
+                ));
+            }
+            match kind_of(&args[1], typed) {
+                Some(Kind::Str) => {}
+                // A run-time read's tag is not known here, so the build cannot
+                // promise this separator is text.
+                Some(Kind::Dynamic) => {
+                    return Err(unsupported(
+                        "a `join` whose separator is only known at run time",
+                    ))
+                }
+                Some(other) => {
+                    return Err(builtin_error(
+                        name,
+                        &crate::shared::errors::join_separator_needed_detail(other.mm_name()),
+                    ))
+                }
+                None => return Ok(false),
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::List | Kind::Tuple | Kind::Set) => {
+                    let element = elems_of(&args[0], typed).map(|shape| shape.element());
+                    if let Some(element) = element {
+                        if element.kind().is_collection() {
+                            return Err(unsupported(&format!(
+                                "a `join` of a collection of {}",
+                                element.kind().mm_name()
+                            )));
+                        }
+                    }
+                    learn_temp(&mut typed.temps, dest, Kind::Str)
+                }
+                // The runtime tag decides what the value is, so a value that
+                // only carries a tag at run time is refused by name.
+                Some(Kind::Dynamic) => Err(unsupported(
+                    "a `join` of a value whose kind is only known at run time",
+                )),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &crate::shared::errors::join_collection_needed_detail(other.mm_name()),
+                )),
+                None => Ok(false),
+            }
+        }
+        // `split(text, sep)` answers the pieces between the separator's
+        // occurrences, as a list of text. Both arguments have to be text and
+        // the interpreter matches the pair together, so its single `E110`
+        // sentence is the one used here. An empty separator asks for grapheme
+        // clusters -- a Myanmar syllable must not be cut in half -- and that
+        // needs the syllable table the native runtime does not carry, so it is
+        // refused rather than split by scalar value.
+        Builtin::Split => {
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::two_args_needed_detail(args.len()),
+                ));
+            }
+            match (kind_of(&args[0], typed), kind_of(&args[1], typed)) {
+                (Some(Kind::Str), Some(Kind::Str)) => {
+                    learn_collection(dest, Shape::list(Shape::Scalar(Kind::Str)), typed)
+                }
+                (Some(Kind::Dynamic), _) | (_, Some(Kind::Dynamic)) => Err(unsupported(
+                    "a `split` of a value whose kind is only known at run time",
+                )),
+                (Some(_), Some(_)) => Err(builtin_error(
+                    name,
+                    crate::shared::errors::SPLIT_PAIR_NEEDED,
+                )),
+                _ => Ok(false),
+            }
+        }
+        // `starts_with(text, part)` and `ends_with(text, part)` ask whether a
+        // text begins or ends with another one, by bytes -- which is exactly
+        // the interpreter's `str::starts_with`/`str::ends_with`, and needs no
+        // grapheme table because a prefix of a UTF-8 text is still text.
+        // Both arguments have to be text and the interpreter matches the pair
+        // together, so its single `E110` sentence is the one used here.
+        Builtin::StartsWith | Builtin::EndsWith => {
+            if args.len() != 2 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::two_args_needed_detail(args.len()),
+                ));
+            }
+            match (kind_of(&args[0], typed), kind_of(&args[1], typed)) {
+                (Some(Kind::Str), Some(Kind::Str)) => {
+                    learn_temp(&mut typed.temps, dest, Kind::Bool)
+                }
+                (Some(Kind::Dynamic), _) | (_, Some(Kind::Dynamic)) => Err(unsupported(&format!(
+                    "a `{}` of a value whose kind is only known at run time",
+                    name
+                ))),
+                (Some(_), Some(_)) => {
+                    Err(builtin_error(name, crate::shared::errors::TEXT_PAIR_NEEDED))
+                }
+                _ => Ok(false),
+            }
+        }
+        // `replace(text, from, to)` answers the text with every non-overlapping
+        // occurrence of `from` replaced by `to`, which is the interpreter's
+        // `str::replace` over bytes -- no grapheme table, because a replacement
+        // never has to find a cluster boundary. An empty `from` answers the
+        // text unchanged, exactly as the interpreter does. All three arguments
+        // have to be text and the interpreter matches the triple together, so
+        // its single `E110` sentence is the one used here.
+        Builtin::Replace => {
+            if args.len() != 3 {
+                return Err(builtin_error(
+                    name,
+                    &crate::shared::errors::three_args_needed_detail(args.len()),
+                ));
+            }
+            let kinds: Vec<Option<Kind>> = args.iter().map(|arg| kind_of(arg, typed)).collect();
+            if kinds.iter().any(|kind| *kind == Some(Kind::Dynamic)) {
+                return Err(unsupported(
+                    "a `replace` of a value whose kind is only known at run time",
+                ));
+            }
+            if kinds.iter().all(|kind| *kind == Some(Kind::Str)) {
+                learn_temp(&mut typed.temps, dest, Kind::Str)
+            } else if kinds.iter().any(Option::is_none) {
+                Ok(false)
+            } else {
+                Err(builtin_error(
+                    name,
+                    crate::shared::errors::REPLACE_TEXT_NEEDED,
+                ))
+            }
+        }
+        // `enumerate(xs)` is one `(index, value)` tuple per element, in order,
+        // for a list, tuple or set. The runtime copies each element's stored
+        // tag into its tuple, so a heterogeneous collection enumerates too.
+        // The interpreter also counts a string's grapheme clusters, which needs
+        // the syllable table, so that is refused by name; a dict is not a
+        // sequence and keeps the interpreter's `E110`.
+        Builtin::Enumerate => {
+            if args.len() != 1 {
+                return Err(one_arg_error(name, args.len()));
+            }
+            match kind_of(&args[0], typed) {
+                Some(Kind::List | Kind::Tuple | Kind::Set) => {
+                    // A pair keeps one shape per position -- the index is
+                    // always an int and the value whatever the source holds --
+                    // so `pair[0]` and `pair[1]` are both readable, even when
+                    // the source mixes kinds.
+                    let elements = elems_of(&args[0], typed)
+                        .map(|shape| shape.element())
+                        .unwrap_or(Shape::Unsettled);
+                    let pair = Shape::Tuple(vec![Shape::Scalar(Kind::Int), elements]);
+                    learn_collection(dest, Shape::list(pair), typed)
+                }
+                Some(Kind::Str) => Err(unsupported(
+                    "enumerate of a string (its characters need the Unicode tables)",
+                )),
+                Some(Kind::Dynamic) => Err(unsupported(
+                    "an `enumerate` of a value whose kind is only known at run time",
+                )),
+                Some(other) => Err(builtin_error(
+                    name,
+                    &format!("စုစည်းမှု သို့မဟုတ် စာသား လိုအပ်ပါသည်၊ {} ရပါသည်", other.mm_name()),
                 )),
                 None => Ok(false),
             }
@@ -1691,7 +1999,7 @@ fn learn_builtin(
                     // The value joins the element shape, and a value of
                     // another kind is refused by `learn_stored` with the same
                     // wording a store of it would use.
-                    let mut changed = learn_stored(&args[0], &args[1], typed)?;
+                    let mut changed = learn_stored(&args[0], &args[1], None, typed)?;
                     changed |= learn_temp(&mut typed.temps, dest, Kind::Int)?;
                     Ok(changed)
                 }
@@ -1722,9 +2030,15 @@ fn learn_builtin(
             if args.len() != 1 {
                 return Err(builtin_error(name, LIST_ONLY_NEEDED));
             }
-            match elems_of(base, typed).and_then(|shape| shape.first().copied()) {
-                Some(element) => learn_temp(&mut typed.temps, dest, element),
-                None => Ok(false),
+            match elems_of(base, typed).map(|shape| shape.element()) {
+                Some(element) if !element.is_unknown() => {
+                    let mut changed = learn_temp(&mut typed.temps, dest, element.kind())?;
+                    if element.holds_elements() {
+                        changed |= learn_shape(&Operand::Temp(dest), element, typed)?;
+                    }
+                    Ok(changed)
+                }
+                _ => Ok(false),
             }
         }
         // `insert(xs, at, v)` puts one value at `at` (which may equal the
@@ -1751,7 +2065,7 @@ fn learn_builtin(
                 ));
             }
             let mut changed = learn_operand(&args[1], Kind::Int, typed)?;
-            changed |= learn_stored(base, &args[2], typed)?;
+            changed |= learn_stored(base, &args[2], None, typed)?;
             changed |= learn_temp(&mut typed.temps, dest, Kind::Int)?;
             Ok(changed)
         }
@@ -1777,8 +2091,10 @@ fn learn_builtin(
                 ));
             }
             let mut changed = learn_operand(&args[1], Kind::Int, typed)?;
-            if let Some(element) = elems_of(base, typed).and_then(|shape| shape.first().copied()) {
-                changed |= learn_temp(&mut typed.temps, dest, element)?;
+            if let Some(element) = elems_of(base, typed).map(|shape| shape.element()) {
+                if !element.is_unknown() {
+                    changed |= learn_temp(&mut typed.temps, dest, element.kind())?;
+                }
             }
             Ok(changed)
         }
@@ -1803,15 +2119,17 @@ fn learn_builtin(
             if args.len() != 1 {
                 return Err(builtin_error(name, LIST_ONLY_NEEDED));
             }
-            let Some(shape) = elems_of(base, typed) else {
+            let Some(element) = elems_of(base, typed).map(|shape| shape.element()) else {
                 return Err(unsupported("sort of a list whose element kind is unknown"));
             };
-            match shape.first() {
-                Some(Kind::Int | Kind::Float | Kind::Str) => {
-                    learn_collection(dest, Kind::List, Some(shape), typed)
+            if element.is_unknown() {
+                return Err(unsupported("sort of a list whose element kind is unknown"));
+            }
+            match element.kind() {
+                Kind::Int | Kind::Float | Kind::Str => {
+                    learn_collection(dest, Shape::list(element), typed)
                 }
-                Some(other) => Err(unsupported(&format!("sort of a list of {}", other.name()))),
-                None => Err(unsupported("sort of a list whose element kind is unknown")),
+                other => Err(unsupported(&format!("sort of a list of {}", other.name()))),
             }
         }
         // `reverse` answers a list or tuple with its elements in the opposite
@@ -1826,7 +2144,18 @@ fn learn_builtin(
             }
             match kind_of(&args[0], typed) {
                 Some(kind @ (Kind::List | Kind::Tuple)) => {
-                    learn_collection(dest, kind, elems_of(&args[0], typed), typed)
+                    let shape = elems_of(&args[0], typed)
+                        .unwrap_or(Shape::Seq(kind, Box::new(Shape::Unsettled)));
+                    // A tuple's positions travel with its elements, so
+                    // `reverse(pair)[0]` is the pair's last position.
+                    let shape = match (kind, shape) {
+                        (Kind::Tuple, Shape::Tuple(mut positions)) => {
+                            positions.reverse();
+                            Shape::Tuple(positions)
+                        }
+                        (_, other) => other,
+                    };
+                    learn_collection(dest, shape, typed)
                 }
                 Some(Kind::Str) => Err(unsupported(
                     "reverse of a string (its characters need the Unicode tables)",
@@ -1950,52 +2279,218 @@ impl Kind {
     }
 }
 
-/// The shape of an operand: its kind followed by the element shape when it is
-/// a collection. A list of int lists is `[List, Int]`.
-fn shape_of(operand: &Operand, typed: &Typed) -> Option<Vec<Kind>> {
-    let kind = kind_of(operand, typed)?;
-    let mut shape = vec![kind];
-    if kind.is_collection() {
-        if let Some(rest) = elems_of(operand, typed) {
-            shape.extend(rest);
+/// The shape of a value's contents: what it holds and, when that is itself a
+/// collection, what *it* holds.
+///
+/// A list and a set hold one shape for every element and a dict one shape for
+/// its values, so those are a `Seq`/`Dict` around a single inner shape. A
+/// tuple keeps one shape per position, which is what lets `pair[0]` be an int
+/// while `pair[1]` is a string -- a single element shape cannot say that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// Nothing is settled yet: an empty literal, or a value no one reads. A
+    /// read out of it has no static kind.
+    Unsettled,
+    /// Elements of more than one kind, decided at run time. A read out of it
+    /// has no static kind either, so it is refused where it happens.
+    Mixed,
+    /// A value of one kind that holds nothing.
+    Scalar(Kind),
+    /// A sequence -- a list, a set, or a loop's view of a tuple -- whose
+    /// elements all have `inner`.
+    Seq(Kind, Box<Shape>),
+    /// A dict, whose values all have `inner` (its keys are strings).
+    Dict(Box<Shape>),
+    /// A tuple: one shape per position.
+    Tuple(Vec<Shape>),
+}
+
+impl Shape {
+    /// A list whose elements have `inner`.
+    fn list(inner: Shape) -> Shape {
+        Shape::Seq(Kind::List, Box::new(inner))
+    }
+
+    /// The kind of a value with this shape. `Unsettled` and `Mixed` are both
+    /// "no static kind", which is what `Dynamic` means elsewhere.
+    pub(crate) fn kind(&self) -> Kind {
+        match self {
+            Shape::Unsettled | Shape::Mixed => Kind::Dynamic,
+            Shape::Scalar(kind) | Shape::Seq(kind, _) => *kind,
+            Shape::Dict(_) => Kind::Dict,
+            Shape::Tuple(_) => Kind::Tuple,
         }
     }
-    Some(shape)
-}
 
-/// Merge two shapes, allowing one to be a prefix of the other: an empty
-/// literal's elements are not known yet, so `[List]` and `[List, Int]` agree.
-/// A genuine disagreement (`[List, Int]` and `[List, Str]`) returns `None`.
-fn merge_shapes(a: &[Kind], b: &[Kind]) -> Option<Vec<Kind>> {
-    let common = a
-        .iter()
-        .zip(b)
-        .take_while(|(left, right)| left == right)
-        .count();
-    if common < a.len().min(b.len()) {
-        None
-    } else if a.len() >= b.len() {
-        Some(a.to_vec())
-    } else {
-        Some(b.to_vec())
+    /// A shape that is not one settled kind.
+    pub(crate) fn is_unknown(&self) -> bool {
+        matches!(self, Shape::Unsettled | Shape::Mixed)
+    }
+
+    /// A shape the run time decides, element by element.
+    fn is_mixed(&self) -> bool {
+        matches!(self, Shape::Mixed)
+    }
+
+    /// Whether a read out of this shape can be indexed again.
+    fn holds_elements(&self) -> bool {
+        matches!(self, Shape::Seq(..) | Shape::Dict(_) | Shape::Tuple(_))
+    }
+
+    /// What one element of this collection looks like when the position is not
+    /// known at build time: a list's elements, a dict's values, or what every
+    /// position of a tuple agrees on.
+    pub(crate) fn element(&self) -> Shape {
+        match self {
+            Shape::Seq(_, inner) | Shape::Dict(inner) => (**inner).clone(),
+            Shape::Tuple(positions) => positions
+                .iter()
+                .cloned()
+                .reduce(|left, right| widen_shape(&left, &right))
+                .unwrap_or(Shape::Unsettled),
+            Shape::Mixed => Shape::Mixed,
+            Shape::Unsettled | Shape::Scalar(_) => Shape::Unsettled,
+        }
+    }
+
+    /// The shape one step of indexing answers. A tuple resolves the position
+    /// when it is a constant; any other collection, and a tuple indexed by a
+    /// running value, answers what all its positions agree on.
+    fn step(&self, position: Option<i64>) -> Shape {
+        match self {
+            Shape::Seq(_, inner) | Shape::Dict(inner) => (**inner).clone(),
+            Shape::Tuple(positions) => match position {
+                Some(index) if index >= 0 && (index as usize) < positions.len() => {
+                    positions[index as usize].clone()
+                }
+                _ => self.element(),
+            },
+            Shape::Mixed => Shape::Mixed,
+            Shape::Unsettled | Shape::Scalar(_) => Shape::Unsettled,
+        }
+    }
+
+    /// The shape after `value` is written into one element (or, with no
+    /// constant position, into one no one can name). A value of another kind
+    /// makes that place mixed rather than a different settled kind.
+    fn stored(&self, position: Option<i64>, value: Shape) -> Shape {
+        match self {
+            Shape::Seq(kind, inner) => Shape::Seq(*kind, Box::new(widen_shape(inner, &value))),
+            Shape::Dict(inner) => Shape::Dict(Box::new(widen_shape(inner, &value))),
+            Shape::Tuple(positions) => {
+                let mut next = positions.clone();
+                match position {
+                    Some(index) if index >= 0 && (index as usize) < next.len() => {
+                        let slot = index as usize;
+                        next[slot] = widen_shape(&next[slot], &value);
+                    }
+                    // No constant position: any of them could have been the
+                    // one written, so every one of them widens.
+                    _ => {
+                        for slot in &mut next {
+                            *slot = widen_shape(slot, &value);
+                        }
+                    }
+                }
+                Shape::Tuple(next)
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Whether `self` says everything `existing` said and perhaps more: an
+    /// inner shape where `existing` had none, a position where it had none.
+    fn refines(&self, existing: &Shape) -> bool {
+        match (existing, self) {
+            (Shape::Unsettled, _) => true,
+            (Shape::Mixed, Shape::Mixed) => true,
+            (Shape::Scalar(left), Shape::Scalar(right)) => left == right,
+            (Shape::Seq(left, inner), Shape::Seq(right, mine)) => {
+                left == right && mine.refines(inner)
+            }
+            (Shape::Dict(inner), Shape::Dict(mine)) => mine.refines(inner),
+            (Shape::Tuple(theirs), Shape::Tuple(mine)) => {
+                theirs.len() == mine.len()
+                    && mine
+                        .iter()
+                        .zip(theirs)
+                        .all(|(mine, theirs)| mine.refines(theirs))
+            }
+            _ => false,
+        }
     }
 }
 
-/// A shape as words: `[List, Int]` is `"list of int"`.
-fn shape_name(shape: &[Kind]) -> String {
-    shape
-        .iter()
-        .map(|kind| kind.name())
-        .collect::<Vec<_>>()
-        .join(" of ")
+/// How a shape reads in a refusal: `int`, `list of int`,
+/// `tuple of (int, string)`.
+fn shape_name(shape: &Shape) -> String {
+    match shape {
+        Shape::Unsettled => "an unsettled collection".to_string(),
+        Shape::Mixed => Kind::Dynamic.name().to_string(),
+        Shape::Scalar(kind) => kind.name().to_string(),
+        Shape::Seq(kind, inner) => format!("{} of {}", kind.name(), shape_name(inner)),
+        Shape::Dict(inner) => format!("dict of {}", shape_name(inner)),
+        Shape::Tuple(positions) => format!(
+            "tuple of ({})",
+            positions
+                .iter()
+                .map(shape_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The shape of a value: its kind, plus what a collection holds.
+fn shape_of(operand: &Operand, typed: &Typed) -> Option<Shape> {
+    let kind = kind_of(operand, typed)?;
+    if !kind.is_collection() {
+        return Some(Shape::Scalar(kind));
+    }
+    Some(match elems_of(operand, typed) {
+        Some(shape) => shape,
+        // A collection whose contents nobody has settled yet.
+        None => match kind {
+            Kind::Dict => Shape::Dict(Box::new(Shape::Unsettled)),
+            Kind::Tuple => Shape::Tuple(Vec::new()),
+            other => Shape::Seq(other, Box::new(Shape::Unsettled)),
+        },
+    })
+}
+
+/// Merge two shapes, allowing one to say less than the other: an empty
+/// literal's elements are not known yet, so `Unsettled` beside anything is the
+/// other shape. A genuine disagreement (`int` and `string`) returns `None`.
+fn merge_shapes(a: &Shape, b: &Shape) -> Option<Shape> {
+    match (a, b) {
+        (Shape::Unsettled, other) | (other, Shape::Unsettled) => Some(other.clone()),
+        (Shape::Scalar(left), Shape::Scalar(right)) if left == right => Some(a.clone()),
+        (Shape::Seq(left, inner), Shape::Seq(right, mine)) if left == right => {
+            Some(Shape::Seq(*left, Box::new(merge_shapes(inner, mine)?)))
+        }
+        (Shape::Dict(inner), Shape::Dict(mine)) => {
+            Some(Shape::Dict(Box::new(merge_shapes(inner, mine)?)))
+        }
+        (Shape::Tuple(theirs), Shape::Tuple(mine)) if theirs.len() == mine.len() => {
+            Some(Shape::Tuple(
+                theirs
+                    .iter()
+                    .zip(mine)
+                    .map(|(theirs, mine)| merge_shapes(theirs, mine))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        _ if a == b => Some(a.clone()),
+        _ => None,
+    }
 }
 
 /// The common element shape of a sequence literal, or `None` while every
 /// element's shape is still unknown. Two different element kinds make the
-/// shape `Dynamic`: the runtime stores a tag beside every element, so a
+/// shape `Mixed`: the runtime stores a tag beside every element, so a
 /// heterogeneous literal is one ordinary descriptor.
-fn items_shape(items: &[Operand], typed: &Typed) -> Option<Vec<Kind>> {
-    let mut shape: Option<Vec<Kind>> = None;
+fn items_shape(items: &[Operand], typed: &Typed) -> Option<Shape> {
+    let mut shape: Option<Shape> = None;
     for item in items {
         let Some(item_shape) = shape_of(item, typed) else {
             continue;
@@ -2009,30 +2504,31 @@ fn items_shape(items: &[Operand], typed: &Typed) -> Option<Vec<Kind>> {
 }
 
 /// Merge two shapes into one that describes both, marking a disagreement
-/// `Dynamic` from the first differing position on. A shorter shape that is a
-/// prefix of the other (`[]` beside `[1]`) keeps the longer one, because a
-/// collection that started empty simply has not settled its elements yet.
-fn widen_shape(a: &[Kind], b: &[Kind]) -> Vec<Kind> {
-    let common = a
-        .iter()
-        .zip(b)
-        .take_while(|(left, right)| left == right)
-        .count();
-    if common == a.len().min(b.len()) {
-        return if a.len() >= b.len() {
-            a.to_vec()
-        } else {
-            b.to_vec()
-        };
+/// `Mixed`. `Unsettled` beside anything is the other shape, because a
+/// collection that started empty simply has not settled its contents yet.
+fn widen_shape(a: &Shape, b: &Shape) -> Shape {
+    match (a, b) {
+        (Shape::Unsettled, other) | (other, Shape::Unsettled) => other.clone(),
+        (Shape::Scalar(left), Shape::Scalar(right)) if left == right => a.clone(),
+        (Shape::Seq(left, inner), Shape::Seq(right, mine)) if left == right => {
+            Shape::Seq(*left, Box::new(widen_shape(inner, mine)))
+        }
+        (Shape::Dict(inner), Shape::Dict(mine)) => Shape::Dict(Box::new(widen_shape(inner, mine))),
+        (Shape::Tuple(theirs), Shape::Tuple(mine)) if theirs.len() == mine.len() => Shape::Tuple(
+            theirs
+                .iter()
+                .zip(mine)
+                .map(|(theirs, mine)| widen_shape(theirs, mine))
+                .collect(),
+        ),
+        _ if a == b => a.clone(),
+        _ => Shape::Mixed,
     }
-    let mut merged = a[..common].to_vec();
-    merged.push(Kind::Dynamic);
-    merged
 }
 
-/// Record that a collection operand holds elements of `shape`, without
-/// contradicting a shape some other instruction already settled.
-fn learn_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) {
+/// Record that a collection operand holds `shape`, without contradicting a
+/// shape some other instruction already settled.
+fn learn_element(operand: &Operand, shape: Shape, typed: &mut Typed) {
     match operand {
         Operand::Temp(temp) => {
             typed.elems.entry(*temp).or_insert(shape);
@@ -2044,8 +2540,8 @@ fn learn_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) {
     }
 }
 
-/// The element shape recorded for a collection operand, if it is known.
-fn elems_of(operand: &Operand, typed: &Typed) -> Option<Vec<Kind>> {
+/// The shape recorded for a collection operand, if it is known.
+fn elems_of(operand: &Operand, typed: &Typed) -> Option<Shape> {
     match operand {
         Operand::Temp(temp) => typed.elems.get(temp).cloned(),
         Operand::Var(var) => typed.var_elems.get(var).cloned(),
@@ -2055,57 +2551,75 @@ fn elems_of(operand: &Operand, typed: &Typed) -> Option<Vec<Kind>> {
 
 /// Learn the shape of an operand that is read from: `Option` says whether
 /// anything new was settled, and a contradiction is refused by name.
-fn learn_shape(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> Result<bool, String> {
-    match operand {
-        Operand::Temp(temp) => match typed.elems.get(temp) {
-            Some(existing) if *existing != shape => Err(unsupported(&format!(
-                "the collection in t{} holding {} and {} elements",
-                temp,
-                shape_name(existing),
-                shape_name(&shape)
-            ))),
-            Some(_) => Ok(false),
-            None => {
-                typed.elems.insert(*temp, shape);
-                Ok(true)
-            }
-        },
-        Operand::Var(var) => match typed.var_elems.get(var) {
-            Some(existing) if *existing != shape => Err(unsupported(&format!(
-                "the collection in {} holding {} and {} elements",
-                var,
-                shape_name(existing),
-                shape_name(&shape)
-            ))),
-            Some(_) => Ok(false),
-            None => {
-                typed.var_elems.insert(*var, shape);
-                Ok(true)
-            }
-        },
-        _ => Ok(false),
+fn learn_shape(operand: &Operand, shape: Shape, typed: &mut Typed) -> Result<bool, String> {
+    let (existing, label) = match operand {
+        Operand::Temp(temp) => (typed.elems.get(temp).cloned(), format!("t{}", temp)),
+        Operand::Var(var) => (typed.var_elems.get(var).cloned(), var.to_string()),
+        _ => return Ok(false),
+    };
+    match existing {
+        Some(existing) if existing == shape => Ok(false),
+        Some(existing) if shape.refines(&existing) => {
+            match operand {
+                Operand::Temp(temp) => typed.elems.insert(*temp, shape),
+                Operand::Var(var) => typed.var_elems.insert(*var, shape),
+                _ => None,
+            };
+            Ok(true)
+        }
+        Some(existing) if existing.refines(&shape) => Ok(false),
+        Some(existing) => Err(unsupported(&format!(
+            "the collection in {} holding {} and {} elements",
+            label,
+            shape_name(&existing),
+            shape_name(&shape)
+        ))),
+        None => {
+            match operand {
+                Operand::Temp(temp) => typed.elems.insert(*temp, shape),
+                Operand::Var(var) => typed.var_elems.insert(*var, shape),
+                _ => None,
+            };
+            Ok(true)
+        }
     }
 }
 
-/// One indexing step: the destination gets the first kind of the base's
-/// element shape, and the rest of the shape travels with it, so
-/// `grid[0][1]` reads an int out of a list of lists.
-fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, String> {
+/// The position an index names, when it is a constant.
+fn const_position(operand: &Operand) -> Option<i64> {
+    match operand {
+        Operand::Const(Const::Int(position)) => Some(*position),
+        _ => None,
+    }
+}
+
+/// One indexing step: the destination gets the shape of one element of the
+/// base, resolved to a position for a tuple, so `grid[0][1]` reads an int out
+/// of a list of lists and `pair[1]` a string out of a tuple.
+fn learn_indexed(
+    dest: Temp,
+    base: &Operand,
+    index: &Operand,
+    typed: &mut Typed,
+) -> Result<bool, String> {
     let Some(shape) = elems_of(base, typed) else {
         return Ok(false);
     };
-    let Some((first, rest)) = shape.split_first() else {
-        return Ok(false);
-    };
+    let element = shape.step(const_position(index));
     // A dynamic element is read as `Dynamic`: the code generator leaves the
     // address of the element's own `{ tag, word }` pair in the temporary, so
-    // its tag travels with the value instead of being guessed here.
-    if *first == Kind::Dynamic {
+    // its tag travels with the value instead of being guessed here. A shape
+    // nothing has settled yet (an empty or never-written collection) says
+    // nothing, so nothing is learned from it either.
+    if element.is_mixed() {
         return learn_temp(&mut typed.temps, dest, Kind::Dynamic);
     }
-    let mut changed = learn_temp(&mut typed.temps, dest, *first)?;
-    if !rest.is_empty() {
-        changed |= learn_shape(&Operand::Temp(dest), rest.to_vec(), typed)?;
+    if element.is_unknown() {
+        return Ok(false);
+    }
+    let mut changed = learn_temp(&mut typed.temps, dest, element.kind())?;
+    if element.holds_elements() {
+        changed |= learn_shape(&Operand::Temp(dest), element, typed)?;
     }
     Ok(changed)
 }
@@ -2113,43 +2627,59 @@ fn learn_indexed(dest: Temp, base: &Operand, typed: &mut Typed) -> Result<bool, 
 /// Type a value written into an element. When the target's element shape is
 /// known the value must match the whole shape (a list of ints cannot take a
 /// list of strings at the second level); an empty collection adopts the shape
-/// of the value being written, so later reads are typed from it.
-fn learn_stored(base: &Operand, value: &Operand, typed: &mut Typed) -> Result<bool, String> {
+/// of the value being written, so later reads are typed from it. `position` is
+/// the element's position when the store names one, which is how a tuple keeps
+/// its positions apart.
+fn learn_stored(
+    base: &Operand,
+    value: &Operand,
+    position: Option<i64>,
+    typed: &mut Typed,
+) -> Result<bool, String> {
     if kind_of(value, typed) == Some(Kind::Dynamic) {
         return Err(unsupported(
             "a store of an element whose kind varies (the collection holds more than one kind)",
         ));
     }
     let Some(target) = elems_of(base, typed) else {
-        if let Some(shape) = shape_of(value, typed) {
+        if let (Some(value_shape), Some(kind)) = (shape_of(value, typed), kind_of(base, typed)) {
+            let shape = match kind {
+                Kind::Dict => Shape::Dict(Box::new(value_shape)),
+                Kind::Tuple => Shape::Tuple(vec![value_shape]),
+                other => Shape::Seq(other, Box::new(value_shape)),
+            };
             learn_element(base, shape, typed);
             return Ok(true);
         }
         return Ok(false);
     };
+    let element = target.element();
     // A collection that already holds more than one kind takes any value: the
-    // runtime writes the value's own tag beside its word.
-    if target.first() == Some(&Kind::Dynamic) {
+    // runtime writes the value's own tag beside its word, and a read of it is
+    // refused as `Dynamic`.
+    if element.is_mixed() {
         return Ok(false);
     }
     if let Some(value_shape) = shape_of(value, typed) {
-        let merged = widen_shape(&target, &value_shape);
-        if merged != target {
-            // A value of another kind makes the collection heterogeneous, so
-            // its element shape becomes `Dynamic` from that position on; the
+        if element.is_unknown() || widen_shape(&element, &value_shape) != element {
+            // An empty collection adopts the shape of what is written into it;
+            // a value of another kind makes that place mixed. Either way the
             // value's own kind is not the element kind, so it is not learned
             // as one.
-            set_element(base, merged, typed);
+            set_element(base, target.stored(position, value_shape), typed);
             return Ok(true);
         }
     }
-    let mut changed = learn_operand(value, target[0], typed)?;
+    if element.is_unknown() {
+        return Ok(false);
+    }
+    let mut changed = learn_operand(value, element.kind(), typed)?;
     changed |= refine_element(base, target, typed);
     Ok(changed)
 }
 
-/// Replace a collection operand's element shape with a wider one.
-fn set_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> bool {
+/// Replace a collection operand's shape with a wider one.
+fn set_element(operand: &Operand, shape: Shape, typed: &mut Typed) -> bool {
     match operand {
         Operand::Temp(temp) => {
             if typed.elems.get(temp) == Some(&shape) {
@@ -2169,12 +2699,12 @@ fn set_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> bool {
     }
 }
 
-/// Tighten a recorded element shape to a longer, compatible one (`[List]`
-/// becomes `[List, Int]` once a non-empty inner list is seen).
-fn refine_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> bool {
+/// Tighten a recorded shape to a more specific, compatible one (`list of
+/// unsettled` becomes `list of int` once a non-empty inner list is seen).
+fn refine_element(operand: &Operand, shape: Shape, typed: &mut Typed) -> bool {
     match operand {
         Operand::Temp(temp) => match typed.elems.get(temp) {
-            Some(existing) if existing != &shape && shape.starts_with(existing) => {
+            Some(existing) if existing != &shape && shape.refines(existing) => {
                 typed.elems.insert(*temp, shape);
                 true
             }
@@ -2185,7 +2715,7 @@ fn refine_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> boo
             }
         },
         Operand::Var(var) => match typed.var_elems.get(var) {
-            Some(existing) if existing != &shape && shape.starts_with(existing) => {
+            Some(existing) if existing != &shape && shape.refines(existing) => {
                 typed.var_elems.insert(*var, shape);
                 true
             }
@@ -2199,13 +2729,10 @@ fn refine_element(operand: &Operand, shape: Vec<Kind>, typed: &mut Typed) -> boo
     }
 }
 
-/// Record that `dest` is a collection of `kind` whose elements are `shape`.
-fn learn_collection(
-    dest: Temp,
-    kind: Kind,
-    shape: Option<Vec<Kind>>,
-    typed: &mut Typed,
-) -> Result<bool, String> {
+/// Record that `dest` is a collection shaped `shape`, tightening a shape that
+/// is already recorded when the new one only says more.
+fn learn_collection(dest: Temp, shape: Shape, typed: &mut Typed) -> Result<bool, String> {
+    let kind = shape.kind();
     if let Some(existing) = typed.temps.get(&dest) {
         if *existing != kind {
             return Err(unsupported(&format!(
@@ -2217,22 +2744,25 @@ fn learn_collection(
         }
     }
     let mut changed = learn_temp(&mut typed.temps, dest, kind)?;
-    if let Some(shape) = shape {
-        match typed.elems.get(&dest) {
-            Some(existing) if *existing != shape => {
-                return Err(unsupported(&format!(
-                    "the {} in t{} holding {} and {} elements",
-                    kind.name(),
-                    dest,
-                    shape_name(existing),
-                    shape_name(&shape)
-                )))
-            }
-            Some(_) => {}
-            None => {
-                typed.elems.insert(dest, shape);
-                changed = true;
-            }
+    match typed.elems.get(&dest) {
+        Some(existing) if existing == &shape => {}
+        Some(existing) if shape.refines(existing) => {
+            typed.elems.insert(dest, shape);
+            changed = true;
+        }
+        Some(existing) if existing.refines(&shape) => {}
+        Some(existing) => {
+            return Err(unsupported(&format!(
+                "the {} in t{} holding {} and {} elements",
+                kind.name(),
+                dest,
+                shape_name(existing),
+                shape_name(&shape)
+            )))
+        }
+        None => {
+            typed.elems.insert(dest, shape);
+            changed = true;
         }
     }
     Ok(changed)
@@ -2711,7 +3241,7 @@ mod tests {
         assert_eq!(main.temps.get(&list_id.expect("a list")), Some(&Kind::List));
         assert_eq!(
             main.elems.get(&list_id.expect("a list")),
-            Some(&vec![Kind::Int])
+            Some(&Shape::list(Shape::Scalar(Kind::Int)))
         );
         assert_eq!(main.temps.get(&item_id.expect("an item")), Some(&Kind::Int));
     }
@@ -2755,7 +3285,10 @@ mod tests {
         let main = &typed.functions[0];
         let row = row_id.expect("a row");
         assert_eq!(main.temps.get(&row).copied(), Some(Kind::List));
-        assert_eq!(main.elems.get(&row), Some(&vec![Kind::Int]));
+        assert_eq!(
+            main.elems.get(&row),
+            Some(&Shape::list(Shape::Scalar(Kind::Int)))
+        );
         assert_eq!(
             main.temps.get(&cell_id.expect("a cell")).copied(),
             Some(Kind::Int)
@@ -2794,7 +3327,10 @@ mod tests {
         let main = &typed.functions[0];
         let items = items_id.expect("the items temporary");
         assert_eq!(main.temps.get(&items).copied(), Some(Kind::List));
-        assert_eq!(main.elems.get(&items).cloned(), Some(vec![Kind::Str]));
+        assert_eq!(
+            main.elems.get(&items).cloned(),
+            Some(Shape::list(Shape::Scalar(Kind::Str)))
+        );
     }
 
     /// `+` of two strings is the interpreter's one string arithmetic and
@@ -2878,7 +3414,7 @@ mod tests {
             );
             assert_eq!(
                 main.elems.get(&items).cloned(),
-                Some(vec![Kind::Int]),
+                Some(Shape::list(Shape::Scalar(Kind::Int))),
                 "{kind:?}"
             );
         }
@@ -2917,7 +3453,10 @@ mod tests {
         let typed = analyze(&program_of(vec![function])).expect("a store is in the slice");
         let main = &typed.functions[0];
         assert_eq!(main.vars.get(&VarId(0)), Some(&Kind::List));
-        assert_eq!(main.var_elems.get(&VarId(0)), Some(&vec![Kind::Int]));
+        assert_eq!(
+            main.var_elems.get(&VarId(0)),
+            Some(&Shape::list(Shape::Scalar(Kind::Int)))
+        );
     }
 
     #[test]
@@ -3038,7 +3577,7 @@ mod tests {
         assert_eq!(typed.functions[0].temps.get(&list), Some(&Kind::List));
         assert_eq!(
             typed.functions[0].elems.get(&list),
-            Some(&vec![Kind::Dynamic])
+            Some(&Shape::list(Shape::Mixed))
         );
     }
 
@@ -3096,7 +3635,10 @@ mod tests {
         let typed = analyze(&program_of(vec![function])).expect("a run-time set member");
         let set = set_id.expect("the set");
         assert_eq!(typed.functions[0].temps.get(&set), Some(&Kind::Set));
-        assert_eq!(typed.functions[0].elems.get(&set), Some(&vec![Kind::Int]));
+        assert_eq!(
+            typed.functions[0].elems.get(&set),
+            Some(&Shape::Seq(Kind::Set, Box::new(Shape::Scalar(Kind::Int))))
+        );
     }
 
     #[test]
@@ -3133,7 +3675,10 @@ mod tests {
         let typed = analyze(&program_of(vec![main, callee])).expect("shapes cross calls");
         // The caller's list describes the parameter, and the read through it
         // types both the scalar result and the call's destination.
-        assert_eq!(typed.functions[1].param_elems, vec![Some(vec![Kind::Int])]);
+        assert_eq!(
+            typed.functions[1].param_elems,
+            vec![Some(Shape::list(Shape::Scalar(Kind::Int)))]
+        );
         assert_eq!(typed.functions[1].result, Some(Kind::Int));
         assert_eq!(typed.functions[1].result_elems, None);
         assert_eq!(typed.functions[0].temps.get(&dest), Some(&Kind::Int));

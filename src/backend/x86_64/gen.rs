@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use super::analyze;
 use super::encode::*;
 use super::unsupported;
-use super::{builtin, Builtin, Kind, TypedProgram, MAX_ARGS};
+use super::{builtin, Builtin, Kind, Shape, TypedProgram, MAX_ARGS};
 use crate::ir::mir::*;
 use crate::runtime::{self, Target};
 use crate::scope::symbol::VarId;
@@ -475,10 +475,10 @@ fn dedup_dict(pairs: &[(Operand, Operand)]) -> Result<Vec<(Operand, Operand)>, S
 struct Gen {
     kinds: HashMap<Temp, Kind>,
     var_kinds: HashMap<VarId, Kind>,
-    /// The element shape of a collection temporary (see [`super::Typed`]).
-    elems: HashMap<Temp, Vec<Kind>>,
-    /// The element shape of a collection binding.
-    var_elems: HashMap<VarId, Vec<Kind>>,
+    /// The shape of what a collection temporary holds (see [`super::Typed`]).
+    elems: HashMap<Temp, Shape>,
+    /// The shape of what a collection binding holds.
+    var_elems: HashMap<VarId, Shape>,
     slots: HashMap<Temp, i32>,
     var_slots: HashMap<VarId, i32>,
     callees: HashMap<String, usize>,
@@ -533,19 +533,19 @@ impl Gen {
         }
     }
 
-    /// The first element kind of a collection operand, when the analyzer
-    /// settled one. `sort` needs it to pick the runtime's comparison.
+    /// The element kind of a collection operand, when the analyzer settled
+    /// one. `sort` needs it to pick the runtime's comparison.
     fn elem_kind(&self, operand: &Operand) -> Option<Kind> {
-        match operand {
-            Operand::Temp(temp) => self
-                .elems
-                .get(temp)
-                .and_then(|shape| shape.first().copied()),
-            Operand::Var(var) => self
-                .var_elems
-                .get(var)
-                .and_then(|shape| shape.first().copied()),
+        let shape = match operand {
+            Operand::Temp(temp) => self.elems.get(temp),
+            Operand::Var(var) => self.var_elems.get(var),
             _ => None,
+        }?;
+        let element = shape.element();
+        if element.is_unknown() {
+            None
+        } else {
+            Some(element.kind())
         }
     }
 
@@ -1461,6 +1461,51 @@ impl Gen {
                     .ok_or_else(|| unsupported(&format!("`{}` with no argument", name)))?;
                 self.round_call(code, data, arg, builtin)?;
             }
+            // `sqrt(x)` is the double's square root, and the answer is always a
+            // float: an int is converted to a double first, exactly as the
+            // interpreter's `as_f64` does. A negative value is the
+            // interpreter's `E111`, whose sentence quotes the value itself, so
+            // the runtime renders it, writes the sentence and exits 1 (a call
+            // carries no line, so the line clause is left out). A NaN is not
+            // negative -- `ucomisd` reports it unordered, which neither branch
+            // below takes -- and its root is a NaN.
+            Builtin::Sqrt => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`sqrt` with no argument"))?;
+                let site = self.next_site();
+                let root = format!("sqrt_root_{site}");
+                match self.kind(arg)? {
+                    Kind::Int => {
+                        self.load(code, data, arg);
+                        code.test_rr(RAX, RAX);
+                        code.jcc(CC_NS, &root);
+                        code.call("rt_sqrt_neg_int");
+                        code.label(&root);
+                        code.cvtsi2sd(XMM0, RAX);
+                    }
+                    Kind::Float => {
+                        self.load(code, data, arg);
+                        code.movq_xmm_gpr(XMM0, RAX);
+                        // `ucomisd` sets CF for a smaller left side, and both
+                        // CF and PF (parity) for an unordered pair.
+                        code.xorpd(XMM1, XMM1);
+                        code.ucomisd(XMM0, XMM1);
+                        code.jcc(CC_P, &root);
+                        code.jcc(CC_AE, &root);
+                        code.movq_gpr_xmm(RAX, XMM0);
+                        code.call("rt_sqrt_neg_float");
+                        code.label(&root);
+                    }
+                    // `analyze` refuses a non-numeric argument before this runs.
+                    other => {
+                        return Err(unsupported(&format!("`sqrt` of a {} value", other.name())))
+                    }
+                }
+                // A negative value never returns from the call above.
+                code.sqrtsd(XMM0, XMM0);
+                code.movq_gpr_xmm(RAX, XMM0);
+            }
             Builtin::Len => {
                 let arg = args
                     .first()
@@ -1578,6 +1623,150 @@ impl Gen {
                 }
                 code.mov_rr(RAX, R11);
                 code.call("rt_slice_seq");
+            }
+            // `contains(hay, needle)`: over text it is a byte scan for the
+            // needle's bytes, which is what the interpreter's `str::contains`
+            // does; over a collection it scans the stored `{ tag, word }` pairs
+            // (a dict, its key half) with the runtime's own equality, so a
+            // heterogeneous collection answers by each element's own tag.
+            Builtin::Contains => {
+                let hay = args
+                    .first()
+                    .ok_or_else(|| unsupported("`contains` with no value"))?;
+                let needle = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`contains` with no needle"))?;
+                let kind = self.kind(hay)?;
+                self.load(code, data, hay);
+                code.mov_rr(R11, RAX);
+                if kind == Kind::Str {
+                    self.load(code, data, needle);
+                    code.mov_rr(RDX, RAX);
+                } else {
+                    self.load_tagged(code, data, needle)?;
+                    // The equality helper wants the right tag in `rsi` as well.
+                    code.mov_rr(RSI, RDI);
+                }
+                code.mov_rr(RAX, R11);
+                code.call(match kind {
+                    Kind::Str => "rt_contains_str",
+                    Kind::Dict => "rt_contains_dict",
+                    _ => "rt_contains_seq",
+                });
+            }
+            // `join(xs, sep)`: the runtime walks the descriptor and spells each
+            // element by its stored tag -- an int, float, bool or string, the
+            // same spellings `print` uses -- joining them with the separator,
+            // so a heterogeneous collection joins too. Both kinds are settled
+            // by `analyze`.
+            Builtin::Join => {
+                let coll = args
+                    .first()
+                    .ok_or_else(|| unsupported("`join` with no collection"))?;
+                let sep = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`join` with no separator"))?;
+                self.load(code, data, coll);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, sep);
+                code.mov_rr(RDX, RAX);
+                code.mov_rr(RAX, R11);
+                code.call("rt_join_seq");
+            }
+            // `split(text, sep)`: the runtime scans for the separator's bytes
+            // and builds one string per piece, exactly the interpreter's
+            // `str::split`. An empty separator would split into grapheme
+            // clusters, which needs the syllable table: a literal one is
+            // refused here, and the runtime ends with a documented `E177` for
+            // one that only turns out empty when the program runs.
+            Builtin::Split => {
+                let text = args
+                    .first()
+                    .ok_or_else(|| unsupported("`split` with no text"))?;
+                let sep = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`split` with no separator"))?;
+                if let Operand::Const(Const::Str(literal)) = sep {
+                    if literal.is_empty() {
+                        return Err(unsupported(
+                            "split of text with an empty separator (its grapheme clusters need the Unicode tables)",
+                        ));
+                    }
+                }
+                self.load(code, data, text);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, sep);
+                code.mov_rr(RDX, RAX);
+                code.mov_rr(RAX, R11);
+                code.call("rt_split_str");
+            }
+            // `starts_with(text, part)` / `ends_with(text, part)`: the runtime
+            // compares the part's bytes with the text's at offset 0 or at
+            // `len(text) - len(part)`, which is the interpreter's
+            // `str::starts_with`/`str::ends_with`. A part longer than the text
+            // answers `False`, and an empty part `True`. Both kinds are
+            // settled by `analyze`.
+            Builtin::StartsWith | Builtin::EndsWith => {
+                let text = args
+                    .first()
+                    .ok_or_else(|| unsupported("`starts_with` with no text"))?;
+                let part = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`starts_with` with no part"))?;
+                self.load(code, data, text);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, part);
+                code.mov_rr(RDX, RAX);
+                code.mov_rr(RAX, R11);
+                code.call(match builtin {
+                    Builtin::StartsWith => "rt_starts_str",
+                    _ => "rt_ends_str",
+                });
+            }
+            // `replace(text, from, to)`: the runtime counts the non-overlapping
+            // occurrences of `from`, allocates the exact result and copies the
+            // pieces around each replacement -- the interpreter's
+            // `str::replace`. An empty `from` answers the text itself. All
+            // three kinds are settled by `analyze`.
+            Builtin::Replace => {
+                let text = args
+                    .first()
+                    .ok_or_else(|| unsupported("`replace` with no text"))?;
+                let from = args
+                    .get(1)
+                    .ok_or_else(|| unsupported("`replace` with nothing to find"))?;
+                let to = args
+                    .get(2)
+                    .ok_or_else(|| unsupported("`replace` with nothing to put in"))?;
+                self.load(code, data, text);
+                code.mov_rr(R11, RAX);
+                self.load(code, data, from);
+                code.mov_rr(RDX, RAX);
+                self.load(code, data, to);
+                code.mov_rr(RCX, RAX);
+                code.mov_rr(RAX, R11);
+                code.call("rt_replace_str");
+            }
+            // `enumerate(xs)`: the runtime builds one `(index, value)` tuple per
+            // element, copying each element's stored tag, and answers the list
+            // of them. `analyze` has already refused a string, whose clusters
+            // would need the Unicode tables.
+            // `trim(x)`: the runtime walks the bytes from both ends, drops
+            // every `char::is_whitespace` scalar it meets and answers a fresh
+            // string (`rt_trim_str`), which is the interpreter's `str::trim`.
+            Builtin::Trim => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`trim` with no argument"))?;
+                self.load(code, data, arg);
+                code.call("rt_trim_str");
+            }
+            Builtin::Enumerate => {
+                let arg = args
+                    .first()
+                    .ok_or_else(|| unsupported("`enumerate` with no argument"))?;
+                self.load(code, data, arg);
+                code.call("rt_enumerate_seq");
             }
             // `push`/`append`: the runtime's indexed write with the index set
             // to the current length is exactly "append at the end", and it
